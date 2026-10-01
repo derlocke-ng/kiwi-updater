@@ -21,17 +21,21 @@ if [[ $# -eq 0 ]]; then
     exec "$KIWI" update --all --system --quiet
 fi
 
-# the set of names root already knows about: the repo directory name, and the
-# NAME its manifest declares
+# The set of apps root already trusts. Asking kiwi itself is the only correct
+# answer: an app can be trusted because it is in the root-owned apps.list OR
+# because it comes from a catalog registered for root, and re-deriving that
+# here would drift from the real resolution. --no-sync keeps this offline, so
+# a privileged call never fetches anything.
 known() {
+    "$KIWI" list --porcelain --no-sync 2>/dev/null \
+        | awk -F'\t' '$2 ~ /system/ { print $1 }'
+    # names straight from the root-owned list, in case a repo has no manifest
     local url d
     [[ -r $SYS_LIST ]] || return 0
     while read -r url _; do
         [[ -z ${url:-} ]] && continue
         d="$(basename "${url%.git}")"
         printf '%s\n' "$d"
-        [[ -f "$SYS_REPOS/$d/kiwi.manifest" ]] &&
-            grep -E '^NAME=' "$SYS_REPOS/$d/kiwi.manifest" | head -1 | cut -d= -f2-
     done < <(grep -Ev '^[[:space:]]*(#|$)' "$SYS_LIST" 2>/dev/null || true)
 }
 

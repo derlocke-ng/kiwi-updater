@@ -10,7 +10,8 @@ No accounts, no store, no vendor. A catalog is a repo you can read, fork and
 send a pull request to.
 
 - **`kiwi`** — the CLI (needs only `git` + coreutils)
-- **`kiwi-gui`** — GTK4/libadwaita front-end, multi-select install/update/uninstall
+- **`kiwi-gui`** — the desktop app, **Kiwi Apps** in your app grid: search,
+  filter and browse the catalogs, with a detail view per app
 - **releases are git tags** — apps follow their latest version tag; untagged
   repos follow HEAD
 - **catalogs** — add as many as you like, managed through ordinary git
@@ -45,7 +46,7 @@ kiwi info kiwi-killswitch  # what it installs, and whether it needs root
 kiwi install <app>         # or --all
 kiwi update                # everything with a new release
 kiwi uninstall <app>       # --purge also drops its config
-kiwi-gui                   # the graphical front-end
+kiwi-gui                   # the desktop app ("Kiwi Apps")
 ```
 
 ## One app, one line — even when it needs root

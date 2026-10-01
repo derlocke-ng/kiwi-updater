@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=Kiwi Updater
-Comment=Install and update Kiwi Network tools from their git repos
+Name=Kiwi Apps
+Comment=Browse, install and update open-source apps from git catalogs
 Exec=kiwi-gui
-Icon=eu.kiwinetwork.KiwiUpdater
+Icon=system-software-install
 Terminal=false
 Categories=System;Settings;PackageManager;
-Keywords=update;install;git;kiwi;
+Keywords=update;install;software;apps;store;git;kiwi;

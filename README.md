@@ -188,10 +188,26 @@ nothing outside your home is ever written.
 | `kiwi-updater.timer` (user) | user | `kiwi update --all --user` every 6 h + a notification |
 | `kiwi-updater-system.timer` (opt-in) | root | `kiwi update --all --system` every 6 h, and self-updates the root copy |
 
-System **updates** are passwordless but all-or-nothing: a polkit rule authorizes
-one fixed-purpose root program that takes no arguments and always runs
-`kiwi update --all --system`, so nothing user-controlled reaches root. Installs
-and uninstalls of system apps still require authentication.
+### Root, and when you are asked for a password
+
+| | needs root | asks for a password |
+|---|---|---|
+| anything in the user scope | no | no |
+| **updating** a system app | yes | **no** — polkit authorises one fixed-purpose helper for local `wheel` users |
+| **installing** a system app | yes | yes |
+| **uninstalling** a system app | yes | yes |
+
+A plain `kiwi install` never touches root: the default install is entirely
+`~/.local`, and the system scope only exists if you set it up with
+`--with-system`. Only an app that declares `SCOPES=… system` needs it, and
+`kiwi info <app>` tells you why before you are asked.
+
+Passwordless system *updates* go through `/usr/local/libexec/kiwi-system-update`,
+which the polkit rule authorises by exact path. It takes app names but treats
+them as a **selection**: every name is checked against the root-owned
+`/etc/kiwi-updater/apps.list` and anything else is refused, so the worst a
+caller can ask for is an update of an app the administrator already trusts.
+With no names it updates everything, which is what the background timer wants.
 
 ## Notes
 

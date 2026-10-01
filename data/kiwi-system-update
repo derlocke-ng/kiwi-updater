@@ -1,6 +1,49 @@
 #!/usr/bin/env bash
-# kiwi-system-update — fixed-purpose root wrapper for passwordless system
-# updates. The polkit rule authorizes pkexec of THIS exact path only; it
-# takes no arguments and always runs the same code, so a wheel user starting
-# it can't influence what root does beyond "update all system apps".
-exec /usr/local/bin/kiwi update --all --system --quiet
+# kiwi-system-update — the one root entry point for system-app updates.
+#
+# The polkit rule authorises pkexec of THIS exact path for local wheel users,
+# so it must never become a way to run arbitrary things as root.
+#
+# It accepts app names, but treats them as a SELECTION rather than as input:
+# every name is checked against the root-owned system list before use, and
+# anything not already listed there is refused. The worst a caller can do is
+# update an app the administrator has already chosen to trust. With no names
+# it updates everything, which is the behaviour the background timer wants.
+set -euo pipefail
+
+KIWI=/usr/local/bin/kiwi
+SYS_LIST=/etc/kiwi-updater/apps.list
+SYS_REPOS=/var/lib/kiwi-updater/repos
+
+[[ -x $KIWI ]] || { echo "kiwi is not installed at $KIWI" >&2; exit 1; }
+
+if [[ $# -eq 0 ]]; then
+    exec "$KIWI" update --all --system --quiet
+fi
+
+# the set of names root already knows about: the repo directory name, and the
+# NAME its manifest declares
+known() {
+    local url d
+    [[ -r $SYS_LIST ]] || return 0
+    while read -r url _; do
+        [[ -z ${url:-} ]] && continue
+        d="$(basename "${url%.git}")"
+        printf '%s\n' "$d"
+        [[ -f "$SYS_REPOS/$d/kiwi.manifest" ]] &&
+            grep -E '^NAME=' "$SYS_REPOS/$d/kiwi.manifest" | head -1 | cut -d= -f2-
+    done < <(grep -Ev '^[[:space:]]*(#|$)' "$SYS_LIST" 2>/dev/null || true)
+}
+
+mapfile -t KNOWN < <(known)
+for want in "$@"; do
+    # no paths, no options, no shell metacharacters — a bare app name only
+    [[ $want =~ ^[A-Za-z0-9._-]+$ ]] || { echo "refusing name: $want" >&2; exit 2; }
+    ok=0
+    for k in ${KNOWN[@]+"${KNOWN[@]}"}; do
+        [[ $want == "$k" ]] && { ok=1; break; }
+    done
+    (( ok )) || { echo "not a system app on this machine: $want" >&2; exit 2; }
+done
+
+exec "$KIWI" update --system --quiet "$@"

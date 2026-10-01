@@ -99,15 +99,18 @@ user_install() {
     install -Dm755 "$SRC/bin/kiwi" "$USER_BIN/kiwi"
 
     if want_gui; then
-        say "installing kiwi-gui + desktop entry"
+        say "installing kiwi-gui + desktop entry + icon"
         install -Dm755 "$SRC/gui/kiwi-gui" "$USER_BIN/kiwi-gui"
         mkdir -p "$USER_APPS"
         # file name must match the GTK application id for GNOME Shell association
-        # The desktop entry names a themed icon rather than shipping a bitmap,
-        # so it follows whatever icon theme the user actually has.
         sed "s|^Exec=.*|Exec=$USER_BIN/kiwi-gui|" "$SRC/data/kiwi.desktop" \
             > "$USER_APPS/eu.kiwinetwork.KiwiUpdater.desktop"
         rm -f "$USER_APPS/kiwi-gui.desktop"   # pre-1.0 name
+        # one scalable icon rather than a pile of bitmaps
+        install -Dm644 "$SRC/data/icons/eu.kiwinetwork.KiwiUpdater.svg" \
+            "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps/eu.kiwinetwork.KiwiUpdater.svg"
+        command -v gtk-update-icon-cache >/dev/null 2>&1 && \
+            gtk-update-icon-cache -qtf "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor" 2>/dev/null || true
         command -v update-desktop-database >/dev/null 2>&1 && \
             update-desktop-database -q "$USER_APPS" 2>/dev/null || true
     else

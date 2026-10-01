@@ -508,6 +508,7 @@ class CatalogDialog(Adw.Dialog):
 class Window(Adw.ApplicationWindow):
     def __init__(self, app, kiwi):
         super().__init__(application=app, title="Kiwi Apps")
+        self.set_icon_name(APP_ID)
         self.kiwi = kiwi
         self.busy = False
         self._pulse = None

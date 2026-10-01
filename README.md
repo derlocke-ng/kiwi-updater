@@ -215,7 +215,11 @@ With no names it updates everything, which is what the background timer wants.
 - `kiwi check` exits `10` when updates are available (script-friendly).
 - `kiwi list` fetches app metadata the first time so it can show descriptions
   and components; `--no-sync` skips that.
-- Concurrent runs are prevented with per-scope lock files.
+- Concurrent runs are prevented with per-scope lock files. A command waits
+  briefly (`KIWI_LOCK_WAIT`, 20s) rather than failing instantly, since the
+  usual collision is the background timer; if it still cannot get the lock it
+  names the host and pid holding it. Every network git call is bounded by
+  `KIWI_NET_TIMEOUT` (180s) so a stalled fetch cannot hold the lock forever.
 - The GUI is a thin layer over `kiwi list --porcelain` — the CLI is the single
   source of truth.
 

@@ -6,6 +6,8 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/kiwi update --all --system --quiet
+# A stuck run must not hold the scope lock indefinitely.
+TimeoutStartSec=900
 Nice=10
 IOSchedulingClass=idle
 # hardening (installers still need broad write access, so keep it light)

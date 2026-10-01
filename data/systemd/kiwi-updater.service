@@ -5,5 +5,7 @@ After=network-online.target
 [Service]
 Type=oneshot
 ExecStart=%h/.local/bin/kiwi update --all --user --quiet --notify
+# A stuck run must not hold the scope lock indefinitely.
+TimeoutStartSec=900
 Nice=10
 IOSchedulingClass=idle

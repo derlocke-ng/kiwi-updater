@@ -10,7 +10,7 @@
 #   system — listed in /etc/kiwi-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-KIWI_VERSION=1.1.3
+KIWI_VERSION=1.2.0
 SELF="$(realpath "${BASH_SOURCE[0]}")"
 
 # systemd system services start without $HOME (set -u would abort at the
@@ -20,7 +20,29 @@ export HOME="${HOME:-/root}"
 # root-owned copy used for system-scope work (installed by 'install.sh --with-system');
 # escalating to it instead of $SELF means root never executes a user-writable file
 ROOT_KIWI="/usr/local/bin/kiwi"
-root_kiwi() { [[ -x $ROOT_KIWI ]] && echo "$ROOT_KIWI" || echo "$SELF"; }
+
+# NEVER returns $SELF. Running ~/.local/bin/kiwi as root would hand every
+# process running as you a path to root on the next privileged call, which is
+# the entire reason the root copy exists. If it is missing we offer to install
+# it properly instead of quietly doing the unsafe thing.
+root_kiwi() {
+    if [[ -x $ROOT_KIWI ]]; then
+        echo "$ROOT_KIWI"; return 0
+    fi
+    local repo="$USER_REPOS/kiwi-updater"
+    if [[ ! -f "$repo/install.sh" ]]; then
+        die "system apps need a root-owned copy of kiwi and the kiwi-updater
+checkout is missing. Set it up with:
+  curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system"
+    fi
+    info "This needs a root-owned copy of kiwi: root must never execute a file"
+    info "you can write, or anything running as you could edit it and become"
+    info "root on the next update. Installing it now — one password prompt."
+    as_root bash "$repo/install.sh" install --with-system >&2 ||
+        die "could not set up the system scope"
+    [[ -x $ROOT_KIWI ]] || die "the system scope did not install ($ROOT_KIWI is still missing)"
+    echo "$ROOT_KIWI"
+}
 
 # ---------- paths -----------------------------------------------------------
 USER_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/kiwi-updater"
@@ -39,12 +61,25 @@ SYS_PREFIX="/usr/local"
 
 MANIFEST="kiwi.manifest"
 LS_REMOTE_TIMEOUT=10
+# Every network git call is bounded. An unbounded clone or fetch on a flaky
+# link hangs the background timer, and because that run holds the scope lock,
+# every later kiwi command fails with "another instance is already running"
+# until the machine is rebooted. Observed in the field; this is the fix.
+NET_TIMEOUT="${KIWI_NET_TIMEOUT:-180}"
 
 # kiwi only ever reads PUBLIC repos — never prompt for credentials
 # (no terminal prompt, no askpass popup, no keyring credential helper)
 export GIT_TERMINAL_PROMPT=0
 unset GIT_ASKPASS SSH_ASKPASS 2>/dev/null || true
 git() { command git -c credential.helper= "$@"; }
+
+# git that talks to a remote: hard wall-clock cap, plus git's own stalled
+# transfer abort so a connection that goes quiet does not sit there.
+git_net() {
+    timeout --kill-after=10 "$NET_TIMEOUT" \
+        env GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=30 \
+        git -c credential.helper= "$@"
+}
 
 # ---------- output ----------------------------------------------------------
 QUIET=0
@@ -107,12 +142,12 @@ sync_catalogs() {
         [[ -z $url ]] && continue
         dir="$cdir/$(dir_name "$url")"
         if [[ -d "$dir/.git" ]]; then
-            { git -C "$dir" fetch --quiet origin 2>/dev/null &&
+            { git_net -C "$dir" fetch --quiet origin 2>/dev/null &&
               git -C "$dir" reset --hard --quiet origin/HEAD 2>/dev/null; } ||
                 warn "catalog sync failed, using cached copy: $url"
         else
             mkdir -p "$cdir"
-            git clone --quiet "$url" "$dir" 2>/dev/null || warn "cannot fetch catalog: $url"
+            git_net clone --quiet "$url" "$dir" 2>/dev/null || warn "cannot fetch catalog: $url"
         fi
     done < <(catalog_urls)
 }
@@ -166,7 +201,7 @@ sync_meta() { # url opts -> repo dir on stdout
     dir="$(meta_dir)/$(dir_name "$url")"
     if [[ ! -d "$dir/.git" ]]; then
         mkdir -p "$(dirname "$dir")"
-        git clone --quiet "$url" "$dir" 2>/dev/null || return 1
+        git_net clone --quiet "$url" "$dir" 2>/dev/null || return 1
     fi
     echo "$dir"
 }
@@ -343,14 +378,35 @@ resolve() { # name -> "url<TAB>opts"
 }
 
 acquire_lock() { # scope
-    local lock
-    if [[ $1 == system ]]; then
-        mkdir -p "$SYS_DATA_DIR"; lock="$SYS_DATA_DIR/lock"
-    else
-        mkdir -p "$USER_DATA_DIR"; lock="$USER_DATA_DIR/lock"
+    local lock dir me
+    if [[ $1 == system ]]; then dir="$SYS_DATA_DIR"; else dir="$USER_DATA_DIR"; fi
+    mkdir -p "$dir"; lock="$dir/lock"
+    me="$(hostname 2>/dev/null || echo unknown)"
+
+    # Open read-write rather than truncating: a plain > would wipe the holder's
+    # own record on the way to discovering we cannot have the lock, so we could
+    # never say who has it.
+    exec 9<>"$lock" || die "cannot open the lock file $lock"
+
+    # Wait a little before giving up. The overwhelmingly common collision is the
+    # background update timer firing while you type a command, and that is over
+    # in seconds — failing instantly turns a non-event into an error.
+    if ! flock -w "${KIWI_LOCK_WAIT:-20}" 9; then
+        local who host
+        who="$(head -1 "$lock" 2>/dev/null || true)"
+        host="${who%% *}"
+        if [[ -n $host && $host != "$me" ]]; then
+            die "another kiwi is holding the $1 lock on host '$host' ($who).
+Your home directory is shared between machines, so they share this lock too.
+Wait for that run to finish, or raise KIWI_LOCK_WAIT."
+        fi
+        die "another kiwi is already running ($1 scope)${who:+: $who}.
+The background update timer may have it; it normally finishes in seconds.
+Retry, or raise KIWI_LOCK_WAIT (currently ${KIWI_LOCK_WAIT:-20}s)."
     fi
-    exec 9>"$lock"
-    flock -n 9 || die "another kiwi instance is already running ($1 scope)"
+
+    # record who holds it, so the next caller can say something useful
+    printf '%s pid=%s started=%s\n' "$me" "$$" "$(date -Is 2>/dev/null)" > "$lock"
 }
 
 # 1 if the machine has a GTK4 stack (desktop), 0 on headless/server installs.
@@ -399,11 +455,11 @@ sync_repo() { # scope url opts -> clones + checks out the target ref, echoes rep
     if [[ ! -d "$dir/.git" ]]; then
         [[ -n $target ]] || die "cannot reach $url"
         mkdir -p "$(repos_dir "$scope")"
-        git clone --quiet "$url" "$dir"
+        git_net clone --quiet "$url" "$dir"
     fi
     if [[ -n $target ]]; then
         IFS=$'\t' read -r sha refname <<<"$target"
-        git -C "$dir" fetch --quiet --tags origin
+        git_net -C "$dir" fetch --quiet --tags origin
         git -C "$dir" -c advice.detachedHead=false checkout --quiet --force "$sha"
     fi
     echo "$dir"

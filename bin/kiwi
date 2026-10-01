@@ -10,7 +10,7 @@
 #   system — listed in /etc/kiwi-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-KIWI_VERSION=1.0.1
+KIWI_VERSION=1.0.2
 SELF="$(realpath "${BASH_SOURCE[0]}")"
 
 # systemd system services start without $HOME (set -u would abort at the
@@ -619,7 +619,7 @@ cmd_list() {
     (( nosync )) || sync_all_meta
 
     local url opts dir name comp comp_full ver desc scs lbl status target tsha tref sc
-    local found=0 inst miss
+    local found=0 inst miss any_root=0
     (( porcelain )) || printf '%s%-20s %-12s %-22s %-9s %-17s %s%s\n' \
         "$c_bold" NAME SCOPES COMPONENTS VERSION STATUS DESCRIPTION "$c_off"
     while IFS=$'\t' read -r url opts; do
@@ -635,7 +635,7 @@ cmd_list() {
         scs="$(app_scopes "$dir" "$opts")"
         [[ -z $scs ]] && scs="$(entry_opt "$opts" scope user)"
         lbl="$(scope_label $scs)"
-        [[ $scs == *system* ]] && lbl="$lbl*"
+        [[ $scs == *system* ]] && { lbl="$lbl*"; any_root=1; }
 
         inst=0; miss=0
         for sc in $scs; do
@@ -678,7 +678,8 @@ cmd_list() {
         fi
     done < <(app_entries)
     if (( found )); then
-        (( porcelain )) || log "${c_dim}* needs root for part of the install${c_off}"
+        (( porcelain )) || (( ! any_root )) || \
+            log "${c_dim}* needs root for part of the install${c_off}"
     else
         log "${c_dim}no apps configured — add one with: kiwi add <git-url>${c_off}"
     fi

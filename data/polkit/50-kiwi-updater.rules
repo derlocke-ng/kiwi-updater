@@ -1,0 +1,22 @@
+// kiwi-updater: let local admin users run the fixed-purpose system-update
+// wrapper without a password. pkexec of exactly this one root-owned program
+// is authorized — it takes no arguments and always runs
+// `kiwi update --all --system`, so nothing user-controlled reaches root.
+// Passwordless is safe ONLY because /usr/local/libexec/kiwi-system-update is
+// root-owned and not user-writable. Installs/uninstalls still require auth.
+// pkexec canonicalizes the program path. On Silverblue/Bluefin /usr/local is a
+// symlink to /var/usrlocal, so polkit sees /var/usrlocal/libexec/... — match
+// both so the rule fires on ostree and normal Fedora. subject.local not
+// required (VM/desktop sessions may report non-local); active + wheel is enough
+// because the target is root-owned, not user-writable, and takes no arguments.
+polkit.addRule(function(action, subject) {
+    if (!(subject.isInGroup("wheel") && subject.active))
+        return;
+    if (action.id == "org.freedesktop.policykit.exec") {
+        var p = action.lookup("program");
+        if (p == "/usr/local/libexec/kiwi-system-update" ||
+            p == "/var/usrlocal/libexec/kiwi-system-update") {
+            return polkit.Result.YES;
+        }
+    }
+});

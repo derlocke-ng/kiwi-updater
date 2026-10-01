@@ -1,0 +1,1121 @@
+#!/usr/bin/env python3
+"""kiwi-gui — browse, install and update apps from your kiwi catalogs.
+
+An explorer, not a checklist. The list is expected to grow into hundreds of
+small tools, so everything here is built around finding one: live search,
+category and status filters, sorting, and a detail view per app showing its
+screenshots, dependencies, and exactly what it installs.
+
+All data comes from the CLI (`kiwi list --porcelain`, `kiwi info --porcelain`),
+which stays the single source of truth. Images are read from the app's own
+cloned repo, so nothing here fetches from the network.
+"""
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import threading
+
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Gtk, Adw, Gio, GLib, GObject, Gdk, Pango  # noqa: E402
+
+APP_ID = "eu.kiwinetwork.KiwiUpdater"
+
+STATUS = {
+    "installed":        ("Installed",       "ok"),
+    "update-available": ("Update",          "upd"),
+    "partial":          ("Partly installed", "warn"),
+    "not-installed":    ("",                "dim"),
+    "unreachable":      ("Unreachable",     "warn"),
+}
+
+# Icon themes disagree about what exists. Papirus, for one, ships almost none of
+# the "*-symbolic" names that Adwaita does, so hard-coding them leaves every row
+# showing the generic fallback glyph — which reads as "broken app", not "no
+# icon". Each entry is a candidate list, best first, resolved against whatever
+# theme is actually in use.
+CATEGORY_ICON = {
+    "security":    ["security-high-symbolic", "security-high",
+                    "preferences-system-privacy", "changes-prevent"],
+    "network":     ["network-wireless-symbolic", "network-wireless",
+                    "network-workgroup", "network-transmit-receive"],
+    "media":       ["applications-multimedia-symbolic", "applications-multimedia",
+                    "multimedia-player"],
+    "development": ["applications-engineering-symbolic", "applications-development",
+                    "applications-engineering", "text-x-script"],
+    "office":      ["text-editor-symbolic", "accessories-text-editor",
+                    "text-editor", "applications-office"],
+    "files":       ["folder-symbolic", "folder", "system-file-manager"],
+    "desktop":     ["preferences-other-symbolic", "preferences-desktop",
+                    "preferences-system", "applications-graphics"],
+    "system":      ["system-software-install-symbolic", "system-software-install",
+                    "applications-system", "system-run"],
+}
+COMPONENT_ICON = (
+    ("gnome-extension", ["extension-symbolic", "application-x-addon",
+                         "extension", "preferences-desktop-theme"]),
+    ("daemon",          ["emblem-system-symbolic", "applications-system", "system-run"]),
+    ("service",         ["emblem-system-symbolic", "applications-system", "system-run"]),
+    ("gui",             ["application-x-executable-symbolic", "application-x-executable"]),
+    ("cli",             ["utilities-terminal-symbolic", "utilities-terminal", "terminal"]),
+)
+FALLBACK_ICON = ["application-x-executable-symbolic", "application-x-executable",
+                 "package-x-generic", "applications-other"]
+TINTS = 6
+
+_icon_cache = {}
+
+
+def best_icon(candidates):
+    """First candidate the running theme actually has."""
+    key = tuple(candidates)
+    if key in _icon_cache:
+        return _icon_cache[key]
+    display = Gdk.Display.get_default()
+    theme = Gtk.IconTheme.get_for_display(display) if display else None
+    chosen = candidates[-1]
+    for name in candidates:
+        if theme is None or theme.has_icon(name):
+            chosen = name
+            break
+    _icon_cache[key] = chosen
+    return chosen
+
+
+def ui_icon(*candidates):
+    """For chrome icons, where a missing glyph is merely ugly rather than wrong."""
+    return best_icon(list(candidates) + ["image-missing"])
+
+CSS = b"""
+.kiwi-pill { border-radius: 999px; padding: 1px 9px; font-size: 0.76em; font-weight: 700; }
+.kiwi-pill.ok   { background: alpha(@success_color, .20); color: @success_color; }
+.kiwi-pill.upd  { background: alpha(@accent_bg_color, .26); color: @accent_color; }
+.kiwi-pill.warn { background: alpha(@warning_color, .22); color: @warning_color; }
+.kiwi-pill.root { background: alpha(@warning_color, .18); color: @warning_color; }
+.kiwi-pill.dim  { background: alpha(@window_fg_color, .10); opacity: .75; }
+
+/* a coloured tile per category, so a long list is scannable by shape and hue
+   rather than by reading every line */
+.kiwi-tile { border-radius: 13px; min-width: 46px; min-height: 46px; }
+.kiwi-tile.c0 { background: alpha(@accent_bg_color,.20); color: @accent_color; }
+.kiwi-tile.c1 { background: alpha(@success_color,.20);   color: @success_color; }
+.kiwi-tile.c2 { background: alpha(@warning_color,.20);   color: @warning_color; }
+.kiwi-tile.c3 { background: alpha(@purple_3,.24);        color: @purple_2; }
+.kiwi-tile.c4 { background: alpha(@red_3,.20);           color: @red_2; }
+.kiwi-tile.c5 { background: alpha(@blue_3,.22);          color: @blue_2; }
+
+.kiwi-hero { border-radius: 16px; padding: 18px 20px;
+             background: alpha(@accent_bg_color,.13);
+             border: 1px solid alpha(@accent_bg_color,.22); }
+.kiwi-hero.plain { background: alpha(@window_fg_color,.05);
+                   border-color: alpha(@window_fg_color,.08); }
+.kiwi-hero-num   { font-size: 1.7em; font-weight: 800; }
+.kiwi-hero-lbl   { font-size: .82em; opacity: .7; }
+.kiwi-hero-icon  { color: @accent_color; }
+
+.kiwi-chip { border-radius: 999px; padding: 4px 14px; font-weight: 600; }
+.kiwi-section { font-size: .8em; font-weight: 800; opacity: .55;
+                margin: 16px 4px 6px 4px; letter-spacing: .06em; }
+.kiwi-bigtile { border-radius: 20px; min-width: 96px; min-height: 96px; }
+.kiwi-shot { border-radius: 10px; }
+.kiwi-card { border-radius: 14px; padding: 14px 14px 12px 14px;
+             background: alpha(@window_fg_color, .05);
+             border: 1px solid alpha(@window_fg_color, .07); }
+.kiwi-card:hover { background: alpha(@window_fg_color, .09); }
+.kiwi-card-title { font-weight: 700; }
+.kiwi-card-desc  { opacity: .7; font-size: .9em; }
+.kiwi-dep-ok  { color: @success_color; }
+.kiwi-dep-bad { color: @error_color; }
+"""
+
+def find_kiwi():
+    for c in (shutil.which("kiwi"),
+              os.path.expanduser("~/.local/bin/kiwi"),
+              "/usr/local/bin/kiwi",
+              os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "bin", "kiwi")):
+        if c and os.path.exists(c):
+            return os.path.realpath(c)
+    return None
+
+
+def pill(text, kind):
+    lbl = Gtk.Label(label=text, valign=Gtk.Align.CENTER)
+    lbl.add_css_class("kiwi-pill")
+    lbl.add_css_class(kind)
+    return lbl
+
+
+def icon_for(app):
+    """Category first — it says what the thing is *for*, which is what someone
+    scanning a long list is actually looking for. Components are the fallback."""
+    cat = app["category"].strip().lower()
+    if cat in CATEGORY_ICON:
+        return best_icon(CATEGORY_ICON[cat])
+    for key, names in COMPONENT_ICON:
+        if key in app["comp"]:
+            return best_icon(names)
+    return best_icon(FALLBACK_ICON)
+
+
+def tint_for(app):
+    cat = app["category"].strip().lower()
+    return "c%d" % (sum(ord(c) for c in cat) % TINTS if cat else 0)
+
+
+def tile(app, big=False):
+    """A tinted rounded tile with the icon centred inside it.
+
+    The image needs to expand and centre itself: a plain Gtk.Box lays its child
+    out at the start, so the icon sits in the corner of the tile and reads as a
+    broken glyph rather than an icon."""
+    img = Gtk.Image(icon_name=icon_for(app), pixel_size=48 if big else 26)
+    img.set_halign(Gtk.Align.CENTER)
+    img.set_valign(Gtk.Align.CENTER)
+    img.set_hexpand(True)
+    img.set_vexpand(True)
+    box = Gtk.Box()
+    box.append(img)
+    box.add_css_class("kiwi-bigtile" if big else "kiwi-tile")
+    box.add_css_class(tint_for(app))
+    box.set_halign(Gtk.Align.START)
+    box.set_valign(Gtk.Align.CENTER)
+    box.set_hexpand(False)
+    return box
+
+
+class App(GObject.Object):
+    """One app, as the CLI described it."""
+    __gtype_name__ = "KiwiApp"
+
+    def __init__(self, d):
+        super().__init__()
+        self.d = d
+
+    def __getitem__(self, k):
+        return self.d.get(k, "")
+
+    @property
+    def needs_root(self):
+        return "system" in self["scopes"].split()
+
+    @property
+    def is_installed(self):
+        return self["status"] in ("installed", "partial", "update-available")
+
+    def haystack(self):
+        return " ".join((self["name"], self["desc"], self["tags"],
+                         self["category"], self["comp"])).lower()
+
+
+class DetailDialog(Adw.Dialog):
+    """Everything about one app — including the parts that should make you
+    think twice: what it installs, what it needs, and why it wants root."""
+
+    def __init__(self, win, app):
+        super().__init__(title=app["name"])
+        self.set_content_width(720)
+        self.set_content_height(780)
+        self.win = win
+        self.app = app
+
+        self.box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18,
+                           margin_top=18, margin_bottom=24,
+                           margin_start=18, margin_end=18)
+        scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                      vexpand=True)
+        scroller.set_child(Adw.Clamp(child=self.box, maximum_size=680))
+
+        tb = Adw.ToolbarView(content=scroller)
+        header = Adw.HeaderBar()
+        self.action_btn = Gtk.Button()
+        self.action_btn.add_css_class("suggested-action")
+        self.action_btn.connect("clicked", self._on_action)
+        header.pack_end(self.action_btn)
+        self.remove_btn = Gtk.Button(label="Uninstall")
+        self.remove_btn.add_css_class("destructive-action")
+        self.remove_btn.connect("clicked", lambda *_: self._run("uninstall"))
+        header.pack_end(self.remove_btn)
+        tb.add_top_bar(header)
+        self.set_child(tb)
+
+        self._build_header()
+        self._placeholder = Gtk.Spinner(spinning=True, height_request=48)
+        self.box.append(self._placeholder)
+        threading.Thread(target=self._load, daemon=True).start()
+
+    def _build_header(self):
+        a = self.app
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18)
+        self.big_icon = tile(a, big=True)
+        self.big_icon.set_valign(Gtk.Align.START)
+        row.append(self.big_icon)
+
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, hexpand=True)
+        title = Gtk.Label(label=a["name"], xalign=0)
+        title.add_css_class("title-1")
+        col.append(title)
+        sub = Gtk.Label(label=a["desc"], xalign=0, wrap=True)
+        sub.add_css_class("dim-label")
+        col.append(sub)
+
+        chips = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        label, kind = STATUS.get(a["status"], ("", "dim"))
+        if label:
+            chips.append(pill(label.upper(), kind))
+        if a.needs_root:
+            chips.append(pill("NEEDS ROOT", "root"))
+        if a["category"]:
+            chips.append(pill(a["category"].upper(), "dim"))
+        col.append(chips)
+        row.append(col)
+        self.box.append(row)
+        self._sync_buttons()
+
+    def _sync_buttons(self):
+        st = self.app["status"]
+        self.action_btn.set_label(
+            "Update" if st == "update-available"
+            else "Complete install" if st == "partial"
+            else "Reinstall" if st == "installed" else "Install")
+        self.remove_btn.set_visible(self.app.is_installed)
+
+    def _on_action(self, *_):
+        self._run("update" if self.app["status"] == "update-available" else "install")
+
+    def _run(self, verb):
+        self.close()
+        self.win.run_action(verb, [self.app["name"]])
+
+    def _load(self):
+        try:
+            out = subprocess.run([self.win.kiwi, "info", "--porcelain", self.app["name"]],
+                                 capture_output=True, text=True, timeout=120).stdout
+        except Exception as e:  # noqa: BLE001
+            out = ""
+            GLib.idle_add(self.win.append_log, "info failed: %s\n" % e)
+        info = {}
+        for line in out.splitlines():
+            k, _, v = line.partition("=")
+            info[k] = v
+        GLib.idle_add(self._populate, info)
+
+    def _populate(self, info):
+        self.box.remove(self._placeholder)
+        rd = info.get("repo_dir", "")
+
+        icon = info.get("icon", "")
+        if icon and rd and os.path.exists(os.path.join(rd, icon)):
+            pic = Gtk.Image.new_from_file(os.path.join(rd, icon))
+            pic.set_pixel_size(96)
+            parent = self.big_icon.get_parent()
+            parent.insert_child_after(pic, None)
+            parent.remove(self.big_icon)
+            self.big_icon = pic
+
+        shots = [os.path.join(rd, p) for p in info.get("screenshots", "").split()]
+        shots = [p for p in shots if os.path.exists(p)]
+        if shots:
+            car = Adw.Carousel(allow_scroll_wheel=False)
+            car.set_size_request(-1, 320)
+            for p in shots:
+                pic = Gtk.Picture.new_for_filename(p)
+                pic.set_content_fit(Gtk.ContentFit.CONTAIN)
+                pic.add_css_class("kiwi-shot")
+                car.append(pic)
+            self.box.append(car)
+            if len(shots) > 1:
+                self.box.append(Adw.CarouselIndicatorDots(carousel=car))
+
+        facts = Adw.PreferencesGroup(title="About")
+        got = False
+        for key, label in (("version", "Version"), ("author", "Author"),
+                           ("license", "License"), ("category", "Category")):
+            if info.get(key):
+                facts.add(Adw.ActionRow(title=label, subtitle=info[key]))
+                got = True
+        if info.get("homepage"):
+            r = Adw.ActionRow(title="Homepage", subtitle=info["homepage"],
+                              activatable=True)
+            r.add_suffix(Gtk.Image(icon_name=ui_icon("adw-external-link-symbolic", "external-link", "go-jump")))
+            r.connect("activated", lambda *_: Gtk.UriLauncher(
+                uri=info["homepage"]).launch(self.win, None, None, None))
+            facts.add(r)
+            got = True
+        if got:
+            self.box.append(facts)
+
+        inst = Adw.PreferencesGroup(title="What it installs",
+                                    description=info.get("components") or None)
+        scopes = info.get("scopes", "").split()
+        if "user" in scopes:
+            inst.add(Adw.ActionRow(
+                title="Into your home directory",
+                subtitle="~/.local — no password needed, survives a system rebase"))
+        if "system" in scopes:
+            r = Adw.ActionRow(
+                title="Outside your home directory",
+                subtitle=info.get("root_reason")
+                or "installs files and services system-wide")
+            r.add_prefix(Gtk.Image(icon_name=ui_icon("dialog-warning-symbolic", "dialog-warning")))
+            r.add_suffix(pill("ROOT", "root"))
+            inst.add(r)
+        self.box.append(inst)
+
+        deps = info.get("depends", "").split()
+        if deps:
+            missing = set(info.get("depends_missing", "").split())
+            g = Adw.PreferencesGroup(
+                title="Needs",
+                description=("Something is missing — the installer may fail"
+                             if missing else "All present on this machine"))
+            for d in deps:
+                r = Adw.ActionRow(title=d)
+                ok = d not in missing
+                img = Gtk.Image(icon_name=ui_icon("object-select-symbolic", "object-select", "emblem-ok") if ok
+                                else ui_icon("dialog-warning-symbolic", "dialog-warning"))
+                img.add_css_class("kiwi-dep-ok" if ok else "kiwi-dep-bad")
+                r.add_suffix(img)
+                g.add(r)
+            self.box.append(g)
+
+        about = info.get("about", "")
+        if about and rd and os.path.exists(os.path.join(rd, about)):
+            try:
+                text = open(os.path.join(rd, about), encoding="utf-8",
+                            errors="replace").read()
+            except OSError:
+                text = ""
+            text = "\n".join(l for l in text.splitlines()
+                             if not l.strip().startswith(("```", "![", "[!", "|")))
+            text = text.strip()[:4000]
+            if text:
+                g = Adw.PreferencesGroup(title="Read me")
+                lbl = Gtk.Label(label=text, xalign=0, wrap=True, selectable=True,
+                                margin_top=10, margin_bottom=10,
+                                margin_start=10, margin_end=10)
+                lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+                lbl.add_css_class("dim-label")
+                g.add(Gtk.Frame(child=lbl))
+                self.box.append(g)
+
+        src = Adw.PreferencesGroup(title="Source")
+        r = Adw.ActionRow(title="Repository", subtitle=info.get("url", ""))
+        r.set_subtitle_lines(2)
+        src.add(r)
+        self.box.append(src)
+        return False
+
+
+class CatalogDialog(Adw.Dialog):
+    """Add, inspect and remove catalogs.
+
+    Catalogs are opt-in: nothing appears in the explorer until one is added.
+    That is a security property, not an oversight, so adding one says plainly
+    what it means rather than treating it as a bookmark."""
+
+    def __init__(self, win):
+        super().__init__(title="Catalogs")
+        self.set_content_width(620)
+        self.set_content_height(560)
+        self.win = win
+
+        self.box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18,
+                           margin_top=18, margin_bottom=18,
+                           margin_start=18, margin_end=18)
+        scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                      vexpand=True)
+        scroller.set_child(Adw.Clamp(child=self.box, maximum_size=580))
+        tb = Adw.ToolbarView(content=scroller)
+        tb.add_top_bar(Adw.HeaderBar())
+        self.set_child(tb)
+        self.reload()
+
+    def reload(self):
+        child = self.box.get_first_child()
+        while child:
+            nxt = child.get_next_sibling()
+            self.box.remove(child)
+            child = nxt
+
+        add = Adw.PreferencesGroup(
+            title="Add a catalog",
+            description="A catalog is a git repo listing apps. Adding one lets "
+                        "those apps run their own installers on this machine, "
+                        "and an app that declares the system scope runs its "
+                        "installer as root. Add catalogs you trust.")
+        self.entry = Adw.EntryRow(title="Catalog git URL")
+        self.entry.set_show_apply_button(True)
+        self.entry.connect("apply", lambda w: self._add(w.get_text().strip()))
+        add.add(self.entry)
+        self.box.append(add)
+
+        g = Adw.PreferencesGroup(title="Registered")
+        rows = 0
+        try:
+            out = subprocess.run([self.win.kiwi, "catalog", "list", "--porcelain"],
+                                 capture_output=True, text=True, timeout=60).stdout
+        except Exception as e:  # noqa: BLE001
+            out = ""
+            self.win.append_log("catalog list failed: %s\n" % e)
+        for line in out.splitlines():
+            p = line.split("\t")
+            if len(p) < 2:
+                continue
+            name, url = p[0], p[1]
+            count = p[2] if len(p) > 2 else "?"
+            desc = p[3] if len(p) > 3 else ""
+            row = Adw.ActionRow(title=GLib.markup_escape_text(name))
+            row.set_subtitle(GLib.markup_escape_text(
+                "%s app(s)  ·  %s" % (count, desc or url)))
+            row.set_subtitle_lines(2)
+            rm = Gtk.Button(icon_name=ui_icon("user-trash-symbolic", "user-trash"),
+                            valign=Gtk.Align.CENTER,
+                            tooltip_text="Remove this catalog")
+            rm.add_css_class("flat")
+            rm.add_css_class("error")
+            rm.connect("clicked", lambda _b, u=url, n=name: self._remove(u, n))
+            row.add_suffix(rm)
+            g.add(row)
+            rows += 1
+        if not rows:
+            g.add(Adw.ActionRow(
+                title="No catalogs yet",
+                subtitle="Nothing is listed until you add one"))
+        self.box.append(g)
+
+    def _add(self, url):
+        if not url:
+            return
+        self.entry.set_text("")
+        self.win.run_catalog(["catalog", "add", url], self)
+
+    def _remove(self, url, name):
+        dlg = Adw.AlertDialog(
+            heading="Remove %s?" % name,
+            body="Its apps disappear from the list. Anything already installed "
+                 "stays until you uninstall it.")
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("remove", "Remove")
+        dlg.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
+        dlg.connect("response", lambda _d, r: r == "remove"
+                    and self.win.run_catalog(["catalog", "remove", url], self))
+        dlg.present(self)
+
+
+class Window(Adw.ApplicationWindow):
+    def __init__(self, app, kiwi):
+        super().__init__(application=app, title="Kiwi Apps")
+        self.kiwi = kiwi
+        self.busy = False
+        self._pulse = None
+        self.set_default_size(980, 800)
+        self.set_size_request(360, 420)
+        self.narrow = False
+
+        self.store = Gio.ListStore(item_type=App)
+        self.filtered = Gtk.FilterListModel(
+            model=self.store, filter=Gtk.CustomFilter.new(self._match))
+        self.sorted = Gtk.SortListModel(
+            model=self.filtered, sorter=Gtk.CustomSorter.new(self._compare))
+
+        header = Adw.HeaderBar()
+        self.title = Adw.WindowTitle(title="Kiwi Apps", subtitle="")
+        header.set_title_widget(self.title)
+        self.btn_refresh = Gtk.Button(icon_name=ui_icon("view-refresh-symbolic", "view-refresh"),
+                                      tooltip_text="Refresh and check for updates")
+        self.btn_refresh.connect("clicked", lambda *_: self.refresh())
+        header.pack_start(self.btn_refresh)
+        self.btn_updateall = Gtk.Button(label="Update All")
+        self.btn_updateall.add_css_class("suggested-action")
+        self.btn_updateall.set_visible(False)
+        self.btn_updateall.connect("clicked", self._on_update_all)
+        header.pack_end(self.btn_updateall)
+        self.btn_catalogs = Gtk.Button(
+            icon_name=ui_icon("folder-remote-symbolic", "folder-remote",
+                              "application-rss+xml"),
+            tooltip_text="Catalogs — where apps come from")
+        self.btn_catalogs.connect("clicked",
+                                  lambda *_: CatalogDialog(self).present(self))
+        header.pack_start(self.btn_catalogs)
+
+        self.btn_log = Gtk.ToggleButton(icon_name=ui_icon("utilities-terminal-symbolic", "utilities-terminal"),
+                                        tooltip_text="Show output")
+        header.pack_end(self.btn_log)
+
+        self.search = Gtk.SearchEntry(placeholder_text="Search apps…", hexpand=True)
+        self.search.connect("search-changed", lambda *_: self._refilter())
+        sbar = Gtk.SearchBar(search_mode_enabled=True, show_close_button=False)
+        self.clamp_search = Adw.Clamp(child=self.search, maximum_size=780)
+        sbar.set_child(self.clamp_search)
+        sbar.connect_entry(self.search)
+
+        self.f_status = Gtk.DropDown.new_from_strings(
+            ["All apps", "Installed", "Updates", "Not installed"])
+        self.f_status.connect("notify::selected", lambda *_: self._refilter())
+        self.f_sort = Gtk.DropDown.new_from_strings(["Name", "Status", "Category"])
+        self.f_sort.set_selected(1)
+        self.f_sort.connect("notify::selected", lambda *_: self._resort())
+
+        filters = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+                          margin_start=12, margin_end=12, margin_bottom=8)
+        filters.append(self.f_status)
+        filters.append(Gtk.Box(hexpand=True))
+        self.sort_label = Gtk.Label(label="Sort")
+        self.sort_label.add_css_class("dim-label")
+        filters.append(self.sort_label)
+        filters.append(self.f_sort)
+
+        # Category chips rather than a dropdown: with dozens of tools the
+        # categories ARE the navigation, and a chip row shows what exists
+        # instead of hiding it behind a click.
+        if hasattr(Adw, "WrapBox"):
+            # packs chips at their natural width and wraps; FlowBox would force
+            # equal-width columns and waste half the row
+            self.chipbox = Adw.WrapBox(child_spacing=6, line_spacing=6,
+                                       margin_start=12, margin_end=12,
+                                       margin_bottom=10)
+        else:
+            self.chipbox = Gtk.FlowBox(
+                selection_mode=Gtk.SelectionMode.NONE, homogeneous=False,
+                row_spacing=6, column_spacing=6, min_children_per_line=1,
+                max_children_per_line=12, margin_start=12, margin_end=12,
+                margin_bottom=10)
+        self.category = ""
+        self._chips = []
+
+        # ---- hero ----
+        self.hero_icon = Gtk.Image(icon_name=ui_icon("view-grid-symbolic", "view-grid", "applications-other"), pixel_size=32)
+        self.hero_icon.add_css_class("kiwi-hero-icon")
+        self.hero_text = Gtk.Label(xalign=0, label="")
+        self.hero_text.add_css_class("title-2")
+        self.hero_sub = Gtk.Label(xalign=0, label="")
+        self.hero_sub.add_css_class("kiwi-hero-lbl")
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True,
+                      valign=Gtk.Align.CENTER)
+        col.append(self.hero_text)
+        col.append(self.hero_sub)
+        self.hero_btn = Gtk.Button(label="Update All", valign=Gtk.Align.CENTER)
+        self.hero_btn.add_css_class("suggested-action")
+        self.hero_btn.add_css_class("pill")
+        self.hero_btn.set_visible(False)
+        self.hero_btn.connect("clicked", self._on_update_all)
+        self.hero = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        self.hero.add_css_class("kiwi-hero")
+        self.hero.append(self.hero_icon)
+        self.hero.append(col)
+        self.hero.append(self.hero_btn)
+
+        self.gridbox = Gtk.FlowBox(
+            selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
+            min_children_per_line=1, max_children_per_line=8,
+            row_spacing=12, column_spacing=12, valign=Gtk.Align.START)
+        self.gridbox.bind_model(self.sorted, self._make_card)
+        self.gridbox.connect("child-activated",
+                             lambda _fb, ch: self._open(ch.get_child().app))
+
+        self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        self.listbox.add_css_class("boxed-list")
+        self.listbox.bind_model(self.sorted, self._make_row)
+        self.listbox.connect("row-activated", self._on_row_activated)
+        self.listbox.set_header_func(self._header)
+
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14,
+                        margin_top=14, margin_bottom=18,
+                        margin_start=12, margin_end=12)
+        inner.append(self.hero)
+        self.viewstack = Gtk.Stack()
+        self.viewstack.add_named(self.listbox, "rows")
+        self.viewstack.add_named(self.gridbox, "grid")
+        inner.append(self.viewstack)
+        scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                      vexpand=True)
+        # The grid wants room to add columns; the list wants a readable column.
+        self.clamp = Adw.Clamp(child=inner, maximum_size=1800)
+        scroller.set_child(self.clamp)
+
+        self.stack = Gtk.Stack()
+        self.stack.add_named(scroller, "list")
+        self.stack.add_named(Adw.StatusPage(
+            icon_name=ui_icon("system-search-symbolic", "system-search", "edit-find"), title="Nothing matches",
+            description="Try a different search, or clear the filters"), "empty")
+        empty = Adw.StatusPage(
+            icon_name=ui_icon("folder-download-symbolic", "folder-download"),
+            title="No apps yet",
+            description="Catalogs are opt-in — nothing shows up until you add one.")
+        empty_btn = Gtk.Button(label="Add a Catalog", halign=Gtk.Align.CENTER)
+        empty_btn.add_css_class("suggested-action")
+        empty_btn.add_css_class("pill")
+        empty_btn.connect("clicked", lambda *_: CatalogDialog(self).present(self))
+        empty.set_child(empty_btn)
+        self.stack.add_named(empty, "none")
+
+        self.logbuf = Gtk.TextBuffer()
+        self.logview = Gtk.TextView(buffer=self.logbuf, editable=False,
+                                    monospace=True, top_margin=6, left_margin=6)
+        logscroll = Gtk.ScrolledWindow(child=self.logview)
+        logscroll.set_size_request(-1, 190)
+        self.logrev = Gtk.Revealer(child=logscroll,
+                                   transition_type=Gtk.RevealerTransitionType.SLIDE_UP)
+        self.btn_log.bind_property("active", self.logrev, "reveal-child",
+                                   GObject.BindingFlags.BIDIRECTIONAL)
+
+        self.progress = Gtk.ProgressBar(visible=False)
+        self.toasts = Adw.ToastOverlay()
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        body.append(self.progress)
+        body.append(self.stack)
+        body.append(self.logrev)
+        self.toasts.set_child(body)
+
+        tb = Adw.ToolbarView(content=self.toasts)
+        tb.add_top_bar(header)
+        tb.add_top_bar(sbar)
+        self.clamp_filters = Adw.Clamp(child=filters, maximum_size=780)
+        self.clamp_chips = Adw.Clamp(child=self.chipbox, maximum_size=780)
+        tb.add_top_bar(self.clamp_filters)
+        tb.add_top_bar(self.clamp_chips)
+        self.set_content(tb)
+
+        # Below this width the row decorations stop helping and start hiding the
+        # name, so they go away and the row keeps only what it needs.
+        bp = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 720px"))
+        bp.connect("apply", lambda *_: self._set_narrow(True))
+        bp.connect("unapply", lambda *_: self._set_narrow(False))
+        self.add_breakpoint(bp)
+
+        self.refresh()
+
+    def _set_narrow(self, narrow):
+        self.narrow = narrow
+        self.sort_label.set_visible(not narrow)
+        self.viewstack.set_visible_child_name("rows" if narrow else "grid")
+        # the toolbar has to sit in the same column as the content, or the
+        # search box floats in the middle of a three-column grid
+        width = 780 if narrow else 1800
+        for c in (self.clamp, self.clamp_search, self.clamp_filters,
+                  self.clamp_chips):
+            c.set_maximum_size(width)
+        child = self.listbox.get_first_child()
+        while child:
+            for w in getattr(child, "optional", ()):
+                w.set_visible(not narrow)
+            child = child.get_next_sibling()
+
+    def _all(self):
+        return [self.store.get_item(i) for i in range(self.store.get_n_items())]
+
+    def _on_update_all(self, *_):
+        self.run_action("update", [a["name"] for a in self._all()
+                                   if a["status"] == "update-available"])
+
+    def _match(self, app, *_):
+        term = self.search.get_text().strip().lower()
+        if term and term not in app.haystack():
+            return False
+        sel = self.f_status.get_selected()
+        if sel == 1 and not app.is_installed:
+            return False
+        if sel == 2 and app["status"] != "update-available":
+            return False
+        if sel == 3 and app.is_installed:
+            return False
+        if self.category and app["category"] != self.category:
+            return False
+        return True
+
+    def _compare(self, a, b, *_):
+        mode = self.f_sort.get_selected()
+        if mode == 1:
+            order = {"update-available": 0, "partial": 1, "installed": 2,
+                     "not-installed": 3, "unreachable": 4}
+            ka = (order.get(a["status"], 9), a["name"].lower())
+            kb = (order.get(b["status"], 9), b["name"].lower())
+        elif mode == 2:
+            ka = (a["category"].lower() or "zzz", a["name"].lower())
+            kb = (b["category"].lower() or "zzz", b["name"].lower())
+        else:
+            ka, kb = (a["name"].lower(),), (b["name"].lower(),)
+        return -1 if ka < kb else (1 if ka > kb else 0)
+
+    def _refilter(self):
+        self.filtered.get_filter().changed(Gtk.FilterChange.DIFFERENT)
+        self._update_empty()
+        GLib.idle_add(self._set_narrow, self.narrow)
+
+    def _resort(self):
+        self.sorted.get_sorter().changed(Gtk.SorterChange.DIFFERENT)
+        self.listbox.invalidate_headers()
+
+    def _update_empty(self):
+        if self.store.get_n_items() == 0:
+            self.stack.set_visible_child_name("none")
+        else:
+            self.stack.set_visible_child_name(
+                "list" if self.sorted.get_n_items() else "empty")
+
+    # ------------------------------------------------------------------
+    # The app drawer.
+    #
+    # One presentation, not two. An earlier version grew a bespoke card grid
+    # for wide windows and hand-built rows for narrow ones; both had to
+    # re-implement spacing, ellipsizing and alignment that Adw.ActionRow
+    # already gets right, and they drifted apart at every size. A single
+    # boxed list inside a clamp is what GNOME itself does: it fills a narrow
+    # window and centres in a wide one, so there is nothing to tune per size.
+    # ------------------------------------------------------------------
+    def _action_button(self, app, compact=False):
+        """The one thing you can do to this app right now."""
+        st = app["status"]
+        btn = Gtk.Button(valign=Gtk.Align.CENTER, halign=Gtk.Align.END)
+        if st == "update-available":
+            btn.set_label("Update")
+            btn.add_css_class("suggested-action")
+            btn.connect("clicked", lambda *_: self.run_action("update", [app["name"]]))
+        elif st == "partial":
+            btn.set_label("Complete")
+            btn.add_css_class("suggested-action")
+            btn.connect("clicked", lambda *_: self.run_action("install", [app["name"]]))
+        elif st in ("not-installed", "unreachable"):
+            btn.set_label("Install")
+            btn.connect("clicked", lambda *_: self.run_action("install", [app["name"]]))
+        else:
+            if compact:
+                btn.set_label("Details")
+            else:
+                btn.set_icon_name(ui_icon("go-next-symbolic", "go-next"))
+            btn.add_css_class("flat")
+            btn.connect("clicked", lambda *_: self._open(app))
+        return btn
+
+    # A card is a fixed-width tile; the grid decides how many fit. Height comes
+    # from the content, but every card has the same structure — icon line, two
+    # lines of description, footer — so they line up without a hard-coded height
+    # and without leaving dead space in the short ones.
+    CARD_WIDTH = 290
+
+    def _make_card(self, app):
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
+                       width_request=self.CARD_WIDTH)
+        card.add_css_class("kiwi-card")
+        card.app = app
+
+        head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        head.append(tile(app))
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1,
+                       hexpand=True, halign=Gtk.Align.FILL,
+                       valign=Gtk.Align.CENTER)
+        text.append(self._text(app["name"], css="kiwi-card-title"))
+        text.append(self._text(app["category"] or app["comp"], css="kiwi-card-desc"))
+        head.append(text)
+        card.append(head)
+
+        desc = self._text(app["desc"], css="kiwi-card-desc", wrap=True, lines=2)
+        desc.set_vexpand(True)
+        desc.set_valign(Gtk.Align.START)
+        card.append(desc)
+
+        foot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        badges = self._badges(app)
+        badges.set_hexpand(True)
+        foot.append(badges)
+        foot.append(self._action_button(app, compact=True))
+        card.append(foot)
+        return card
+
+    @staticmethod
+    def _text(text, css=None, wrap=False, lines=-1):
+        lbl = Gtk.Label(label=text or "", xalign=0.0,
+                        halign=Gtk.Align.START, hexpand=True,
+                        ellipsize=Pango.EllipsizeMode.END)
+        if wrap:
+            lbl.set_wrap(True)
+            lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            lbl.set_lines(lines)
+        if css:
+            lbl.add_css_class(css)
+        return lbl
+
+    @staticmethod
+    def _badges(app):
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
+                      halign=Gtk.Align.START, valign=Gtk.Align.CENTER)
+        if app.needs_root:
+            box.append(pill("ROOT", "root"))
+        label, kind = STATUS.get(app["status"], ("", "dim"))
+        if label:
+            box.append(pill(label.upper(), kind))
+        return box
+
+    def _make_row(self, app):
+        row = Adw.ActionRow(title=GLib.markup_escape_text(app["name"]),
+                            activatable=True)
+        row.set_subtitle(GLib.markup_escape_text(app["desc"] or app["comp"]))
+        row.set_subtitle_lines(1)
+        row.app = app
+        row.add_prefix(tile(app))
+
+        row.optional = []
+        if app.needs_root:
+            p = pill("ROOT", "root")
+            row.add_suffix(p)
+            row.optional.append(p)
+        label, kind = STATUS.get(app["status"], ("", "dim"))
+        if label:
+            p = pill(label.upper(), kind)
+            row.add_suffix(p)
+            row.optional.append(p)
+        ver = Gtk.Label(label=app["ver"], valign=Gtk.Align.CENTER)
+        ver.add_css_class("numeric")
+        ver.add_css_class("dim-label")
+        row.add_suffix(ver)
+        row.optional.append(ver)
+
+        row.add_suffix(self._action_button(app))
+        for w in row.optional:
+            w.set_visible(not self.narrow)
+        return row
+
+    SECTION = {"update-available": "Updates", "partial": "Finish installing",
+               "installed": "Installed", "not-installed": "Discover",
+               "unreachable": "Unreachable"}
+
+    def _header(self, row, before):
+        """Group the list so it reads as sections rather than one long scroll."""
+        mode = self.f_sort.get_selected()
+        if mode == 1:
+            key = self.SECTION.get(row.app["status"], "Other")
+            prev = self.SECTION.get(before.app["status"], "Other") if before else None
+        elif mode == 2:
+            key = row.app["category"] or "Uncategorised"
+            prev = (before.app["category"] or "Uncategorised") if before else None
+        else:
+            row.set_header(None)
+            return
+        if key != prev:
+            lbl = Gtk.Label(label=key.upper(), xalign=0)
+            lbl.add_css_class("kiwi-section")
+            row.set_header(lbl)
+        else:
+            row.set_header(None)
+
+    def _resort_headers(self):
+        self.listbox.invalidate_headers()
+
+    def _on_row_activated(self, _lb, row):
+        self._open(row.app)
+
+    def _open(self, app):
+        DetailDialog(self, app).present(self)
+
+    def refresh(self):
+        if self.busy:
+            return
+        self.set_busy(True, "Checking for updates…")
+
+        def worker():
+            try:
+                out = subprocess.run([self.kiwi, "list", "--porcelain", "--check"],
+                                     capture_output=True, text=True, timeout=600).stdout
+            except Exception as e:  # noqa: BLE001
+                out = ""
+                GLib.idle_add(self.append_log, "refresh failed: %s\n" % e)
+            GLib.idle_add(self.populate, out)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def populate(self, porcelain):
+        self.store.remove_all()
+        cats, updates = set(), 0
+        for line in porcelain.splitlines():
+            p = line.split("\t")
+            if len(p) < 7:
+                continue
+            d = dict(name=p[0], scopes=p[1], comp=p[2], status=p[3], ver=p[4],
+                     url=p[5], desc=p[6],
+                     tref=p[7] if len(p) > 7 else "",
+                     category=p[8] if len(p) > 8 else "",
+                     tags=p[9] if len(p) > 9 else "",
+                     repo_dir=p[10] if len(p) > 10 else "")
+            if d["status"] == "update-available":
+                updates += 1
+            if d["category"]:
+                cats.add(d["category"])
+            self.store.append(App(d))
+
+        self._build_chips(sorted(cats))
+
+        n = self.store.get_n_items()
+        inst = sum(1 for a in self._all() if a.is_installed)
+        self.btn_updateall.set_visible(updates > 0)
+        self.hero_btn.set_visible(updates > 0)
+        if updates:
+            self.hero.remove_css_class("plain")
+            self.hero_icon.set_from_icon_name(ui_icon("software-update-available-symbolic", "software-update-available", "system-software-update"))
+            self.hero_text.set_label(
+                "%d update%s ready" % (updates, "" if updates == 1 else "s"))
+        else:
+            self.hero.add_css_class("plain")
+            self.hero_icon.set_from_icon_name(ui_icon("view-grid-symbolic", "view-grid", "applications-other"))
+            self.hero_text.set_label("Everything is up to date")
+        self.hero_sub.set_label(
+            "%d app%s available · %d installed" % (n, "" if n == 1 else "s", inst))
+        self.set_busy(False, "")
+        self.title.set_subtitle("%d app%s" % (n, "" if n == 1 else "s"))
+        self._refilter()
+        self._set_narrow(self.narrow)
+        return False
+
+    def _build_chips(self, cats):
+        for c in self._chips:
+            parent = c.get_parent()          # FlowBox wraps each child; WrapBox does not
+            self.chipbox.remove(parent if isinstance(parent, Gtk.FlowBoxChild) else c)
+        self._chips = []
+        counts = {}
+        for a in self._all():
+            counts[a["category"]] = counts.get(a["category"], 0) + 1
+        first = None
+        for label, value in [("All", "")] + [(c, c) for c in cats]:
+            n = len(self._all()) if value == "" else counts.get(value, 0)
+            btn = Gtk.ToggleButton(label="%s  %d" % (label, n))
+            btn.add_css_class("kiwi-chip")
+            if first is None:
+                first = btn
+            else:
+                btn.set_group(first)
+            btn.set_active(value == self.category)
+            btn.connect("toggled", self._on_chip, value)
+            self.chipbox.append(btn)
+            self._chips.append(btn)
+
+    def _on_chip(self, btn, value):
+        if btn.get_active() and self.category != value:
+            self.category = value
+            self._refilter()
+
+    def run_action(self, verb, names):
+        if self.busy or not names:
+            return
+        cmd = [self.kiwi, verb] + list(names)
+        self.btn_log.set_active(True)
+        self.set_busy(True, "%s %d app(s)…" % (verb.capitalize(), len(names)))
+
+        def worker():
+            GLib.idle_add(self.append_log,
+                          "\n$ %s\n" % " ".join(shlex.quote(c) for c in cmd))
+            rc = 1
+            try:
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, text=True)
+                for line in proc.stdout:
+                    GLib.idle_add(self.append_log, line)
+                rc = proc.wait()
+            except Exception as e:  # noqa: BLE001
+                GLib.idle_add(self.append_log, "%s\n" % e)
+            GLib.idle_add(self.after_action, rc, verb)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def run_catalog(self, args, dialog):
+        """Catalog changes alter where every app comes from, so the whole
+        listing is rebuilt afterwards."""
+        cmd = [self.kiwi] + args
+        self.btn_log.set_active(True)
+
+        def worker():
+            GLib.idle_add(self.append_log,
+                          "\n$ %s\n" % " ".join(shlex.quote(c) for c in cmd))
+            rc = 1
+            try:
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, text=True)
+                for line in proc.stdout:
+                    GLib.idle_add(self.append_log, line)
+                rc = proc.wait()
+            except Exception as e:  # noqa: BLE001
+                GLib.idle_add(self.append_log, "%s\n" % e)
+            GLib.idle_add(self._after_catalog, rc, dialog)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _after_catalog(self, rc, dialog):
+        self.toast("Catalogs updated" if rc == 0 else "Catalog change failed")
+        if dialog is not None:
+            dialog.reload()
+        self.refresh()
+        return False
+
+    def after_action(self, rc, verb):
+        self.set_busy(False, "")
+        self.toast("%s finished" % verb.capitalize() if rc == 0
+                   else "%s failed — see the output" % verb.capitalize())
+        self.refresh()
+        return False
+
+    def set_busy(self, busy, msg):
+        self.busy = busy
+        self.progress.set_visible(busy)
+        if busy and self._pulse is None:
+            self._pulse = GLib.timeout_add(120, self._do_pulse)
+        elif not busy and self._pulse is not None:
+            GLib.source_remove(self._pulse)
+            self._pulse = None
+        for w in (self.btn_refresh, self.btn_updateall):
+            w.set_sensitive(not busy)
+        if msg:
+            self.title.set_subtitle(msg)
+
+    def _do_pulse(self):
+        self.progress.pulse()
+        if not self.busy:
+            self._pulse = None
+            return False
+        return True
+
+    def append_log(self, text):
+        self.logbuf.insert(self.logbuf.get_end_iter(), text)
+        mark = self.logbuf.create_mark(None, self.logbuf.get_end_iter(), False)
+        self.logview.scroll_mark_onscreen(mark)
+        self.logbuf.delete_mark(mark)
+        return False
+
+    def toast(self, text):
+        self.toasts.add_toast(Adw.Toast.new(text))
+
+
+class Application(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID)
+
+    def do_startup(self):
+        Adw.Application.do_startup(self)
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+    def do_activate(self):
+        win = self.get_active_window()
+        if not win:
+            kiwi = find_kiwi()
+            if not kiwi:
+                dlg = Adw.AlertDialog(
+                    heading="kiwi not found",
+                    body="Install it first:\ncurl -fsSL https://raw.githubusercontent.com/"
+                         "derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash")
+                dlg.add_response("close", "Close")
+                tmp = Adw.ApplicationWindow(application=self)
+                dlg.connect("response", lambda *_: self.quit())
+                dlg.present(tmp)
+                return
+            win = Window(self, kiwi)
+        win.present()
+
+
+if __name__ == "__main__":
+    import signal
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    sys.exit(Application().run(None))

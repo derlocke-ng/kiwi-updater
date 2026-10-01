@@ -1,0 +1,987 @@
+#!/usr/bin/env bash
+# kiwi — git-based installer/updater for Kiwi Network tools on Fedora Silverblue
+# maintained by the Kiwi Network
+#
+# Apps are plain git repos containing a `kiwi.manifest` and an installer
+# script (default: install.sh) that supports: install | update | uninstall
+#
+# Scopes:
+#   user   — listed in ~/.config/kiwi-updater/apps.list, repos in ~/.local/share
+#   system — listed in /etc/kiwi-updater/apps.list,      repos in /var/lib
+set -euo pipefail
+
+KIWI_VERSION=1.0.0
+SELF="$(realpath "${BASH_SOURCE[0]}")"
+
+# systemd system services start without $HOME (set -u would abort at the
+# path definitions below) — root's user-scope paths are never used anyway
+export HOME="${HOME:-/root}"
+
+# root-owned copy used for system-scope work (installed by 'install.sh --with-system');
+# escalating to it instead of $SELF means root never executes a user-writable file
+ROOT_KIWI="/usr/local/bin/kiwi"
+root_kiwi() { [[ -x $ROOT_KIWI ]] && echo "$ROOT_KIWI" || echo "$SELF"; }
+
+# ---------- paths -----------------------------------------------------------
+USER_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/kiwi-updater"
+USER_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/kiwi-updater"
+USER_LIST="$USER_CONFIG_DIR/apps.list"
+USER_CATALOGS="$USER_CONFIG_DIR/catalogs.list"
+USER_REPOS="$USER_DATA_DIR/repos"
+USER_PREFIX="$HOME/.local"
+
+SYS_CONFIG_DIR="/etc/kiwi-updater"
+SYS_LIST="$SYS_CONFIG_DIR/apps.list"
+SYS_CATALOGS="$SYS_CONFIG_DIR/catalogs.list"
+SYS_DATA_DIR="/var/lib/kiwi-updater"
+SYS_REPOS="$SYS_DATA_DIR/repos"
+SYS_PREFIX="/usr/local"
+
+MANIFEST="kiwi.manifest"
+LS_REMOTE_TIMEOUT=10
+
+# kiwi only ever reads PUBLIC repos — never prompt for credentials
+# (no terminal prompt, no askpass popup, no keyring credential helper)
+export GIT_TERMINAL_PROMPT=0
+unset GIT_ASKPASS SSH_ASKPASS 2>/dev/null || true
+git() { command git -c credential.helper= "$@"; }
+
+# ---------- output ----------------------------------------------------------
+QUIET=0
+NOTIFY=0
+
+c_bold=$'\033[1m'; c_grn=$'\033[32m'; c_ylw=$'\033[33m'; c_red=$'\033[31m'; c_dim=$'\033[2m'; c_off=$'\033[0m'
+[[ -t 1 ]] || { c_bold=""; c_grn=""; c_ylw=""; c_red=""; c_dim=""; c_off=""; }
+
+log()  { (( QUIET )) || printf '%s\n' "$*"; }
+info() { (( QUIET )) || printf '%s::%s %s\n' "$c_bold" "$c_off" "$*"; }
+warn() { printf '%swarning:%s %s\n' "$c_ylw" "$c_off" "$*" >&2; }
+die()  { printf '%serror:%s %s\n' "$c_red" "$c_off" "$*" >&2; exit 1; }
+
+notify() { # summary body
+    (( NOTIFY )) || return 0
+    command -v notify-send >/dev/null 2>&1 || return 0
+    notify-send --app-name="Kiwi Updater" --icon=system-software-update "$1" "$2" 2>/dev/null || true
+}
+
+# ---------- helpers ---------------------------------------------------------
+as_root() {
+    if [[ $EUID -eq 0 ]]; then
+        "$@"
+    elif [[ -t 0 ]] && command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    elif command -v pkexec >/dev/null 2>&1; then
+        pkexec "$@"
+    else
+        die "need root privileges but neither sudo (tty) nor pkexec is available"
+    fi
+}
+
+list_file()  { [[ $1 == system ]] && echo "$SYS_LIST"   || echo "$USER_LIST"; }
+repos_dir()  { [[ $1 == system ]] && echo "$SYS_REPOS"  || echo "$USER_REPOS"; }
+prefix_for() { [[ $1 == system ]] && echo "$SYS_PREFIX" || echo "$USER_PREFIX"; }
+
+# scopes visible to the current invocation
+scopes() {
+    if [[ $EUID -eq 0 ]]; then echo system
+    elif [[ $SCOPE_FILTER == user ]]; then echo user
+    elif [[ $SCOPE_FILTER == system ]]; then echo system
+    else echo "user system"
+    fi
+}
+
+catalogs_dir() { [[ $EUID -eq 0 ]] && echo "$SYS_DATA_DIR/catalogs" || echo "$USER_DATA_DIR/catalogs"; }
+
+catalog_urls() {
+    local f files=()
+    [[ $EUID -eq 0 ]] && files=("$SYS_CATALOGS") || files=("$USER_CATALOGS" "$SYS_CATALOGS")
+    for f in "${files[@]}"; do
+        [[ -r $f ]] && grep -Ev '^[[:space:]]*(#|$)' "$f" 2>/dev/null
+    done | sort -u
+}
+
+# clone/refresh all registered catalog repos (best effort — offline is fine)
+sync_catalogs() {
+    local url _ dir cdir; cdir="$(catalogs_dir)"
+    while read -r url _; do
+        [[ -z $url ]] && continue
+        dir="$cdir/$(dir_name "$url")"
+        if [[ -d "$dir/.git" ]]; then
+            { git -C "$dir" fetch --quiet origin 2>/dev/null &&
+              git -C "$dir" reset --hard --quiet origin/HEAD 2>/dev/null; } ||
+                warn "catalog sync failed, using cached copy: $url"
+        else
+            mkdir -p "$cdir"
+            git clone --quiet "$url" "$dir" 2>/dev/null || warn "cannot fetch catalog: $url"
+        fi
+    done < <(catalog_urls)
+}
+
+# ---------------------------------------------------------------------------
+# An app declares which privilege scopes it needs; a catalog lists it ONCE.
+#
+# In the original design scope was a property of *which list the repo was in*,
+# so an app needing both halves — a root daemon plus a user GUI — had to be
+# listed twice, showed up twice, and could not be named unambiguously on the
+# command line. The two privilege domains themselves are real and stay: root
+# must never execute a file the user can write, so system apps are cloned as
+# root into /var/lib and user apps into ~/.local. What changes is who decides.
+# ---------------------------------------------------------------------------
+
+# where we clone purely to READ a manifest (never to execute a system install)
+meta_dir() { [[ $EUID -eq 0 ]] && echo "$SYS_REPOS" || echo "$USER_REPOS"; }
+
+# every app we know about, deduped, regardless of scope: "url<TAB>opts"
+app_entries() {
+    local f url opts d seen=" " c
+    {
+        for f in "$USER_LIST" "$SYS_LIST"; do
+            [[ -r $f ]] || continue
+            while read -r url opts; do
+                [[ -z ${url:-} ]] && continue
+                # an entry in the system list is itself a scope filter
+                [[ $f == "$SYS_LIST" && $opts != *scope=* ]] && opts="${opts:-} scope=system"
+                printf '%s\t%s\n' "$url" "${opts:-}"
+            done < <(grep -Ev '^[[:space:]]*(#|$)' "$f" 2>/dev/null || true)
+        done
+        for c in "$(catalogs_dir)"/*/; do
+            [[ -f "${c}apps.list" ]] || continue
+            while read -r url opts; do
+                [[ -z ${url:-} ]] && continue
+                printf '%s\t%s\n' "$url" "${opts:-}"
+            done < <(grep -Ev '^[[:space:]]*(#|$)' "${c}apps.list" 2>/dev/null || true)
+        done
+    } | while IFS=$'\t' read -r url opts; do
+        d="$(dir_name "$url")"
+        [[ $seen == *" $d "* ]] && continue      # local lists win over catalogs
+        seen+="$d "
+        printf '%s\t%s\n' "$url" "${opts:-}"
+    done
+}
+
+# clone/refresh just enough to read the manifest. Cheap, unprivileged, and the
+# only way to know what an app needs before deciding how to install it.
+sync_meta() { # url opts -> repo dir on stdout
+    local url="$1" opts="${2:-}" dir
+    dir="$(meta_dir)/$(dir_name "$url")"
+    if [[ ! -d "$dir/.git" ]]; then
+        mkdir -p "$(dirname "$dir")"
+        git clone --quiet "$url" "$dir" 2>/dev/null || return 1
+    fi
+    echo "$dir"
+}
+
+# which scopes this app actually wants, honouring a catalog/list filter
+app_scopes() { # dir opts
+    local dir="$1" opts="${2:-}" declared filter out=() sc
+    declared="$(manifest_get "$dir" SCOPES "$(manifest_get "$dir" SCOPE user)")"
+    [[ $declared == both || $declared == any ]] && declared="user system"
+    filter="$(entry_opt "$opts" scope "")"
+    for sc in $declared; do
+        [[ $sc == user || $sc == system ]] || continue
+        [[ -n $filter && $sc != "$filter" ]] && continue
+        out+=("$sc")
+    done
+    if [[ ${#out[@]} -eq 0 && -n $filter ]]; then
+        warn "$(basename "$dir"): asked for the $filter scope but its manifest declares '$declared'"
+    fi
+    echo "${out[*]:-}"
+}
+
+# Fetch every known app's metadata so listings can show what things actually
+# are. A catalog entry is just a URL — the description, components and scopes
+# all live in the app's own manifest, so browsing means having the manifests.
+# Clones are cached, so this is slow once and instant afterwards.
+sync_all_meta() {
+    local url opts n=0
+    while IFS=$'\t' read -r url opts; do
+        [[ -z $url ]] && continue
+        [[ -d "$(meta_dir)/$(dir_name "$url")/.git" ]] && continue
+        (( n == 0 )) && info "fetching app details (first run only)…"
+        n=$((n+1))
+        sync_meta "$url" "$opts" >/dev/null 2>&1 || warn "cannot reach $url"
+    done < <(app_entries)
+    (( n > 0 )) && info "fetched $n app(s)"
+    return 0
+}
+
+scope_label() { # "user system" -> "user+system"
+    local j="$*"
+    echo "${j// /+}"
+}
+
+# local list entries + catalog entries for a scope, as "url opts" lines
+raw_entries() { # scope
+    local f; f="$(list_file "$1")"
+    if [[ -r $f ]]; then grep -Ev '^[[:space:]]*(#|$)' "$f" 2>/dev/null || true; fi
+    local c url opts
+    for c in "$(catalogs_dir)"/*/; do
+        [[ -f "${c}apps.list" ]] || continue
+        while read -r url opts; do
+            [[ -z ${url:-} ]] && continue
+            [[ "$(entry_opt "${opts:-}" scope user)" == "$1" ]] && printf '%s %s\n' "$url" "${opts:-}"
+        done < <(grep -Ev '^[[:space:]]*(#|$)' "${c}apps.list" 2>/dev/null || true)
+    done
+}
+
+# print "url<TAB>opts" for every app of a scope, deduped (local list wins)
+entries() { # scope
+    local url opts d seen=" "
+    while read -r url opts; do
+        [[ -z $url ]] && continue
+        d="$(dir_name "$url")"
+        [[ $seen == *" $d "* ]] && continue
+        seen+="$d "
+        printf '%s\t%s\n' "$url" "${opts:-}"
+    done < <(raw_entries "$1")
+}
+
+dir_name() { # url -> repo directory name
+    local b; b="$(basename "$1")"
+    echo "${b%.git}"
+}
+
+entry_opt() { # opts key default   (opts: "key=val key=val")
+    local kv
+    for kv in $1; do
+        [[ $kv == "$2="* ]] && { echo "${kv#*=}"; return; }
+    done
+    echo "$3"
+}
+
+manifest_get() { # repo_dir key default
+    local v=""
+    [[ -f "$1/$MANIFEST" ]] && v="$(grep -E "^$2=" "$1/$MANIFEST" 2>/dev/null | head -1 | cut -d= -f2-)"
+    echo "${v:-$3}"
+}
+
+app_name() { # scope url -> manifest NAME if cloned, else dir name
+    local d; d="$(repos_dir "$1")/$(dir_name "$2")"
+    manifest_get "$d" NAME "$(dir_name "$2")"
+}
+
+is_installed() { # scope url
+    [[ -f "$(repos_dir "$1")/$(dir_name "$2")/.kiwi-installed" ]]
+}
+
+# marker records the installed commit plus whether GUI parts were installed
+# (the effective KIWI_GUI decision) — so listings and updates stay consistent
+write_marker() { # repo_dir
+    { local_head "$1"; echo "gui=$(effective_gui "$1")"; } > "$1/.kiwi-installed"
+}
+
+marker_gui() { # scope url -> 0 | 1 | "" (pre-0.5 markers have no flag)
+    grep -m1 '^gui=' "$(repos_dir "$1")/$(dir_name "$2")/.kiwi-installed" 2>/dev/null | cut -d= -f2
+}
+
+local_head() { # repo_dir
+    if git -C "$1" rev-parse HEAD 2>/dev/null; then return; fi
+    # fallback: read the refs by hand. git refuses repos owned by another
+    # user ("dubious ownership") — e.g. a regular user listing the root-owned
+    # system repos — but the files themselves are world-readable.
+    local head ref
+    head="$(cat "$1/.git/HEAD" 2>/dev/null)" || { echo "-"; return; }
+    if [[ $head == ref:* ]]; then
+        ref="${head#ref: }"
+        if [[ -f "$1/.git/$ref" ]]; then
+            cat "$1/.git/$ref"
+        else
+            awk -v r="$ref" '$2==r{print $1; exit}' "$1/.git/packed-refs" 2>/dev/null | grep . || echo "-"
+        fi
+    else
+        echo "$head"   # detached HEAD stores the commit sha directly
+    fi
+}
+
+# resolve the commit an app should be at: ref= pin > branch= > latest tag > HEAD
+remote_target() { # url opts -> "sha<TAB>refname"; empty output on failure
+    local url="$1" opts="${2:-}" out sha="" ref branch tag
+    out="$(timeout "$LS_REMOTE_TIMEOUT" git ls-remote --quiet "$url" 2>/dev/null)" || return 1
+    [[ -n $out ]] || return 1
+    ref="$(entry_opt "$opts" ref "")"
+    branch="$(entry_opt "$opts" branch "")"
+    if [[ -n $ref ]]; then
+        # prefer the peeled commit of an annotated tag
+        sha="$(awk -v r="$ref" '$2=="refs/tags/"r"^{}"{print $1;exit}' <<<"$out")"
+        [[ -n $sha ]] || sha="$(awk -v r="$ref" '$2=="refs/tags/"r || $2=="refs/heads/"r{print $1;exit}' <<<"$out")"
+        [[ -n $sha ]] && printf '%s\t%s\n' "$sha" "$ref"
+    elif [[ -n $branch ]]; then
+        sha="$(awk -v b="$branch" '$2=="refs/heads/"b{print $1;exit}' <<<"$out")"
+        [[ -n $sha ]] && printf '%s\t%s\n' "$sha" "$branch"
+    else
+        tag="$(awk '$2 ~ /^refs\/tags\// && $2 !~ /\^\{\}$/{sub("refs/tags/","",$2); print $2}' <<<"$out" | sort -V | tail -1)"
+        if [[ -n $tag ]]; then
+            sha="$(awk -v t="$tag" '$2=="refs/tags/"t"^{}"{print $1;exit}' <<<"$out")"
+            [[ -n $sha ]] || sha="$(awk -v t="$tag" '$2=="refs/tags/"t{print $1;exit}' <<<"$out")"
+            printf '%s\t%s\n' "$sha" "$tag"
+        else
+            awk '$2=="HEAD"{print $1"\tHEAD";exit}' <<<"$out"
+        fi
+    fi
+}
+
+# resolve a user-supplied name to "scope<TAB>url<TAB>opts"; empty if not found.
+# a name can exist in both scopes (e.g. kiwi-updater) — first scope wins,
+# --user/--system disambiguates.
+resolve() { # name -> "url<TAB>opts"
+    local url opts
+    while IFS=$'\t' read -r url opts; do
+        [[ -z $url ]] && continue
+        if [[ "$(dir_name "$url")" == "$1" ]]; then
+            printf '%s\t%s\n' "$url" "${opts:-}"; return 0
+        fi
+    done < <(app_entries)
+    # fall back to the manifest NAME, which needs a clone to read
+    while IFS=$'\t' read -r url opts; do
+        [[ -z $url ]] && continue
+        local d; d="$(meta_dir)/$(dir_name "$url")"
+        if [[ -d $d && "$(manifest_get "$d" NAME "")" == "$1" ]]; then
+            printf '%s\t%s\n' "$url" "${opts:-}"; return 0
+        fi
+    done < <(app_entries)
+    return 1
+}
+
+acquire_lock() { # scope
+    local lock
+    if [[ $1 == system ]]; then
+        mkdir -p "$SYS_DATA_DIR"; lock="$SYS_DATA_DIR/lock"
+    else
+        mkdir -p "$USER_DATA_DIR"; lock="$USER_DATA_DIR/lock"
+    fi
+    exec 9>"$lock"
+    flock -n 9 || die "another kiwi instance is already running ($1 scope)"
+}
+
+# 1 if the machine has a GTK4 stack (desktop), 0 on headless/server installs.
+# Deliberately NOT based on $DISPLAY — ssh sessions to desktops have none.
+gui_available() {
+    [[ -n ${KIWI_GUI:-} ]] && { echo "$KIWI_GUI"; return; }
+    if [[ -e /usr/lib64/girepository-1.0/Gtk-4.0.typelib ||
+          -e /usr/lib/girepository-1.0/Gtk-4.0.typelib ]]; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+
+# decide the GUI flavor (0/1) for an install/update:
+#   explicit --cli-only/--gui flag  >  recorded marker (updates keep flavor)
+#   >  auto-detect (GTK4 present?). Never upgrades a cli-only app to gui on
+#   update unless you ask, and never installs gui on a headless box.
+effective_gui() { # repo_dir
+    if [[ -n $GUI_CHOICE ]]; then echo "$GUI_CHOICE"; return; fi
+    local m; m="$(grep -m1 '^gui=' "$1/.kiwi-installed" 2>/dev/null | cut -d= -f2)"
+    [[ $m == 0 || $m == 1 ]] && { echo "$m"; return; }
+    gui_available
+}
+
+run_installer() { # scope repo_dir action
+    local scope="$1" dir="$2" action="$3"
+    local inst; inst="$(manifest_get "$dir" INSTALLER install.sh)"
+    [[ -f "$dir/$inst" ]] || die "installer '$inst' not found in $dir"
+    local gui; gui="$(effective_gui "$dir")"
+    info "running $inst $action ($scope scope, $([[ $gui == 1 ]] && echo with-gui || echo cli-only))"
+    ( cd "$dir" &&
+      env KIWI_SCOPE="$scope" \
+          KIWI_ACTION="$action" \
+          KIWI_APP_DIR="$dir" \
+          KIWI_PREFIX="$(prefix_for "$scope")" \
+          KIWI_GUI="$gui" \
+          bash "./$inst" "$action" )
+}
+
+sync_repo() { # scope url opts -> clones + checks out the target ref, echoes repo dir
+    local scope="$1" url="$2" opts="${3:-}"
+    local dir; dir="$(repos_dir "$scope")/$(dir_name "$url")"
+    local target sha refname
+    target="$(remote_target "$url" "$opts" || true)"
+    if [[ ! -d "$dir/.git" ]]; then
+        [[ -n $target ]] || die "cannot reach $url"
+        mkdir -p "$(repos_dir "$scope")"
+        git clone --quiet "$url" "$dir"
+    fi
+    if [[ -n $target ]]; then
+        IFS=$'\t' read -r sha refname <<<"$target"
+        git -C "$dir" fetch --quiet --tags origin
+        git -C "$dir" -c advice.detachedHead=false checkout --quiet --force "$sha"
+    fi
+    echo "$dir"
+}
+
+install_one() { # scope url opts
+    local scope="$1" url="$2" opts="${3:-}"
+    local action="install"
+    is_installed "$scope" "$url" && action="update"
+    local dir; dir="$(sync_repo "$scope" "$url" "$opts")"
+
+    # The manifest is the authority on which scopes an app needs; this is only
+    # a sanity check for a repo that changed its mind since it was listed.
+    local mscopes; mscopes="$(app_scopes "$dir" "$opts")"
+    [[ -n $mscopes && " $mscopes " != *" $scope "* ]] && \
+        warn "$(app_name "$scope" "$url"): manifest declares SCOPES=$mscopes, not $scope"
+
+    run_installer "$scope" "$dir" "$action"
+    write_marker "$dir"
+    info "${c_grn}$(app_name "$scope" "$url") ${action}ed${c_off} (${scope}, $(manifest_get "$dir" VERSION "?"))"
+}
+
+update_one() { # scope url opts   (appends to global UPDATED array)
+    local scope="$1" url="$2" opts="${3:-}"
+    local name; name="$(app_name "$scope" "$url")"
+    if ! is_installed "$scope" "$url"; then
+        log "${c_dim}skipping $name (not installed)${c_off}"
+        return 0
+    fi
+    local dir="$(repos_dir "$scope")/$(dir_name "$url")"
+    local before; before="$(local_head "$dir")"
+    sync_repo "$scope" "$url" "$opts" >/dev/null
+    if [[ "$(local_head "$dir")" == "$before" && ${FORCE:-0} -eq 0 ]]; then
+        log "$name is up to date"
+        return 0
+    fi
+    run_installer "$scope" "$dir" update
+    write_marker "$dir"
+    info "${c_grn}$name updated${c_off} to $(manifest_get "$dir" VERSION "?")"
+    UPDATED+=("$name")
+}
+
+uninstall_one() { # scope url purge
+    local scope="$1" url="$2" purge="$3"
+    local name; name="$(app_name "$scope" "$url")"
+    local dir="$(repos_dir "$scope")/$(dir_name "$url")"
+    if [[ -d $dir ]]; then
+        is_installed "$scope" "$url" && run_installer "$scope" "$dir" uninstall
+        rm -rf "$dir"
+        info "${c_grn}$name uninstalled${c_off}"
+    else
+        log "$name is not installed"
+    fi
+    if [[ $purge -eq 1 ]]; then
+        local f; f="$(list_file "$scope")"
+        local tmp; tmp="$(mktemp)"
+        grep -vF "$url" "$f" > "$tmp" || true
+        cat "$tmp" > "$f"; rm -f "$tmp"
+        info "removed $name from $f"
+    fi
+}
+
+# split requested names into per-scope url lists; escalate system work if needed
+# sets arrays: T_SCOPE T_URL T_OPTS
+collect_targets() { # all|names...
+    T_SCOPE=(); T_URL=(); T_OPTS=()
+    local list=() url opts line n dir scs sc
+    if [[ $1 == --all ]]; then
+        while IFS=$'\t' read -r url opts; do
+            [[ -z $url ]] && continue
+            list+=("$(printf '%s\t%s' "$url" "${opts:-}")")
+        done < <(app_entries)
+    else
+        for n in "$@"; do
+            line="$(resolve "$n")" || die "unknown app: $n (check 'kiwi list')"
+            list+=("$line")
+        done
+    fi
+    for line in "${list[@]}"; do
+        IFS=$'\t' read -r url opts <<<"$line"
+        dir="$(sync_meta "$url" "$opts")" || { warn "cannot reach $url"; continue; }
+        scs="$(app_scopes "$dir" "$opts")"
+        [[ -z $scs ]] && continue
+        for sc in $scs; do
+            # a scope filter on the invocation still narrows things
+            [[ -n $SCOPE_FILTER && $sc != "$SCOPE_FILTER" ]] && continue
+            T_SCOPE+=("$sc"); T_URL+=("$url"); T_OPTS+=("$opts")
+        done
+    done
+    [[ ${#T_URL[@]} -gt 0 ]] || die "no apps matched (is your apps.list empty?)"
+}
+
+dispatch() { # verb extra_flag
+    local verb="$1" i had_user=0 sys_names=()
+    for i in "${!T_URL[@]}"; do
+        [[ ${T_SCOPE[$i]} == user ]] && had_user=1
+        [[ ${T_SCOPE[$i]} == system && $EUID -ne 0 ]] && sys_names+=("$(app_name system "${T_URL[$i]}")")
+    done
+
+    if (( had_user )); then acquire_lock user; fi
+    if [[ $EUID -eq 0 ]]; then acquire_lock system; fi
+
+    local rc=0
+    UPDATED=()
+    for i in "${!T_URL[@]}"; do
+        [[ ${T_SCOPE[$i]} == system && $EUID -ne 0 ]] && continue
+        case "$verb" in
+            install)   install_one   "${T_SCOPE[$i]}" "${T_URL[$i]}" "${T_OPTS[$i]}" || rc=1 ;;
+            update)    update_one    "${T_SCOPE[$i]}" "${T_URL[$i]}" "${T_OPTS[$i]}" || rc=1 ;;
+            uninstall) uninstall_one "${T_SCOPE[$i]}" "${T_URL[$i]}" "${PURGE:-0}"   || rc=1 ;;
+        esac
+    done
+
+    # system UPDATES go through a fixed-purpose root wrapper when present:
+    # passwordless for local wheel users (polkit exec rule on that one path),
+    # and root only ever runs `update --all --system`. install/uninstall still
+    # require full auth. Updates are idempotent, so all-at-once is safe.
+    local sys_wrapper=/usr/local/libexec/kiwi-system-update
+    if [[ $verb == update && ${#sys_names[@]} -gt 0 && $EUID -ne 0 && -x $sys_wrapper ]]; then
+        info "updating all system apps (passwordless root wrapper)"
+        if pkexec "$sys_wrapper"; then
+            sys_names=()
+            info "${c_grn}system apps updated${c_off}"
+        else
+            warn "system update wrapper failed — falling back to direct escalation"
+        fi
+    fi
+
+    if [[ ${#sys_names[@]} -gt 0 ]]; then
+        # Say what root is for before asking for it. "Needs your password" with
+        # no reason is how people learn to type it without reading.
+        local i2 d2 why
+        for i2 in "${!T_URL[@]}"; do
+            [[ ${T_SCOPE[$i2]} == system ]] || continue
+            d2="$(meta_dir)/$(dir_name "${T_URL[$i2]}")"
+            why="$(manifest_get "$d2" ROOT_REASON "")"
+            [[ -n $why ]] && info "  ${c_bold}$(app_name system "${T_URL[$i2]}")${c_off} needs root: $why"
+        done
+        info "escalating for system apps: ${sys_names[*]}"
+        local extra=()
+        (( PURGE )) && extra+=(--purge)
+        (( FORCE )) && extra+=(--force)
+        [[ $GUI_CHOICE == 0 ]] && extra+=(--cli-only)
+        [[ $GUI_CHOICE == 1 ]] && extra+=(--gui)
+        as_root "$(root_kiwi)" "$verb" --system "${sys_names[@]}" "${extra[@]+"${extra[@]}"}" || rc=1
+    fi
+
+    if [[ $verb == update && ${#UPDATED[@]} -gt 0 ]]; then
+        notify "Apps updated" "$(printf '%s, ' "${UPDATED[@]}" | sed 's/, $//')"
+    fi
+
+    (( had_user )) && sync_app_folder
+    return $rc
+}
+
+# maintain a "Kiwi Tools" folder in the GNOME app grid, grouping every
+# installed Kiwi app that ships a desktop entry (org.kiwinetwork.*). Rebuilt
+# from what's actually present, so it self-heals on install/uninstall.
+# User scope + a live GNOME session only; a no-op everywhere else.
+sync_app_folder() {
+    [[ $EUID -eq 0 ]] && return 0
+    command -v gsettings >/dev/null 2>&1 || return 0
+    [[ -n ${DBUS_SESSION_BUS_ADDRESS:-} || -S "${XDG_RUNTIME_DIR:-/run/user/$UID}/bus" ]] || return 0
+
+    local appsdir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+    local schema="org.gnome.desktop.app-folders"
+    local path="/org/gnome/desktop/app-folders/folders/kiwi-tools/"
+    local ids=() f
+    for f in "$appsdir"/org.kiwinetwork.*.desktop; do
+        [[ -e $f ]] && ids+=("$(basename "$f")")
+    done
+
+    local children; children="$(gsettings get "$schema" folder-children 2>/dev/null)" || return 0
+
+    if [[ ${#ids[@]} -eq 0 ]]; then
+        # no Kiwi GUI apps left — drop the folder if we had it
+        if [[ $children == *"'kiwi-tools'"* ]]; then
+            gsettings reset-recursively "$schema.folder:$path" 2>/dev/null || true
+            gsettings set "$schema" folder-children \
+                "$(sed "s/'kiwi-tools', //; s/, 'kiwi-tools'//; s/'kiwi-tools'//" <<<"$children")" 2>/dev/null || true
+        fi
+        return 0
+    fi
+
+    local apps="[" first=1 id
+    for id in "${ids[@]}"; do (( first )) && first=0 || apps+=", "; apps+="'$id'"; done
+    apps+="]"
+    gsettings set "$schema.folder:$path" name 'Kiwi Tools' 2>/dev/null || return 0
+    gsettings set "$schema.folder:$path" apps "$apps" 2>/dev/null || true
+    gsettings set "$schema.folder:$path" translate false 2>/dev/null || true
+
+    if [[ $children != *"'kiwi-tools'"* ]]; then
+        if [[ $children == "@as []" || $children == "[]" ]]; then
+            gsettings set "$schema" folder-children "['kiwi-tools']" 2>/dev/null || true
+        else
+            gsettings set "$schema" folder-children "${children%]}, 'kiwi-tools']" 2>/dev/null || true
+        fi
+    fi
+}
+
+# ---------- commands --------------------------------------------------------
+cmd_list() {
+    local porcelain=$PORCELAIN check=0 nosync=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --porcelain) porcelain=1 ;;
+            --check)     check=1 ;;
+            --no-sync)   nosync=1 ;;
+            *) die "unknown option: $1" ;;
+        esac; shift
+    done
+    (( check )) && sync_catalogs
+    (( nosync )) || sync_all_meta
+
+    local url opts dir name comp comp_full ver desc scs lbl status target tsha tref sc
+    local found=0 inst miss
+    (( porcelain )) || printf '%s%-20s %-12s %-22s %-9s %-17s %s%s\n' \
+        "$c_bold" NAME SCOPES COMPONENTS VERSION STATUS DESCRIPTION "$c_off"
+    while IFS=$'\t' read -r url opts; do
+        [[ -z $url ]] && continue
+        found=1
+        dir="$(meta_dir)/$(dir_name "$url")"
+        name="$(manifest_get "$dir" NAME "$(dir_name "$url")")"
+        comp="$(manifest_get "$dir" COMPONENTS "$(manifest_get "$dir" TYPE "?")")"
+        ver="$(manifest_get "$dir" VERSION "-")"
+        comp_full="$comp"
+        (( ${#comp} > 22 )) && comp="${comp:0:21}…"
+        desc="$(manifest_get "$dir" DESCRIPTION "")"
+        scs="$(app_scopes "$dir" "$opts")"
+        [[ -z $scs ]] && scs="$(entry_opt "$opts" scope user)"
+        lbl="$(scope_label $scs)"
+        [[ $scs == *system* ]] && lbl="$lbl*"
+
+        inst=0; miss=0
+        for sc in $scs; do
+            if is_installed "$sc" "$url"; then inst=1; else miss=1; fi
+        done
+        tref=""
+        if (( inst )) && (( ! miss )); then
+            status="installed"
+        elif (( inst )); then
+            status="partial"
+        else
+            status="not-installed"
+        fi
+        if (( inst )); then
+            # a cli+gui app on a headless box really did only get the CLI
+            for sc in $scs; do
+                [[ $comp == *gui* && "$(marker_gui "$sc" "$url")" == 0 ]] && comp="$comp (cli-only)"
+            done
+            if (( check )); then
+                target="$(remote_target "$url" "$opts" || true)"
+                IFS=$'\t' read -r tsha tref <<<"$target"
+                if [[ -z ${tsha:-} ]]; then status="unreachable"
+                elif [[ $tsha != "$(local_head "$dir")" ]]; then status="update-available"; fi
+            fi
+        fi
+
+        if (( porcelain )); then
+            # porcelain carries the real values; truncation is for humans only
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$name" "$scs" "$comp_full" "$status" "$ver" "$url" "$desc" "${tref:-}" \
+                "$(manifest_get "$dir" CATEGORY "")" \
+                "$(manifest_get "$dir" TAGS "")" "$dir"
+        else
+            local col=""
+            [[ $status == update-available ]] && col="$c_ylw"
+            [[ $status == installed ]] && col="$c_grn"
+            [[ $status == partial ]] && col="$c_ylw"
+            printf '%-20s %-12s %-22s %-9s %s%-17s%s %s\n' \
+                "$name" "$lbl" "$comp" "$ver" "$col" "$status" "$c_off" "$desc"
+        fi
+    done < <(app_entries)
+    if (( found )); then
+        (( porcelain )) || log "${c_dim}* needs root for part of the install${c_off}"
+    else
+        log "${c_dim}no apps configured — add one with: kiwi add <git-url>${c_off}"
+    fi
+}
+
+cmd_search() { # term...
+    [[ $# -gt 0 ]] || die "usage: kiwi search <term>"
+    local term url opts dir name desc comp hits=0
+    term="$(printf '%s ' "$@")"; term="${term% }"
+    sync_catalogs
+    sync_all_meta
+    while IFS=$'\t' read -r url opts; do
+        [[ -z $url ]] && continue
+        dir="$(meta_dir)/$(dir_name "$url")"
+        name="$(manifest_get "$dir" NAME "$(dir_name "$url")")"
+        desc="$(manifest_get "$dir" DESCRIPTION "")"
+        comp="$(manifest_get "$dir" COMPONENTS "")"
+        # categories and tags are the whole point of tagging an app; leaving
+        # them out of search meant `kiwi search security` found nothing in a
+        # catalog full of Security-category tools
+        if printf '%s %s %s %s %s %s' "$name" "$desc" "$comp" \
+                "$(manifest_get "$dir" CATEGORY "")" \
+                "$(manifest_get "$dir" TAGS "")" "$url" \
+                | grep -qiF -- "$term"; then
+            hits=1
+            printf '%s%-20s%s %s\n' "$c_bold" "$name" "$c_off" "$desc"
+            printf '  %s%s%s\n' "$c_dim" "$url" "$c_off"
+        fi
+    done < <(app_entries)
+    (( hits )) || { log "nothing matched '$term'"; return 1; }
+}
+
+# which of an app's declared dependencies are actually present
+deps_missing() { # "a b c" -> missing ones
+    local d out=()
+    for d in $1; do command -v "$d" >/dev/null 2>&1 || out+=("$d"); done
+    echo "${out[*]:-}"
+}
+
+cmd_info() { # [--porcelain] name
+    local porcelain=0
+    [[ ${1:-} == --porcelain ]] && { porcelain=1; shift; }
+    [[ $# -eq 1 ]] || die "usage: kiwi info [--porcelain] <app>"
+    local line url opts dir scs sc
+
+    if (( porcelain )); then
+        line="$(resolve "$1")" || die "unknown app: $1"
+        IFS=$'\t' read -r url opts <<<"$line"
+        dir="$(sync_meta "$url" "$opts")" || die "cannot reach $url"
+        scs="$(app_scopes "$dir" "$opts")"
+        local deps; deps="$(manifest_get "$dir" DEPENDS "")"
+        printf 'name=%s\n'        "$(manifest_get "$dir" NAME "$(dir_name "$url")")"
+        printf 'description=%s\n' "$(manifest_get "$dir" DESCRIPTION "")"
+        printf 'version=%s\n'     "$(manifest_get "$dir" VERSION "-")"
+        printf 'components=%s\n'  "$(manifest_get "$dir" COMPONENTS "")"
+        printf 'scopes=%s\n'      "$scs"
+        printf 'root_reason=%s\n' "$(manifest_get "$dir" ROOT_REASON "")"
+        printf 'homepage=%s\n'    "$(manifest_get "$dir" HOMEPAGE "")"
+        printf 'license=%s\n'     "$(manifest_get "$dir" LICENSE "")"
+        printf 'category=%s\n'    "$(manifest_get "$dir" CATEGORY "")"
+        printf 'tags=%s\n'        "$(manifest_get "$dir" TAGS "")"
+        printf 'author=%s\n'      "$(manifest_get "$dir" AUTHOR "")"
+        printf 'depends=%s\n'     "$deps"
+        printf 'depends_missing=%s\n' "$(deps_missing "$deps")"
+        printf 'icon=%s\n'        "$(manifest_get "$dir" ICON "")"
+        printf 'screenshots=%s\n' "$(manifest_get "$dir" SCREENSHOTS "")"
+        printf 'about=%s\n'       "$(manifest_get "$dir" ABOUT README.md)"
+        printf 'repo_dir=%s\n'    "$dir"
+        printf 'url=%s\n'         "$url"
+        for sc in $scs; do
+            printf 'installed_%s=%s\n' "$sc" "$(is_installed "$sc" "$url" && echo 1 || echo 0)"
+        done
+        return 0
+    fi
+
+    line="$(resolve "$1")" || die "unknown app: $1"
+    IFS=$'\t' read -r url opts <<<"$line"
+    dir="$(sync_meta "$url" "$opts")" || die "cannot reach $url"
+    scs="$(app_scopes "$dir" "$opts")"
+    printf '%s%s%s\n' "$c_bold" "$(manifest_get "$dir" NAME "$(dir_name "$url")")" "$c_off"
+    printf '  %s\n\n' "$(manifest_get "$dir" DESCRIPTION "")"
+    printf '  %-12s %s\n' version    "$(manifest_get "$dir" VERSION "-")"
+    printf '  %-12s %s\n' components "$(manifest_get "$dir" COMPONENTS "$(manifest_get "$dir" TYPE "?")")"
+    printf '  %-12s %s\n' scopes     "$(scope_label $scs)"
+    printf '  %-12s %s\n' source     "$url"
+    local hp lic; hp="$(manifest_get "$dir" HOMEPAGE "")"; lic="$(manifest_get "$dir" LICENSE "")"
+    [[ -n $hp ]]  && printf '  %-12s %s\n' homepage "$hp"
+    [[ -n $lic ]] && printf '  %-12s %s\n' license  "$lic"
+    for sc in $scs; do
+        printf '  %-12s %s\n' "installed" \
+            "$(is_installed "$sc" "$url" && echo "yes ($sc)" || echo "no ($sc)")"
+    done
+    if [[ $scs == *system* ]]; then
+        printf '\n  %sThis app needs root.%s %s\n' "$c_ylw" "$c_off" \
+            "$(manifest_get "$dir" ROOT_REASON "it installs files and services outside your home directory")"
+    fi
+}
+
+cmd_check() {
+    sync_catalogs
+    local scope url opts dir n=0 target tsha tref
+    for scope in $(scopes); do
+        while IFS=$'\t' read -r url opts; do
+            [[ -z $url ]] && continue
+            is_installed "$scope" "$url" || continue
+            dir="$(repos_dir "$scope")/$(dir_name "$url")"
+            target="$(remote_target "$url" "$opts" || true)"
+            IFS=$'\t' read -r tsha tref <<<"$target"
+            if [[ -n ${tsha:-} && $tsha != "$(local_head "$dir")" ]]; then
+                log "${c_ylw}update available:${c_off} $(app_name "$scope" "$url") ($scope) -> $tref"
+                n=$((n+1))
+            fi
+        done < <(entries "$scope")
+    done
+    if (( n > 0 )); then
+        notify "Updates available" "$n app(s) can be updated"
+        log "$n update(s) available"
+        return 10
+    fi
+    log "everything is up to date"
+}
+
+cmd_add() {
+    local url="" system=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --system) system=1 ;;
+            -*) die "unknown option: $1" ;;
+            *) url="$1" ;;
+        esac; shift
+    done
+    [[ -n $url ]] || die "usage: kiwi add <git-url> [--system]"
+    local scope=user f
+    (( system )) && scope=system
+    f="$(list_file "$scope")"
+    if [[ $scope == system && $EUID -ne 0 ]]; then
+        as_root "$(root_kiwi)" add --system "$url"
+        return
+    fi
+    mkdir -p "$(dirname "$f")"; touch "$f"
+    grep -qF "$url" "$f" && die "already in $f"
+    echo "$url" >> "$f"
+    info "added $(dir_name "$url") to $scope list — install it with: kiwi install $(dir_name "$url")"
+}
+
+# a catalog may describe itself in catalog.manifest (NAME/DESCRIPTION/...)
+catalog_meta() { # dir key default
+    local v=""
+    [[ -f "$1/catalog.manifest" ]] && \
+        v="$(grep -E "^$2=" "$1/catalog.manifest" 2>/dev/null | head -1 | cut -d= -f2-)"
+    echo "${v:-$3}"
+}
+
+cmd_catalog() { # add <url> | list      (--system routes to the system file)
+    local sub="${1:-list}"; shift || true
+    case "$sub" in
+        add)
+            local url="${1:-}"
+            [[ -n $url ]] || die "usage: kiwi catalog add <git-url> [--system]"
+            local f="$USER_CATALOGS"
+            [[ $SCOPE_FILTER == system ]] && f="$SYS_CATALOGS"
+            if [[ $f == "$SYS_CATALOGS" && $EUID -ne 0 ]]; then
+                as_root "$(root_kiwi)" catalog add "$url" --system
+                return
+            fi
+            mkdir -p "$(dirname "$f")"; touch "$f"
+            grep -qF "$url" "$f" && die "catalog already registered in $f"
+            # A catalog is a list of repos whose install scripts you will run.
+            # Anything in it that declares the system scope runs as root. Say so
+            # once, plainly, at the only moment the decision is being made.
+            warn "a catalog lets its apps run their own installers on this machine,"
+            warn "and apps that declare the system scope run them as root."
+            warn "only add catalogs you trust: $url"
+            echo "$url" >> "$f"
+            sync_catalogs
+            local cd2; cd2="$(catalogs_dir)/$(dir_name "$url")"
+            info "added $(catalog_meta "$cd2" NAME "$(dir_name "$url")") — $(catalog_meta "$cd2" DESCRIPTION 'no description')"
+            info "its apps now show up in 'kiwi list'"
+            ;;
+        list)
+            local url2 d2 n2 ds2 apps2
+            while read -r url2 _; do
+                [[ -z ${url2:-} ]] && continue
+                d2="$(catalogs_dir)/$(dir_name "$url2")"
+                n2="$(catalog_meta "$d2" NAME "$(dir_name "$url2")")"
+                ds2="$(catalog_meta "$d2" DESCRIPTION '')"
+                apps2=0
+                [[ -f "$d2/apps.list" ]] && \
+                    apps2="$(grep -Evc '^[[:space:]]*(#|$)' "$d2/apps.list" 2>/dev/null || echo 0)"
+                if (( PORCELAIN )); then
+                    printf '%s\t%s\t%s\t%s\n' "$n2" "$url2" "$apps2" "$ds2"
+                else
+                    printf '%s%-24s%s %s\n' "$c_bold" "$n2" "$c_off" "$ds2"
+                    printf '  %s%s  ·  %s app(s)%s\n' "$c_dim" "$url2" "$apps2" "$c_off"
+                fi
+            done < <(catalog_urls)
+            ;;
+        remove)
+            local url="${1:-}"
+            [[ -n $url ]] || die "usage: kiwi catalog remove <git-url> [--system]"
+            local f="$USER_CATALOGS"
+            [[ $SCOPE_FILTER == system ]] && f="$SYS_CATALOGS"
+            if [[ $f == "$SYS_CATALOGS" && $EUID -ne 0 ]]; then
+                as_root "$(root_kiwi)" catalog remove "$url" --system
+                return
+            fi
+            [[ -f $f ]] && grep -qF "$url" "$f" || die "not registered in $f"
+            local tmp; tmp="$(mktemp)"
+            grep -vF "$url" "$f" > "$tmp" || true
+            cat "$tmp" > "$f"; rm -f "$tmp"
+            rm -rf "$(catalogs_dir)/$(dir_name "$url")"
+            info "catalog removed (installed apps stay until uninstalled)"
+            ;;
+        *) die "usage: kiwi catalog add|remove <git-url> [--system] | kiwi catalog list" ;;
+    esac
+}
+
+cmd_self_update() {
+    local line
+    if line="$(resolve kiwi-updater)"; then
+        IFS=$'\t' read -r scope url opts <<<"$line"
+        T_SCOPE=("$scope"); T_URL=("$url"); T_OPTS=("$opts")
+        dispatch update
+    else
+        die "kiwi-updater is not in any apps.list — reinstall via its install.sh"
+    fi
+}
+
+usage() {
+    cat <<EOF
+kiwi $KIWI_VERSION — install and update open-source apps from git catalogs
+
+  kiwi list [--check]        every app this machine knows about (--no-sync to skip fetching)
+  kiwi search <term>         find an app across all registered catalogs
+  kiwi info <app>            what it is, what it installs, whether it needs root
+  kiwi install <app>|--all   install (or re-install) an app
+  kiwi update [<app>]|--all  update everything that has a new release
+  kiwi uninstall <app>       remove it  (--purge also drops its config)
+  kiwi check                 exit 10 if anything has an update
+
+  kiwi add <git-url>         track one repo directly, without a catalog
+  kiwi catalog add <url>     register a catalog of apps
+  kiwi catalog list|remove   manage registered catalogs
+  kiwi sync                  refresh catalogs now
+  kiwi self-update           update kiwi itself
+
+Options: --user / --system (limit to one scope), --cli-only / --gui,
+         --purge, --force, --quiet, --notify
+
+An app declares the scopes it needs in its kiwi.manifest, so a catalog lists it
+once even when it has both a root service and a desktop component. Apps marked
+with * in 'kiwi list' need root for part of their install; 'kiwi info' says why.
+
+  user apps:      $USER_PREFIX   (no root, survives an ostree rebase)
+  system apps:    $SYS_PREFIX
+  user list:      $USER_LIST
+  system list:    $SYS_LIST
+  user catalogs:  $USER_CATALOGS
+  system catalogs:$SYS_CATALOGS
+EOF
+}
+
+# ---------- main ------------------------------------------------------------
+SCOPE_FILTER=""
+FORCE=0
+PURGE=0
+PORCELAIN=0
+GUI_CHOICE=""      # ""=auto/keep, 0=cli-only, 1=with-gui (install/update)
+ARGS=()
+CMD="${1:-}"; shift || true
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --user)     SCOPE_FILTER=user ;;
+        --system)   SCOPE_FILTER=system ;;
+        --quiet)    QUIET=1 ;;
+        --notify)   NOTIFY=1 ;;
+        --force)    FORCE=1 ;;
+        --purge)    PURGE=1 ;;
+        --porcelain) PORCELAIN=1 ;;
+        --cli-only|--no-gui) GUI_CHOICE=0 ;;
+        --gui|--with-gui)    GUI_CHOICE=1 ;;
+        *) ARGS+=("$1") ;;
+    esac
+    shift
+done
+
+command -v git >/dev/null 2>&1 || die "git is required (rpm-ostree install git)"
+
+case "$CMD" in
+    list)        cmd_list ${ARGS[@]+"${ARGS[@]}"} ;;
+    search)      cmd_search ${ARGS[@]+"${ARGS[@]}"} ;;
+    info|show)   cmd_info $( (( PORCELAIN )) && echo --porcelain || true ) ${ARGS[@]+"${ARGS[@]}"} ;;
+    check)       cmd_check ;;
+    add)         cmd_add ${ARGS[@]+"${ARGS[@]}"} $( [[ $SCOPE_FILTER == system ]] && echo --system || true ) ;;
+    catalog)     cmd_catalog ${ARGS[@]+"${ARGS[@]}"} ;;
+    sync)        sync_catalogs; sync_all_meta; info "catalogs synced" ;;
+    install)     sync_catalogs; collect_targets "${ARGS[@]:---all}"; dispatch install ;;
+    update)      sync_catalogs; collect_targets "${ARGS[@]:---all}"; dispatch update ;;
+    uninstall)   [[ ${#ARGS[@]} -gt 0 ]] || die "usage: kiwi uninstall <name...>"
+                 collect_targets "${ARGS[@]}"; dispatch uninstall ;;
+    self-update) cmd_self_update ;;
+    version)     echo "kiwi $KIWI_VERSION" ;;
+    ""|help|-h|--help) usage ;;
+    *)           die "unknown command: $CMD (see 'kiwi help')" ;;
+esac

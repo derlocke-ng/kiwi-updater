@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Kiwi Updater
+Comment=Install and update Kiwi Network tools from their git repos
+Exec=kiwi-gui
+Icon=eu.kiwinetwork.KiwiUpdater
+Terminal=false
+Categories=System;Settings;PackageManager;
+Keywords=update;install;git;kiwi;

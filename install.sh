@@ -133,7 +133,13 @@ user_install() {
     register_self "$USER_CONF/apps.list" "$USER_DATA/repos"
 
     say "done — try: kiwi list  |  kiwi add <git-url>  |  kiwi-gui"
-    (( WITH_SYSTEM )) || say "system scope (root apps) not set up — rerun with --with-system if needed"
+    # Report what is actually on the machine, not which flag this run was given.
+    # `kiwi update kiwi-updater` re-runs this installer without --with-system,
+    # so testing the flag announced "not set up" on every single update — even
+    # on a machine where the system scope had been installed as root.
+    if (( ! WITH_SYSTEM )) && ! system_present; then
+        say "system scope (root apps) not set up — rerun with --with-system if you need it"
+    fi
 }
 
 user_update() { user_install; }

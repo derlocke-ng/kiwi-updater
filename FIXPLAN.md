@@ -8,14 +8,19 @@ finding also names the function.
 
 ## Status — worked through in 1.3.0
 
-Phases 0 to 3 are implemented, one commit per finding, on top of `v1.2.1`.
-`tests/repro.sh` reports 22 × `ok` (the original 21 plus `F11b` and `S5`, added
-while fixing F11 and S5), and `shellcheck -S warning` is clean.
+Phases 0 to 4 are implemented, one commit per finding, on top of `v1.2.1`.
+`tests/repro.sh` reports 30 × `ok`: the original 21, plus `F11b` and `S5` added
+while fixing F11 and S5, plus `P1`–`P7` covering the Phase 4 features.
+`shellcheck -S warning` is clean and the version agrees in all three places.
 
-Phase 4 is deliberately **not** done: it is a list of improvements rather than
-of defects, and none of it is needed to make the findings above go away.
+One Phase 4 item is deliberately left alone: the *generated catalog index* at
+the end of item 5. The plan itself marks it "longer term", and it is a change
+to the catalog format rather than to kiwi, so it needs a design decision this
+plan did not make. Everything else in Phase 4 is done, including the three
+roadmap commands, `--dry-run`, `kiwi doctor`, `DEPENDS`, shallow and parallel
+metadata fetches, the argument handling, the small things and the docs.
 
-Two corrections to this plan, found while working through it:
+Three corrections to this plan, found while working through it:
 
 - The container package list was missing **gawk**. `fedora:latest` ships no
   `awk`, `remote_target` is built on `awk`, so in the container every app was
@@ -27,6 +32,12 @@ Two corrections to this plan, found while working through it:
   the caller executes. A missing root copy therefore ran
   `sudo ":: This needs a root-owned copy…"` with the path appended. Fixed with
   the rest of F5.
+- Phase 4's `--depth 1` for metadata clones is not free: `meta_dir()` and the
+  user scope's `repos_dir()` are the same directory, so a shallow metadata
+  clone *becomes* the clone an install runs from. Checking out an older tag or
+  a `ref=` pin then fails. The clone is deepened on demand instead, and `P7`
+  covers it — with a `file://` remote, because git silently ignores `--depth`
+  on local-path clones and the check would otherwise never see a shallow repo.
 
 ## What is solid, and should stay as it is
 

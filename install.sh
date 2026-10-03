@@ -106,6 +106,45 @@ system_present() {
     [[ -x "$SYS_BIN/kiwi" || -f "$SYS_UNIT_DIR/kiwi-updater-system.timer" ]]
 }
 
+# ---------------------------------------------------------------------------
+# The system half, done WITHOUT running this script as root.
+#
+# This file lives under ~/.local/share. Running it as root is exactly what the
+# split layout exists to prevent: anything running as the user could edit it
+# and own root on the next update — and with a cached sudo timestamp that
+# happens without even a prompt. The root-owned copy at $SYS_BIN/kiwi updates
+# itself from the root-owned clone in /var/lib instead.
+#
+# Bootstrap (--with-system) is the one documented exception: there is no
+# root-owned copy yet, so nothing else can create one, and it is password-gated.
+# ---------------------------------------------------------------------------
+system_update() {
+    if [[ -x /usr/local/libexec/kiwi-system-update ]] && command -v pkexec >/dev/null 2>&1; then
+        # the fixed-purpose wrapper — passwordless for active wheel sessions
+        pkexec /usr/local/libexec/kiwi-system-update kiwi-updater && return 0
+    fi
+    [[ -x "$SYS_BIN/kiwi" ]] && as_root "$SYS_BIN/kiwi" update --system kiwi-updater && return 0
+    say "could not update the root-owned copy of kiwi."
+    say "  a copy from 1.2.1 or older cannot update itself; re-run the bootstrap once:"
+    say "  curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system"
+    return 1
+}
+
+system_uninstall() {
+    if [[ -x "$SYS_BIN/kiwi" ]]; then
+        local args=(uninstall --system)
+        (( PURGE )) && args+=(--purge)
+        as_root "$SYS_BIN/kiwi" "${args[@]}" kiwi-updater
+        return
+    fi
+    # No root-owned kiwi left to ask, so the units and the polkit rule can only
+    # be removed by this script. One-shot, explicitly requested, and the
+    # recurring-update risk above does not apply.
+    say "no root-owned kiwi found — removing the remaining system files directly"
+    local root_args=(); (( PURGE )) && root_args+=(--purge)
+    as_root bash "$SELF" uninstall ${root_args[@]+"${root_args[@]}"}
+}
+
 # ---------------- user phase (default, no root) -------------------------------
 user_install() {
     say "installing kiwi to $USER_BIN"
@@ -246,20 +285,25 @@ case "$ACTION" in install|update|uninstall) ;; *)
 esac
 
 if [[ $EUID -eq 0 ]]; then
-    # invoked as root (system service self-update, or escalated below)
+    # invoked as root (the system service, or the bootstrap below)
     "root_$ACTION"
+elif (( WITH_SYSTEM )) && [[ $ACTION == install ]]; then
+    user_install
+    # Bootstrap: the ONLY path that runs this script as root, because no
+    # root-owned copy exists yet that could do it instead. Password-gated, and
+    # documented as the exception in the README.
+    say "setting up the system scope (root)"
+    as_root bash "$SELF" install
 else
     "user_$ACTION"
-    # touch the system scope only when explicitly asked, or interactively when
-    # it exists (a background self-update must never block on a password prompt;
-    # the root copy updates itself via its own timer anyway)
-    if (( WITH_SYSTEM )) || { [[ $ACTION != install && -t 0 ]] && system_present; }; then
-        say "handling system scope (root)"
-        # PURGE is 0 or 1 and never empty, so ${PURGE:+--purge} expanded on
-        # every single call: an uninstall without --purge still deleted
-        # /etc/kiwi-updater and /var/lib/kiwi-updater, taking the clones of
-        # every system app that was still installed with it.
-        root_args=(); (( PURGE )) && root_args+=(--purge)
-        as_root bash "$SELF" "$ACTION" ${root_args[@]+"${root_args[@]}"}
+    # Update and uninstall of the system half go through the root-owned copy —
+    # never this file. Asked for explicitly with --with-system, or implied
+    # interactively when the system scope is already there. A background
+    # self-update must never block on a password prompt, and the root copy
+    # updates itself from its own timer anyway.
+    if [[ $ACTION != install ]] &&
+       { (( WITH_SYSTEM )) || { [[ -t 0 ]] && system_present; }; }; then
+        say "handling the system scope (root)"
+        "system_$ACTION" || true
     fi
 fi

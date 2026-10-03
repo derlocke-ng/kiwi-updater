@@ -434,7 +434,9 @@ effective_gui() { # repo_dir
 run_installer() { # scope repo_dir action
     local scope="$1" dir="$2" action="$3"
     local inst; inst="$(manifest_get "$dir" INSTALLER install.sh)"
-    [[ -f "$dir/$inst" ]] || die "installer '$inst' not found in $dir"
+    # One unusable app must not abort the run: with --all that would mean the
+    # first broken repo stops every app after it from being updated.
+    [[ -f "$dir/$inst" ]] || { warn "installer '$inst' not found in $dir"; return 1; }
     local gui; gui="$(effective_gui "$dir")"
     info "running $inst $action ($scope scope, $([[ $gui == 1 ]] && echo with-gui || echo cli-only))"
     ( cd "$dir" &&
@@ -446,21 +448,23 @@ run_installer() { # scope repo_dir action
           bash "./$inst" "$action" )
 }
 
+# Every failure path RETURNS, and none of them die. This runs inside $(...),
+# where `die` exits only the subshell: the caller saw an empty directory, an
+# exit status it was not checking, and carried on to mark the app installed.
 sync_repo() { # scope url opts -> clones + checks out the target ref, echoes repo dir
     local scope="$1" url="$2" opts="${3:-}"
     local dir; dir="$(repos_dir "$scope")/$(dir_name "$url")"
     local target sha
     target="$(remote_target "$url" "$opts" || true)"
+    [[ -n $target ]] || { warn "cannot reach $url"; return 1; }
     if [[ ! -d "$dir/.git" ]]; then
-        [[ -n $target ]] || die "cannot reach $url"
-        mkdir -p "$(repos_dir "$scope")"
-        git_net clone --quiet "$url" "$dir"
+        mkdir -p "$(repos_dir "$scope")" || return 1
+        git_net clone --quiet "$url" "$dir" || { warn "clone failed: $url"; return 1; }
     fi
-    if [[ -n $target ]]; then
-        IFS=$'\t' read -r sha _ <<<"$target"
-        git_net -C "$dir" fetch --quiet --tags origin
-        git -C "$dir" -c advice.detachedHead=false checkout --quiet --force "$sha"
-    fi
+    IFS=$'\t' read -r sha _ <<<"$target"
+    git_net -C "$dir" fetch --quiet --tags origin || { warn "fetch failed: $url"; return 1; }
+    git -C "$dir" -c advice.detachedHead=false checkout --quiet --force "$sha" ||
+        { warn "cannot check out $sha in $dir"; return 1; }
     echo "$dir"
 }
 
@@ -468,7 +472,7 @@ install_one() { # scope url opts
     local scope="$1" url="$2" opts="${3:-}"
     local action="install"
     is_installed "$scope" "$url" && action="update"
-    local dir; dir="$(sync_repo "$scope" "$url" "$opts")"
+    local dir; dir="$(sync_repo "$scope" "$url" "$opts")" || return 1
 
     # The manifest is the authority on which scopes an app needs; this is only
     # a sanity check for a repo that changed its mind since it was listed.
@@ -476,9 +480,15 @@ install_one() { # scope url opts
     [[ -n $mscopes && " $mscopes " != *" $scope "* ]] && \
         warn "$(app_name "$scope" "$url"): manifest declares SCOPES=$mscopes, not $scope"
 
-    run_installer "$scope" "$dir" "$action"
+    # set -e does not apply inside a function called on the left of ||, which is
+    # exactly how dispatch calls this one. Check the step, or a failed installer
+    # gets a marker, a success line and exit 0.
+    run_installer "$scope" "$dir" "$action" || {
+        warn "$(app_name "$scope" "$url"): the $action step failed — not recording it as installed"
+        return 1
+    }
     write_marker "$dir"
-    info "${c_grn}$(app_name "$scope" "$url") ${action}ed${c_off} (${scope}, $(manifest_get "$dir" VERSION "?"))"
+    info "${c_grn}$(app_name "$scope" "$url") ${action%e}ed${c_off} (${scope}, $(manifest_get "$dir" VERSION "?"))"
 }
 
 update_one() { # scope url opts   (appends to global UPDATED array)
@@ -495,7 +505,10 @@ update_one() { # scope url opts   (appends to global UPDATED array)
         log "$name is up to date"
         return 0
     fi
-    run_installer "$scope" "$dir" update
+    run_installer "$scope" "$dir" update || {
+        warn "$name: the update step failed — keeping the recorded version, will retry next run"
+        return 1
+    }
     write_marker "$dir"
     info "${c_grn}$name updated${c_off} to $(manifest_get "$dir" VERSION "?")"
     UPDATED+=("$name")

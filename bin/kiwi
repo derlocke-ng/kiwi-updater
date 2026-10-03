@@ -34,9 +34,12 @@ root_kiwi() {
 checkout is missing. Set it up with:
   curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system"
     fi
-    info "This needs a root-owned copy of kiwi: root must never execute a file"
-    info "you can write, or anything running as you could edit it and become"
-    info "root on the next update. Installing it now — one password prompt."
+    # >&2, all of it: this function's stdout IS the program path the caller
+    # runs. Three info lines on stdout meant the caller executed
+    # `sudo ":: This needs a root-owned copy…"` with the path tacked on the end.
+    info "This needs a root-owned copy of kiwi: root must never execute a file" >&2
+    info "you can write, or anything running as you could edit it and become" >&2
+    info "root on the next update. Installing it now — one password prompt." >&2
     as_root bash "$repo/install.sh" install --with-system >&2 ||
         die "could not set up the system scope"
     [[ -x $ROOT_KIWI ]] || die "the system scope did not install ($ROOT_KIWI is still missing)"
@@ -626,7 +629,16 @@ dispatch() { # verb extra_flag
     local verb="$1" i had_user=0 sys_names=()
     for i in "${!T_URL[@]}"; do
         [[ ${T_SCOPE[$i]} == user ]] && had_user=1
-        [[ ${T_SCOPE[$i]} == system && $EUID -ne 0 ]] && sys_names+=("$(app_name system "${T_URL[$i]}")")
+        [[ ${T_SCOPE[$i]} == system && $EUID -ne 0 ]] || continue
+        # Updating or removing something requires it to be there in the first
+        # place. The default catalog lists an app with SCOPES=user system, so
+        # collecting every system target regardless meant a plain `kiwi update`
+        # on a default install announced "escalating for system apps" and asked
+        # for a password to touch a scope the machine does not even have.
+        if [[ $verb != install ]] && ! is_installed system "${T_URL[$i]}"; then
+            continue
+        fi
+        sys_names+=("$(app_name system "${T_URL[$i]}")")
     done
 
     if (( had_user )); then acquire_lock user; fi
@@ -680,7 +692,11 @@ dispatch() { # verb extra_flag
         (( FORCE )) && extra+=(--force)
         [[ $GUI_CHOICE == 0 ]] && extra+=(--cli-only)
         [[ $GUI_CHOICE == 1 ]] && extra+=(--gui)
-        as_root "$(root_kiwi)" "$verb" --system "${sys_names[@]}" "${extra[@]+"${extra[@]}"}" || rc=1
+        # Capture first. root_kiwi dies when it cannot provide a root-owned
+        # copy, and inside $(...) that exit leaves only the subshell — the
+        # caller went on to run `pkexec "" update --system …`.
+        local rk; rk="$(root_kiwi)" || return 1
+        as_root "$rk" "$verb" --system "${sys_names[@]}" "${extra[@]+"${extra[@]}"}" || rc=1
     fi
 
     if [[ $verb == update && ${#UPDATED[@]} -gt 0 ]]; then
@@ -949,7 +965,8 @@ cmd_add() {
     (( system )) && scope=system
     f="$(list_file "$scope")"
     if [[ $scope == system && $EUID -ne 0 ]]; then
-        as_root "$(root_kiwi)" add --system "$url"
+        local rk; rk="$(root_kiwi)" || return 1
+        as_root "$rk" add --system "$url"
         return
     fi
     mkdir -p "$(dirname "$f")"; touch "$f"
@@ -975,7 +992,8 @@ cmd_catalog() { # add <url> | list      (--system routes to the system file)
             local f="$USER_CATALOGS"
             [[ $SCOPE_FILTER == system ]] && f="$SYS_CATALOGS"
             if [[ $f == "$SYS_CATALOGS" && $EUID -ne 0 ]]; then
-                as_root "$(root_kiwi)" catalog add "$url" --system
+                local rk; rk="$(root_kiwi)" || return 1
+                as_root "$rk" catalog add "$url" --system
                 return
             fi
             mkdir -p "$(dirname "$f")"; touch "$f"
@@ -1016,7 +1034,8 @@ cmd_catalog() { # add <url> | list      (--system routes to the system file)
             local f="$USER_CATALOGS"
             [[ $SCOPE_FILTER == system ]] && f="$SYS_CATALOGS"
             if [[ $f == "$SYS_CATALOGS" && $EUID -ne 0 ]]; then
-                as_root "$(root_kiwi)" catalog remove "$url" --system
+                local rk; rk="$(root_kiwi)" || return 1
+                as_root "$rk" catalog remove "$url" --system
                 return
             fi
             [[ -f $f ]] && grep -qF "$url" "$f" || die "not registered in $f"

@@ -43,6 +43,29 @@ checkout is missing. Set it up with:
     echo "$ROOT_KIWI"
 }
 
+# The root copy is a separate file updated by its own timer, so the two can
+# drift. Read the version out of it rather than executing it — this runs on
+# ordinary commands and there is no reason to start a second process, let
+# alone a privileged path, just to print a number.
+root_version() {
+    [[ -r $ROOT_KIWI ]] || return 1
+    local v; v="$(sed -n 's/^KIWI_VERSION=//p' "$ROOT_KIWI" 2>/dev/null | head -1)"
+    [[ -n $v ]] || return 1
+    echo "$v"
+}
+
+# A root copy from 1.2.1 or earlier cannot self-update (it has no notion of a
+# local scope filter overruling the manifest), so skew there is not something
+# the timer will clear on its own. Say which command does.
+note_root_skew() {
+    (( QUIET )) && return 0
+    local rv; rv="$(root_version)" || return 0
+    [[ $rv != "$KIWI_VERSION" ]] || return 0
+    warn "the root-owned copy of kiwi is $rv; this one is $KIWI_VERSION."
+    warn "  a copy from 1.2.1 or older cannot update itself. Re-run the bootstrap once:"
+    warn "    curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system"
+}
+
 # ---------- paths -----------------------------------------------------------
 USER_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/kiwi-updater"
 USER_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/kiwi-updater"
@@ -175,6 +198,10 @@ app_entries() {
                 [[ -z ${url:-} ]] && continue
                 # an entry in the system list is itself a scope filter
                 [[ $f == "$SYS_LIST" && $opts != *scope=* ]] && opts="${opts:-} scope=system"
+                # mark it as coming from a list on THIS machine rather than from
+                # a catalog — app_scopes lets a local scope= filter overrule the
+                # manifest, and a catalog must not get that power
+                opts="${opts:-} local=1"
                 printf '%s\t%s\n' "$url" "${opts:-}"
             done < <(grep -Ev '^[[:space:]]*(#|$)' "$f" 2>/dev/null || true)
         done
@@ -217,6 +244,19 @@ app_scopes() { # dir opts
         out+=("$sc")
     done
     if [[ ${#out[@]} -eq 0 && -n $filter ]]; then
+        # A scope= filter on an entry in /etc/kiwi-updater/apps.list (or the
+        # user's own apps.list) is a decision about THIS machine, so it wins
+        # over what the app's manifest declares. Catalog entries do not get
+        # that power — there the manifest is the authority.
+        #
+        # Without this the root-owned kiwi could never update itself: its entry
+        # in the system list asks for the system scope, its manifest declares
+        # SCOPES=user, the intersection was empty, and the system timer failed
+        # every six hours with "no apps matched" while the copy running as root
+        # never received a single fix.
+        if [[ "$(entry_opt "$opts" local 0)" == 1 ]]; then
+            echo "$filter"; return 0
+        fi
         warn "$(basename "$dir"): asked for the $filter scope but its manifest declares '$declared'"
     fi
     echo "${out[*]:-}"
@@ -573,7 +613,13 @@ collect_targets() { # all|names...
             T_SCOPE+=("$sc"); T_URL+=("$url"); T_OPTS+=("$opts")
         done
     done
-    [[ ${#T_URL[@]} -gt 0 ]] || die "no apps matched (is your apps.list empty?)"
+    if [[ ${#T_URL[@]} -eq 0 ]]; then
+        # "nothing to do" is not a failure for --all. The system timer runs
+        # `update --all --system` on machines that legitimately have no system
+        # apps, and dying there marked the unit failed every six hours.
+        [[ $1 == --all ]] && { log "nothing to do"; exit 0; }
+        die "no apps matched (see 'kiwi list')"
+    fi
 }
 
 dispatch() { # verb extra_flag
@@ -642,6 +688,7 @@ dispatch() { # verb extra_flag
     fi
 
     (( had_user )) && sync_app_folder
+    [[ $verb == update && $EUID -ne 0 ]] && note_root_skew
     return $rc
 }
 
@@ -1070,7 +1117,9 @@ case "$CMD" in
     uninstall)   [[ ${#ARGS[@]} -gt 0 ]] || die "usage: kiwi uninstall <name...>"
                  collect_targets "${ARGS[@]}"; dispatch uninstall ;;
     self-update) cmd_self_update ;;
-    version)     echo "kiwi $KIWI_VERSION" ;;
+    version)     echo "kiwi $KIWI_VERSION"
+                 root_v="$(root_version || true)"
+                 [[ -n ${root_v:-} ]] && echo "root-owned copy at $ROOT_KIWI: $root_v" ;;
     ""|help|-h|--help) usage ;;
     *)           die "unknown command: $CMD (see 'kiwi help')" ;;
 esac

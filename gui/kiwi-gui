@@ -164,11 +164,39 @@ def find_kiwi():
     return None
 
 
-def pill(text, kind):
+def pill(text, kind, tip=None):
     lbl = Gtk.Label(label=text, valign=Gtk.Align.CENTER)
     lbl.add_css_class("kiwi-pill")
     lbl.add_css_class(kind)
+    if tip:
+        lbl.set_tooltip_text(tip)
     return lbl
+
+
+# Which halves of an app are in. Only for apps that use the system scope: a
+# lone USER pill on every row would be noise, and for a user-only app the
+# status pill already says everything. For a dual-scope app this is the thing
+# you could not otherwise see anywhere in the GUI — and it is what makes
+# "partly installed" mean something specific.
+SCOPE_PILL = (
+    ("user",   "USER", "ok",   "in your home directory (~/.local)"),
+    ("system", "ROOT", "root", "outside your home directory, installed as root"),
+)
+
+
+def scope_pills(app):
+    if not app.needs_root:
+        return []
+    inst = set(app.installed_list)
+    out = []
+    for scope, label, kind, where in SCOPE_PILL:
+        if scope not in app.scope_list:
+            continue
+        if scope in inst:
+            out.append(pill(label, kind, "installed %s" % where))
+        else:
+            out.append(pill(label, "dim", "NOT installed — %s" % where))
+    return out
 
 
 def icon_for(app):
@@ -221,8 +249,18 @@ class App(GObject.Object):
         return self.d.get(k, "")
 
     @property
+    def scope_list(self):
+        return self["scopes"].split()
+
+    @property
+    def installed_list(self):
+        """The scopes this app is ACTUALLY installed in, which is not the same
+        as the scopes it uses — a dual-scope app is routinely half installed."""
+        return self["installed_scopes"].split()
+
+    @property
     def needs_root(self):
-        return "system" in self["scopes"].split()
+        return "system" in self.scope_list
 
     @property
     def is_installed(self):
@@ -288,8 +326,10 @@ class DetailDialog(Adw.Dialog):
         label, kind = STATUS.get(a["status"], ("", "dim"))
         if label:
             chips.append(pill(label.upper(), kind))
-        if a.needs_root:
-            chips.append(pill("NEEDS ROOT", "root"))
+        for p in scope_pills(a):
+            chips.append(p)
+        if a["pinned"]:
+            chips.append(pill("PINNED %s" % a["pinned"], "warn"))
         if a["category"]:
             chips.append(pill(a["category"].upper(), "dim"))
         col.append(chips)
@@ -311,6 +351,96 @@ class DetailDialog(Adw.Dialog):
     def _run(self, verb):
         self.close()
         self.win.run_action(verb, [self.app["name"]])
+
+    # ---- how this app tracks versions ------------------------------------
+    def _version_group(self, info):
+        """ref= on a list entry has always existed; `kiwi pin` made it a
+        command. It belongs here too: "stay on this version" is a decision you
+        make while looking at an app, not while editing a list file."""
+        g = Adw.PreferencesGroup(
+            title="Updates",
+            description="Pinned apps are left alone by updates until you unpin them.")
+        pinned = info.get("pinned", "")
+        if pinned:
+            r = Adw.ActionRow(title="Pinned",
+                              subtitle=esc("held at %s" % pinned))
+            b = Gtk.Button(label="Unpin", valign=Gtk.Align.CENTER)
+            b.add_css_class("flat")
+            b.connect("clicked", lambda *_: self._pin(""))
+            r.add_suffix(b)
+            g.add(r)
+        else:
+            r = Adw.EntryRow(title="Pin to a tag or branch")
+            r.set_show_apply_button(True)
+            r.connect("apply", lambda w: self._pin(w.get_text().strip()))
+            g.add(r)
+        return g
+
+    def _pin(self, ref):
+        name = self.app["name"]
+        self.close()
+        self.win.run_cli(["pin", name, ref] if ref else ["unpin", name])
+
+    # ---- what is about to run -------------------------------------------
+    def _inspect_group(self, info):
+        """The two things worth reading before letting code run: the installer
+        itself, and — when an update is waiting — what that update changes.
+        Both are the CLI's own output, loaded only if you ask for it."""
+        g = Adw.PreferencesGroup(
+            title="Before you run it",
+            description="An app's installer is the whole of what installing it does.")
+        name = self.app["name"]
+
+        e = Adw.ExpanderRow(title="Installer",
+                            subtitle=esc(info.get("installer") or "install.sh"))
+        self._lazy_text(e, [self.win.kiwi, "info", "--installer", name])
+        g.add(e)
+
+        if self.app["status"] == "update-available":
+            e2 = Adw.ExpanderRow(title="What this update changes",
+                                 subtitle="commits, files, and the installer's own diff")
+            self._lazy_text(e2, [self.win.kiwi, "diff", name])
+            g.add(e2)
+        return g
+
+    @staticmethod
+    def _lazy_text(expander, argv, empty="(nothing to show)"):
+        """Fill an expander the first time it is opened, off the UI thread.
+
+        Lazily, because running every app's installer through a subprocess just
+        to build a dialog nobody expanded would make opening one slow."""
+        buf = Gtk.TextBuffer()
+        view = Gtk.TextView(buffer=buf, editable=False, monospace=True,
+                            top_margin=8, bottom_margin=8,
+                            left_margin=8, right_margin=8)
+        view.set_wrap_mode(Pango.WrapMode.NONE)
+        scroll = Gtk.ScrolledWindow(child=view)
+        scroll.set_size_request(-1, 280)
+        expander.add_row(scroll)
+        loaded = []
+
+        def fill(text):
+            buf.set_text(text)
+            return False
+
+        def on_expanded(*_):
+            if loaded or not expander.get_expanded():
+                return
+            loaded.append(1)
+            buf.set_text("loading…")
+
+            def worker():
+                try:
+                    p = subprocess.run(argv, capture_output=True, text=True,
+                                       stdin=subprocess.DEVNULL, timeout=180)
+                    out = (p.stdout or "") + (p.stderr or "")
+                except Exception as e:  # noqa: BLE001
+                    out = str(e)
+                GLib.idle_add(fill, out.strip() or empty)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        expander.connect("notify::expanded", on_expanded)
 
     def _load(self):
         try:
@@ -374,19 +504,31 @@ class DetailDialog(Adw.Dialog):
             title="What it installs",
             description=esc(info["components"]) if info.get("components") else None)
         scopes = info.get("scopes", "").split()
+        # `kiwi info --porcelain` has reported installed_<scope> all along; the
+        # dialog never showed it, so there was nowhere in the GUI that said
+        # which half of a dual-scope app was actually on the machine.
+        def state(sc):
+            there = info.get("installed_%s" % sc) == "1"
+            return pill("INSTALLED" if there else "NOT INSTALLED",
+                        ("ok" if sc == "user" else "root") if there else "dim")
         if "user" in scopes:
-            inst.add(Adw.ActionRow(
+            r = Adw.ActionRow(
                 title="Into your home directory",
-                subtitle="~/.local — no password needed, survives a system rebase"))
+                subtitle="~/.local — no password needed, survives a system rebase")
+            r.add_suffix(state("user"))
+            inst.add(r)
         if "system" in scopes:
             r = Adw.ActionRow(
                 title="Outside your home directory",
                 subtitle=esc(info.get("root_reason")
                              or "installs files and services system-wide"))
             r.add_prefix(Gtk.Image(icon_name=ui_icon("dialog-warning-symbolic", "dialog-warning")))
-            r.add_suffix(pill("ROOT", "root"))
+            r.add_suffix(state("system"))
             inst.add(r)
         self.box.append(inst)
+
+        self.box.append(self._version_group(info))
+        self.box.append(self._inspect_group(info))
 
         deps = info.get("depends", "").split()
         if deps:
@@ -528,6 +670,68 @@ class CatalogDialog(Adw.Dialog):
         dlg.present(self)
 
 
+class DoctorDialog(Adw.Dialog):
+    """`kiwi doctor`, shown rather than buried in the log pane.
+
+    Every condition it checks is one that used to be invisible until it bit
+    someone — a stale lock, a root copy frozen releases back, a list root
+    silently ignores, a timer that never got enabled. That is worth a window
+    you can read, not a toast."""
+
+    def __init__(self, win):
+        super().__init__(title="Check this install")
+        self.kiwi = win.kiwi
+        self.set_content_width(680)
+        self.set_content_height(620)
+
+        self.buf = Gtk.TextBuffer()
+        view = Gtk.TextView(buffer=self.buf, editable=False, monospace=True,
+                            top_margin=10, bottom_margin=10,
+                            left_margin=10, right_margin=10)
+        view.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        scroll = Gtk.ScrolledWindow(child=view, vexpand=True)
+
+        self.banner = Adw.StatusPage(
+            icon_name=ui_icon("content-loading-symbolic", "content-loading"),
+            title="Checking…")
+        self.stack = Gtk.Stack()
+        self.stack.add_named(self.banner, "busy")
+        self.stack.add_named(scroll, "out")
+
+        tb = Adw.ToolbarView(content=self.stack)
+        header = Adw.HeaderBar()
+        self.again = Gtk.Button(label="Check again")
+        self.again.connect("clicked", lambda *_: self.run())
+        header.pack_end(self.again)
+        tb.add_top_bar(header)
+        self.set_child(tb)
+        self.run()
+
+    def run(self):
+        self.stack.set_visible_child_name("busy")
+        self.again.set_sensitive(False)
+
+        def worker():
+            try:
+                p = subprocess.run([self.kiwi, "doctor"],
+                                   capture_output=True, text=True,
+                                   stdin=subprocess.DEVNULL, timeout=300)
+                out, rc = (p.stdout or "") + (p.stderr or ""), p.returncode
+            except Exception as e:  # noqa: BLE001
+                out, rc = str(e), 1
+            GLib.idle_add(self._done, out, rc)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _done(self, out, rc):
+        self.buf.set_text(out.strip() or "(no output)")
+        self.stack.set_visible_child_name("out")
+        self.again.set_sensitive(True)
+        self.set_title("Check this install — %s" %
+                       ("all clear" if rc == 0 else "needs attention"))
+        return False
+
+
 class Window(Adw.ApplicationWindow):
     def __init__(self, app, kiwi):
         super().__init__(application=app, title="Kiwi Apps")
@@ -568,6 +772,12 @@ class Window(Adw.ApplicationWindow):
         self.btn_log = Gtk.ToggleButton(icon_name=ui_icon("utilities-terminal-symbolic", "utilities-terminal"),
                                         tooltip_text="Show output")
         header.pack_end(self.btn_log)
+        self.btn_doctor = Gtk.Button(
+            icon_name=ui_icon("emblem-ok-symbolic", "dialog-information-symbolic",
+                              "dialog-information"),
+            tooltip_text="Check this install — locks, versions, timers, list files")
+        self.btn_doctor.connect("clicked", lambda *_: self._open_doctor())
+        header.pack_start(self.btn_doctor)
 
         self.search = Gtk.SearchEntry(placeholder_text="Search apps…", hexpand=True)
         self.search.connect("search-changed", lambda *_: self._refilter())
@@ -866,11 +1076,13 @@ class Window(Adw.ApplicationWindow):
     def _badges(app):
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
                       halign=Gtk.Align.START, valign=Gtk.Align.CENTER)
-        if app.needs_root:
-            box.append(pill("ROOT", "root"))
+        for p in scope_pills(app):
+            box.append(p)
         label, kind = STATUS.get(app["status"], ("", "dim"))
         if label:
             box.append(pill(label.upper(), kind))
+        if app["pinned"]:
+            box.append(pill("PINNED", "warn", "held at %s" % app["pinned"]))
         return box
 
     def _make_row(self, app):
@@ -882,8 +1094,11 @@ class Window(Adw.ApplicationWindow):
         row.add_prefix(tile(app))
 
         row.optional = []
-        if app.needs_root:
-            p = pill("ROOT", "root")
+        for p in scope_pills(app):
+            row.add_suffix(p)
+            row.optional.append(p)
+        if app["pinned"]:
+            p = pill("PINNED", "warn", "held at %s" % app["pinned"])
             row.add_suffix(p)
             row.optional.append(p)
         label, kind = STATUS.get(app["status"], ("", "dim"))
@@ -934,6 +1149,9 @@ class Window(Adw.ApplicationWindow):
     def _open(self, app):
         DetailDialog(self, app).present(self)
 
+    def _open_doctor(self):
+        DoctorDialog(self).present(self)
+
     def refresh(self):
         if self.busy:
             return
@@ -963,7 +1181,9 @@ class Window(Adw.ApplicationWindow):
                      category=p[8] if len(p) > 8 else "",
                      tags=p[9] if len(p) > 9 else "",
                      repo_dir=p[10] if len(p) > 10 else "",
-                     root_reason=p[11] if len(p) > 11 else "")
+                     root_reason=p[11] if len(p) > 11 else "",
+                     installed_scopes=p[12] if len(p) > 12 else "",
+                     pinned=p[13] if len(p) > 13 else "")
             if d["status"] == "update-available":
                 updates += 1
             if d["category"]:
@@ -1053,36 +1273,28 @@ class Window(Adw.ApplicationWindow):
             if root_apps:
                 self._confirm_root(verb, names, root_apps)
                 return
-        cmd = [self.kiwi, verb] + list(names)
-        self.btn_log.set_active(True)
         self.set_busy(True, "%s %d app(s)…" % (verb.capitalize(), len(names)))
-
-        def worker():
-            GLib.idle_add(self.append_log,
-                          "\n$ %s\n" % " ".join(shlex.quote(c) for c in cmd))
-            rc = 1
-            try:
-                # stdin=DEVNULL: inheriting the terminal kiwi-gui was
-                # launched from made kiwi's as_root see a tty, choose sudo, and
-                # prompt for a password in that terminal while the window sat
-                # there looking hung. With no stdin it uses pkexec, which has a
-                # dialog.
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT, text=True,
-                                        stdin=subprocess.DEVNULL)
-                for line in proc.stdout:
-                    GLib.idle_add(self.append_log, line)
-                rc = proc.wait()
-            except Exception as e:  # noqa: BLE001
-                GLib.idle_add(self.append_log, "%s\n" % e)
-            GLib.idle_add(self.after_action, rc, verb)
-
-        threading.Thread(target=worker, daemon=True).start()
+        self._spawn([self.kiwi, verb] + list(names),
+                    lambda rc: self.after_action(rc, verb))
 
     def run_catalog(self, args, dialog):
         """Catalog changes alter where every app comes from, so the whole
         listing is rebuilt afterwards."""
-        cmd = [self.kiwi] + args
+        self._spawn([self.kiwi] + list(args),
+                    lambda rc: self._after_catalog(rc, dialog))
+
+    def run_cli(self, args):
+        """Any other state-changing CLI call — pin, unpin — same treatment."""
+        self._spawn([self.kiwi] + list(args), self._after_cli)
+
+    def _spawn(self, cmd, done):
+        """Run a kiwi command, streaming its output into the log pane.
+
+        One copy of this. There used to be three, and they had already drifted:
+        only one closed stdin, so depending on which button you pressed, kiwi's
+        as_root saw a tty, chose sudo, and prompted for a password in whatever
+        terminal kiwi-gui was launched from while the window sat there looking
+        hung. With no stdin it uses pkexec, which has a dialog."""
         self.btn_log.set_active(True)
 
         def worker():
@@ -1090,11 +1302,6 @@ class Window(Adw.ApplicationWindow):
                           "\n$ %s\n" % " ".join(shlex.quote(c) for c in cmd))
             rc = 1
             try:
-                # stdin=DEVNULL: inheriting the terminal kiwi-gui was
-                # launched from made kiwi's as_root see a tty, choose sudo, and
-                # prompt for a password in that terminal while the window sat
-                # there looking hung. With no stdin it uses pkexec, which has a
-                # dialog.
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                         stderr=subprocess.STDOUT, text=True,
                                         stdin=subprocess.DEVNULL)
@@ -1103,9 +1310,14 @@ class Window(Adw.ApplicationWindow):
                 rc = proc.wait()
             except Exception as e:  # noqa: BLE001
                 GLib.idle_add(self.append_log, "%s\n" % e)
-            GLib.idle_add(self._after_catalog, rc, dialog)
+            GLib.idle_add(done, rc)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _after_cli(self, rc):
+        self.toast("Done" if rc == 0 else "Failed — see the output")
+        self.refresh()
+        return False
 
     def _after_catalog(self, rc, dialog):
         self.toast("Catalogs updated" if rc == 0 else "Catalog change failed")

@@ -465,8 +465,24 @@ t_P9() { # an app listed in BOTH lists must stay reachable in both scopes
     check P9 "an app in both lists shows both scopes and its root half is reachable (scopes=$scopes status=$status)" f
 }
 
+t_P10() { # the porcelain must tell the GUI which scopes are actually installed
+    mkapp a dualp "user system"
+    mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
+    echo "$GITROOT/a/dualp.git" > /etc/kiwi-updater/apps.list
+    ku add $GITROOT/a/dualp.git >/dev/null
+    ku install dualp --user >/dev/null 2>&1        # the user half only
+    local line nf inst pinf
+    line="$(ku list --porcelain --no-sync 2>/dev/null | grep '^dualp')"
+    nf="$(awk -F'\t' '{print NF}' <<<"$line")"
+    inst="$(cut -f13 <<<"$line")"
+    ku pin dualp v1.0.0 >/dev/null 2>&1
+    pinf="$(ku list --porcelain --no-sync 2>/dev/null | grep '^dualp' | cut -f14)"
+    f() { [[ $nf -eq 14 && $inst == user && $pinf == v1.0.0 ]]; }
+    check P10 "porcelain carries installed scopes and the pin (fields=$nf installed='$inst' pinned='$pinf')" f
+}
+
 for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
-         P1 P2 P3 P4 P5 P6 P7 P8 P9; do run $t; done
+         P1 P2 P3 P4 P5 P6 P7 P8 P9 P10; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

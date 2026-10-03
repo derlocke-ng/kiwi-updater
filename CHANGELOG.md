@@ -3,6 +3,42 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 1.4.0 — 2026-10-03
+
+The GUI catches up with the CLI, and finally shows which scopes an app is
+installed in.
+
+### Added
+
+- **Installed scopes are visible.** For an app that uses both scopes, the list
+  rows, the cards and the detail header show a `USER` and a `ROOT` pill, filled
+  where that half is installed and dimmed where it is not — so a half-installed
+  app says which half, and "partly installed" means something specific. Only
+  for apps that use the system scope: a `USER` pill on every row would be
+  noise, and for a user-only app the status already says everything.
+- The detail view's "What it installs" rows now say **INSTALLED / NOT
+  INSTALLED** per scope. `kiwi info --porcelain` had reported
+  `installed_<scope>` all along; nothing in the GUI ever showed it.
+- **Before you run it**: the app's installer, and — when an update is waiting —
+  what that update changes, both as expanders carrying the CLI's own
+  `info --installer` and `diff` output. Loaded only if you open them.
+- **Pin and unpin from the GUI**, in an "Updates" group, with a `PINNED` badge
+  in the lists.
+- **`kiwi doctor` in a window** you can read, behind a header button, rather
+  than buried in the log pane.
+
+### Changed
+
+- `kiwi list --porcelain` gains two appended fields: 13 is the scopes the app
+  is actually installed in, 14 is its `ref=` pin. Existing field positions are
+  unchanged.
+- `kiwi info --porcelain` gains `pinned=` and `installer=`; plain `kiwi info`
+  shows `depends` and a pin when there is one.
+- The GUI's three near-identical subprocess blocks are one helper. They had
+  already drifted — only one closed stdin, so depending on which button you
+  pressed, kiwi could pick `sudo` and prompt in whatever terminal the GUI was
+  launched from while the window sat there looking hung.
+
 ## 1.3.1 — 2026-10-03
 
 Fixes a bug introduced in 1.3.0.

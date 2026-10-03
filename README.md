@@ -278,7 +278,12 @@ remote desktop sessions can report as non-local.
   names the host and pid holding it. Every network git call is bounded by
   `KIWI_NET_TIMEOUT` (180s) so a stalled fetch cannot hold the lock forever.
 - The GUI is a thin layer over `kiwi list --porcelain` — the CLI is the single
-  source of truth.
+  source of truth. It shows which scopes an app is actually installed in, can
+  pin and unpin, and shows an app's installer and an update's diff before you
+  run either.
+- `kiwi list --porcelain` fields are positional and only ever appended to, so
+  anything parsing it keeps working. Field 13 is the scopes an app is installed
+  in, 14 is its pin.
 
 ## License
 

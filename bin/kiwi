@@ -94,16 +94,22 @@ NET_TIMEOUT="${KIWI_NET_TIMEOUT:-180}"
 
 # kiwi only ever reads PUBLIC repos — never prompt for credentials
 # (no terminal prompt, no askpass popup, no keyring credential helper)
+#
+# Through the ENVIRONMENT (git >= 2.31), not a shell function. The function
+# this replaces was bypassed by `timeout … git ls-remote`, which execs the git
+# binary directly — so the one call kiwi makes against every URL it has ever
+# been told about was also the one call that still invoked the user's
+# credential helper (keyring, gh, a stored token) whenever a URL answered 401.
 export GIT_TERMINAL_PROMPT=0
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0=
 unset GIT_ASKPASS SSH_ASKPASS 2>/dev/null || true
-git() { command git -c credential.helper= "$@"; }
 
 # git that talks to a remote: hard wall-clock cap, plus git's own stalled
 # transfer abort so a connection that goes quiet does not sit there.
 git_net() {
     timeout --kill-after=10 "$NET_TIMEOUT" \
         env GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=30 \
-        git -c credential.helper= "$@"
+        git "$@"
 }
 
 # ---------- output ----------------------------------------------------------
@@ -705,8 +711,12 @@ run_installer() { # scope repo_dir action [purge]
     local args=("$action")
     [[ $action == uninstall ]] && (( purge )) && args+=(--purge)
     info "running $inst ${args[*]} ($scope scope, $([[ $gui == 1 ]] && echo with-gui || echo cli-only))"
+    # kiwi's own no-credentials policy is in the environment now, so it would
+    # otherwise be inherited by the app's installer and break one that
+    # legitimately clones something of its own.
     ( cd "$dir" &&
-      env KIWI_SCOPE="$scope" \
+      env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 \
+          KIWI_SCOPE="$scope" \
           KIWI_ACTION="$action" \
           KIWI_APP_DIR="$dir" \
           KIWI_PREFIX="$(prefix_for "$scope")" \

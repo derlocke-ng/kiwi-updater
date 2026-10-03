@@ -582,6 +582,26 @@ list_set_opt() { # file url key value
     mv -f "$tmp" "$f"
 }
 
+# the options carried by the entry for <url>, empty when it has none or is absent
+entry_opts() { # file url
+    local f="$1" want u rest; want="$(norm_url "$2")"
+    [[ -r $f ]] || return 0
+    while read -r u rest; do
+        [[ -z ${u:-} || $u == \#* ]] && continue
+        [[ "$(norm_url "$u")" == "$want" ]] && { printf '%s' "${rest:-}"; return 0; }
+    done < "$f"
+}
+
+# is this URL listed by a registered catalog, as opposed to only locally?
+catalog_has_url() { # url
+    local c
+    for c in "$(catalogs_dir)"/*/apps.list; do
+        [[ -f $c ]] || continue
+        list_has "$c" "$1" && return 0
+    done
+    return 1
+}
+
 dir_name() { # url -> repo directory name
     local b; b="$(basename "$1")"
     echo "${b%.git}"
@@ -1477,6 +1497,13 @@ pin_apply() { # app value   ("" clears the pin)
         info "  it stays there until 'kiwi unpin $(dir_name "$url")'"
     else
         info "${c_grn}$(dir_name "$url") unpinned${c_off} in $f — it follows its latest release again"
+        # Pinning a catalog app had to add a local entry, because that is what
+        # overrides a catalog. Unpinning should put the list back rather than
+        # leave a bare line behind that outranks the catalog from then on.
+        if [[ -z "$(entry_opts "$f" "$url")" ]] && catalog_has_url "$url"; then
+            list_drop "$f" "$url"
+            info "  and dropped the local entry it needed — the catalog lists it again"
+        fi
     fi
 }
 

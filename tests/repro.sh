@@ -345,6 +345,20 @@ t_P1() { # pin holds a version across updates; unpin releases it
     check P1 "kiwi pin holds a version, kiwi unpin releases it (held=$held freed=$freed)" f
 }
 
+t_P8() { # pinning a CATALOG app must leave the list as it found it
+    mkapp a catapp user
+    mkcat c cat1 $GITROOT/a/catapp.git
+    ku catalog add $GITROOT/c/cat1.git >/dev/null 2>&1
+    local L=$TH/.config/kiwi-updater/apps.list
+    local before; before="$(cat $L 2>/dev/null || true)"
+    ku pin catapp v1.0.0 >/dev/null 2>&1
+    local pinned; pinned="$(grep -c 'ref=v1.0.0' $L 2>/dev/null || echo 0)"
+    ku unpin catapp >/dev/null 2>&1
+    local after; after="$(cat $L 2>/dev/null || true)"
+    f() { [[ $pinned -eq 1 && "$before" == "$after" ]]; }
+    check P8 "pin then unpin of a catalog app restores apps.list exactly" f
+}
+
 t_P2() { # diff shows the installer change an update would bring
     mkapp a dif user 'echo one'
     ku add $GITROOT/a/dif.git >/dev/null; ku install dif >/dev/null
@@ -430,7 +444,7 @@ t_P7() { # a shallow metadata clone must not stop you installing an OLDER tag
 }
 
 for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
-         P1 P2 P3 P4 P5 P6 P7; do run $t; done
+         P1 P2 P3 P4 P5 P6 P7 P8; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

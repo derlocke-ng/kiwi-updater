@@ -519,8 +519,20 @@ uninstall_one() { # scope url purge
     local name; name="$(app_name "$scope" "$url")"
     local dir; dir="$(repos_dir "$scope")/$(dir_name "$url")"
     if [[ -d $dir ]]; then
-        is_installed "$scope" "$url" && run_installer "$scope" "$dir" uninstall
-        rm -rf "$dir"
+        # The clone holds the only copy of this app's uninstaller. Deleting it
+        # after a failed run leaves the app's files on disk with nothing left
+        # that knows how to remove them.
+        if is_installed "$scope" "$url" && ! run_installer "$scope" "$dir" uninstall; then
+            if (( FORCE )); then
+                warn "$name: the uninstaller failed — dropping $dir anyway (--force)"
+            else
+                warn "$name: the uninstaller failed, so its files are probably still there."
+                warn "  keeping $dir. Fix the cause and retry 'kiwi uninstall $name',"
+                warn "  or discard it with --force and clean up by hand."
+                return 1
+            fi
+        fi
+        rm -rf "${dir:?}"
         info "${c_grn}$name uninstalled${c_off}"
     else
         log "$name is not installed"

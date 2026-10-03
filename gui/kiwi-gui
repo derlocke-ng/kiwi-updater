@@ -171,6 +171,7 @@ CSS = b"""
 .kiwi-md-quote { border-left: 3px solid alpha(@accent_bg_color, .5);
                  padding-left: 10px; opacity: .85; }
 .kiwi-shot-btn { padding: 0; }
+.kiwi-thumb-on { box-shadow: inset 0 0 0 2px @accent_color; }
 """
 
 
@@ -435,117 +436,135 @@ class ReadmeDialog(Adw.Dialog):
 
 
 class ShotDialog(Adw.Dialog):
-    """A screenshot big enough to actually read, with zoom.
+    """The screenshots, big, with the whole set to hand.
 
-    In the carousel they are thumbnails, and the detail in a screenshot is
-    usually the whole reason for looking at one."""
-
-    ZOOMS = (0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0)
+    No zoom control. These are screenshots of desktop apps, so at this size
+    they are already at or near 1:1 and a zoom widget only put chrome in front
+    of the picture. What was actually missing was a way to move around the set:
+    swipe, arrow keys, the scroll wheel, dots, and a strip showing what else
+    there is rather than leaving you to discover it."""
 
     def __init__(self, paths, index=0):
-        super().__init__(title="Screenshot")
-        self.set_content_width(1100)
-        self.set_content_height(760)
-        self.paths = paths
-        self.index = index
-        self.zoom = None               # None = fit to the window
+        super().__init__(title="Screenshots")
+        self.set_content_width(1180)
+        self.set_content_height(820)
+        self.paths = list(paths)
+        self.thumbs = []
+        if not self.paths:
+            # The detail view only offers the button when there are shots, so
+            # this is unreachable from the GUI — but a viewer with nothing to
+            # view should say so rather than raise on paths[0].
+            self.set_child(Adw.StatusPage(
+                icon_name=ui_icon("image-missing-symbolic", "image-missing"),
+                title="No screenshots"))
+            return
+        paths = self.paths
+        self._index = max(0, min(len(paths) - 1, index))
 
-        self.pic = Gtk.Picture(halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
-        self.scroll = Gtk.ScrolledWindow(child=self.pic, hexpand=True, vexpand=True)
+        # the wheel moves between shots now that it is not spent on zooming
+        self.car = Adw.Carousel(allow_scroll_wheel=True, spacing=24,
+                                hexpand=True, vexpand=True)
+        for path in paths:
+            pic = Gtk.Picture.new_for_filename(path)
+            pic.set_content_fit(Gtk.ContentFit.CONTAIN)
+            pic.set_can_shrink(True)
+            pic.add_css_class("kiwi-shot")
+            self.car.append(pic)
+        self.car.connect("page-changed", self._on_page)
 
+        self.title_w = Adw.WindowTitle(title="", subtitle="")
         header = Adw.HeaderBar()
-        nav = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-        nav.add_css_class("linked")
-        self.prev = Gtk.Button(icon_name=ui_icon("go-previous-symbolic", "go-previous"))
-        self.next = Gtk.Button(icon_name=ui_icon("go-next-symbolic", "go-next"))
-        self.prev.connect("clicked", lambda *_: self._step(-1))
-        self.next.connect("clicked", lambda *_: self._step(1))
-        nav.append(self.prev)
-        nav.append(self.next)
+        header.set_title_widget(self.title_w)
         if len(paths) > 1:
+            nav = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+            nav.add_css_class("linked")
+            prev = Gtk.Button(icon_name=ui_icon("go-previous-symbolic", "go-previous"),
+                              tooltip_text="Previous  (\u2190)")
+            nxt = Gtk.Button(icon_name=ui_icon("go-next-symbolic", "go-next"),
+                             tooltip_text="Next  (\u2192)")
+            prev.connect("clicked", lambda *_: self._step(-1))
+            nxt.connect("clicked", lambda *_: self._step(1))
+            nav.append(prev)
+            nav.append(nxt)
             header.pack_start(nav)
 
-        zb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-        zb.add_css_class("linked")
-        out = Gtk.Button(icon_name=ui_icon("zoom-out-symbolic", "zoom-out"),
-                         tooltip_text="Zoom out")
-        inn = Gtk.Button(icon_name=ui_icon("zoom-in-symbolic", "zoom-in"),
-                         tooltip_text="Zoom in")
-        fit = Gtk.Button(icon_name=ui_icon("zoom-fit-best-symbolic", "zoom-fit-best",
-                                           "view-fullscreen-symbolic"),
-                         tooltip_text="Fit to the window")
-        out.connect("clicked", lambda *_: self._nudge(-1))
-        inn.connect("clicked", lambda *_: self._nudge(1))
-        fit.connect("clicked", lambda *_: self._set_zoom(None))
-        zb.append(out)
-        zb.append(fit)
-        zb.append(inn)
-        header.pack_end(zb)
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        body.append(self.car)
+        if len(paths) > 1:
+            body.append(Adw.CarouselIndicatorDots(carousel=self.car))
+            body.append(self._strip())
 
-        self.counter = Adw.WindowTitle(title="Screenshot", subtitle="")
-        header.set_title_widget(self.counter)
-
-        tb = Adw.ToolbarView(content=self.scroll)
+        tb = Adw.ToolbarView(content=body)
         tb.add_top_bar(header)
         self.set_child(tb)
 
-        # Scroll wheel zooming is what everyone tries first on an image.
-        ctl = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
-        ctl.connect("scroll", self._on_scroll)
-        self.pic.add_controller(ctl)
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", self._on_key)
+        self.add_controller(keys)
 
-        self._show()
+        self._on_page(self.car, self._index)
+        if self._index:
+            # the carousel has to be allocated before it can scroll anywhere
+            GLib.idle_add(self._goto, self._index)
 
-    def _on_scroll(self, _c, _dx, dy):
-        self._nudge(-1 if dy > 0 else 1)
-        return True
+    def _strip(self):
+        """A thumbnail per shot, so the set is visible instead of being
+        something you find out about by swiping."""
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+                      halign=Gtk.Align.CENTER)
+        for i, path in enumerate(self.paths):
+            pic = Gtk.Picture.new_for_filename(path)
+            pic.set_content_fit(Gtk.ContentFit.COVER)
+            pic.set_size_request(104, 62)
+            pic.add_css_class("kiwi-shot")
+            btn = Gtk.Button(child=pic, tooltip_text=os.path.basename(path))
+            btn.add_css_class("flat")
+            btn.add_css_class("kiwi-shot-btn")
+            btn.connect("clicked", lambda _b, idx=i: self._goto(idx))
+            self.thumbs.append(btn)
+            box.append(btn)
+        sc = Gtk.ScrolledWindow(child=box, vscrollbar_policy=Gtk.PolicyType.NEVER)
+        sc.set_size_request(-1, 76)
+        sc.set_margin_bottom(10)
+        return sc
+
+    def _goto(self, i):
+        i = max(0, min(len(self.paths) - 1, i))
+        page = self.car.get_nth_page(i)
+        try:
+            self.car.scroll_to(page, True)
+        except TypeError:            # libadwaita < 1.2 took no animate argument
+            self.car.scroll_to(page)
+        return False
 
     def _step(self, by):
-        self.index = (self.index + by) % len(self.paths)
-        self.zoom = None
-        self._show()
+        self._goto(self._index + by)
 
-    def _nudge(self, by):
-        cur = self.zoom if self.zoom is not None else 1.0
-        # nearest step, then move one
-        near = min(range(len(self.ZOOMS)), key=lambda i: abs(self.ZOOMS[i] - cur))
-        self._set_zoom(self.ZOOMS[max(0, min(len(self.ZOOMS) - 1, near + by))])
+    def _on_page(self, _car, index):
+        self._index = int(index)
+        self.title_w.set_title(os.path.basename(self.paths[self._index]))
+        self.title_w.set_subtitle("%d of %d" % (self._index + 1, len(self.paths))
+                                  if len(self.paths) > 1 else "")
+        for i, btn in enumerate(self.thumbs):
+            if i == self._index:
+                btn.add_css_class("kiwi-thumb-on")
+            else:
+                btn.remove_css_class("kiwi-thumb-on")
 
-    def _set_zoom(self, z):
-        self.zoom = z
-        self._apply()
-
-    def _show(self):
-        path = self.paths[self.index]
-        try:
-            self.tex = Gdk.Texture.new_from_filename(path)
-            self.pic.set_paintable(self.tex)
-        except Exception:  # noqa: BLE001
-            self.tex = None
-            self.pic.set_filename(path)
-        self.counter.set_title(os.path.basename(path))
-        self.counter.set_subtitle(
-            "%d of %d" % (self.index + 1, len(self.paths)) if len(self.paths) > 1 else "")
-        self._apply()
-
-    def _apply(self):
-        if self.zoom is None or self.tex is None:
-            self.pic.set_content_fit(Gtk.ContentFit.CONTAIN)
-            self.pic.set_size_request(-1, -1)
-            self.pic.set_hexpand(True)
-            self.pic.set_vexpand(True)
-            self.counter.set_subtitle(
-                ("%d of %d · " % (self.index + 1, len(self.paths)) if len(self.paths) > 1 else "")
-                + "fit")
-            return
-        self.pic.set_content_fit(Gtk.ContentFit.FILL)
-        self.pic.set_hexpand(False)
-        self.pic.set_vexpand(False)
-        self.pic.set_size_request(int(self.tex.get_width() * self.zoom),
-                                  int(self.tex.get_height() * self.zoom))
-        self.counter.set_subtitle(
-            ("%d of %d · " % (self.index + 1, len(self.paths)) if len(self.paths) > 1 else "")
-            + "%d%%" % round(self.zoom * 100))
+    def _on_key(self, _c, keyval, _code, _state):
+        if keyval in (Gdk.KEY_Left, Gdk.KEY_Up, Gdk.KEY_Page_Up):
+            self._step(-1)
+            return True
+        if keyval in (Gdk.KEY_Right, Gdk.KEY_Down, Gdk.KEY_Page_Down, Gdk.KEY_space):
+            self._step(1)
+            return True
+        if keyval == Gdk.KEY_Home:
+            self._goto(0)
+            return True
+        if keyval == Gdk.KEY_End:
+            self._goto(len(self.paths) - 1)
+            return True
+        return False
 
 
 class DetailDialog(Adw.Dialog):

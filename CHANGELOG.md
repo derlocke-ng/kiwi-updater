@@ -3,6 +3,26 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 1.5.1 — 2026-10-03
+
+The screenshot viewer added in 1.5.0 had a zoom control it did not need. These
+are screenshots of desktop apps, so at that window size they are already at or
+near 1:1, and the zoom buttons mostly put chrome in front of the picture.
+
+It is gone, and the viewer is a proper scroller instead:
+
+- a carousel, so shots slide and can be swiped
+- the scroll wheel moves between shots now that it is not spent on zooming
+- arrow keys, Page Up/Down, space, Home and End
+- indicator dots, and a thumbnail strip showing the whole set with the current
+  one outlined — so what else there is no longer has to be discovered by
+  swiping
+- opening a shot from the detail view starts on the one you clicked
+
+Also: the viewer no longer raises on an empty list. Not reachable from the GUI,
+which only offers the button when there are screenshots, but it should say "no
+screenshots" rather than throw.
+
 ## 1.5.0 — 2026-10-03
 
 ### Fixed

@@ -606,9 +606,21 @@ update_one() { # scope url opts   (appends to global UPDATED array)
         log "${c_dim}skipping $name (not installed)${c_off}"
         return 0
     fi
-    local dir; dir="$(repos_dir "$scope")/$(dir_name "$url")"
-    local before; before="$(local_head "$dir")"
-    sync_repo "$scope" "$url" "$opts" >/dev/null
+    local dir; dir="$(scope_dir "$scope" "$url")"
+    # Against the MARKER, not the working tree. If a run was killed between the
+    # checkout and the installer — the unit has TimeoutStartSec=900 — the tree
+    # already sat on the target, so the next run saw HEAD == target and never
+    # applied the update that had not actually run.
+    local before; before="$(marker_sha "$dir")"
+    if ! sync_repo "$scope" "$url" "$opts" >/dev/null; then
+        # Not "up to date": nothing was checked. HEAD had simply not moved
+        # because ls-remote or fetch failed.
+        warn "$name: could not check for updates"
+        # Being offline is routine for the background timer, so --all only
+        # warns; an app asked for by name is a real failure.
+        (( ALL_MODE )) && return 0
+        return 1
+    fi
     if [[ "$(local_head "$dir")" == "$before" && ${FORCE:-0} -eq 0 ]]; then
         log "$name is up to date"
         return 0
@@ -657,7 +669,8 @@ uninstall_one() { # scope url purge
 # split requested names into per-scope url lists; escalate system work if needed
 # sets arrays: T_SCOPE T_URL T_OPTS
 collect_targets() { # all|names...
-    T_SCOPE=(); T_URL=(); T_OPTS=()
+    T_SCOPE=(); T_URL=(); T_OPTS=(); ALL_MODE=0
+    [[ $1 == --all ]] && ALL_MODE=1
     local list=() url opts line n dir scs sc
     if [[ $1 == --all ]]; then
         while IFS=$'\t' read -r url opts; do
@@ -1176,6 +1189,7 @@ EOF
 # ---------- main ------------------------------------------------------------
 SCOPE_FILTER=""
 FORCE=0
+ALL_MODE=0
 PURGE=0
 PORCELAIN=0
 GUI_CHOICE=""      # ""=auto/keep, 0=cli-only, 1=with-gui (install/update)

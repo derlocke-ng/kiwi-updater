@@ -599,6 +599,33 @@ resolve() { # name -> "url<TAB>opts"
     return 1
 }
 
+# ---------------------------------------------------------------------------
+# What root can resolve, answered from root-owned sources only. Both
+# /etc/kiwi-updater/apps.list and the catalogs under /var/lib/kiwi-updater are
+# world-readable, so this needs no privilege and no prompt.
+#
+# It compares the URL, not just the name. Root re-resolves the name against
+# its own lists, so a name meaning one repo to the user can mean a different
+# repo to root — and the user would have been shown one app's ROOT_REASON
+# while root installed the other one.
+# ---------------------------------------------------------------------------
+root_url_for() { # dirname -> the url root would resolve it to
+    local url c
+    # same precedence as app_entries_raw: the local list first, then catalogs
+    for c in "$SYS_LIST" "$SYS_DATA_DIR"/catalogs/*/apps.list; do
+        [[ -r $c ]] || continue
+        while read -r url _; do
+            [[ -z ${url:-} || $url == \#* ]] && continue
+            [[ "$(dir_name "$url")" == "$1" ]] && { norm_url "$url"; return 0; }
+        done < "$c"
+    done
+    return 1
+}
+
+root_knows() { # url
+    [[ "$(root_url_for "$(dir_name "$1")" || true)" == "$(norm_url "$1")" ]]
+}
+
 acquire_lock() { # scope
     local lock dir me
     if [[ $1 == system ]]; then dir="$SYS_DATA_DIR"; else dir="$USER_DATA_DIR"; fi
@@ -850,7 +877,7 @@ collect_targets() { # all|names...
 }
 
 dispatch() { # verb extra_flag
-    local verb="$1" i had_user=0 sys_names=()
+    local verb="$1" i had_user=0 sys_names=() rc_pre=0
     for i in "${!T_URL[@]}"; do
         [[ ${T_SCOPE[$i]} == user ]] && had_user=1
         [[ ${T_SCOPE[$i]} == system && $EUID -ne 0 ]] || continue
@@ -862,13 +889,26 @@ dispatch() { # verb extra_flag
         if [[ $verb != install ]] && ! is_installed system "${T_URL[$i]}"; then
             continue
         fi
+        # Do not ask for a password for work that cannot succeed. The user side
+        # resolves a name from the user's catalogs and escalated by name; root
+        # resolves it again from root-owned lists only, so for an app that only
+        # a user-level catalog lists, the user authenticated and root answered
+        # "unknown app". Root refusing is right — asking first was the bug.
+        if [[ $verb == install ]] && ! root_knows "${T_URL[$i]}"; then
+            warn "$(app_name system "${T_URL[$i]}") needs the system scope, but no root-owned list names it."
+            warn "  root installs only what a root-owned list names, so your password"
+            warn "  could not have helped here. Register it for root first, with one of:"
+            warn "    kiwi catalog add --system <catalog-url>"
+            warn "    kiwi add --system ${T_URL[$i]}"
+            rc_pre=1; continue
+        fi
         sys_names+=("$(app_name system "${T_URL[$i]}")")
     done
 
     if (( had_user )); then acquire_lock user; fi
     if [[ $EUID -eq 0 ]]; then acquire_lock system; fi
 
-    local rc=0
+    local rc=$rc_pre
     UPDATED=()
     for i in "${!T_URL[@]}"; do
         [[ ${T_SCOPE[$i]} == system && $EUID -ne 0 ]] && continue

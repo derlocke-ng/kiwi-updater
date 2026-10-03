@@ -6,6 +6,28 @@ Written to be worked through with Claude Code in VS Code, one finding at a time.
 Line numbers refer to `v1.2.1`. They drift as soon as you start editing, so each
 finding also names the function.
 
+## Status — worked through in 1.3.0
+
+Phases 0 to 3 are implemented, one commit per finding, on top of `v1.2.1`.
+`tests/repro.sh` reports 22 × `ok` (the original 21 plus `F11b` and `S5`, added
+while fixing F11 and S5), and `shellcheck -S warning` is clean.
+
+Phase 4 is deliberately **not** done: it is a list of improvements rather than
+of defects, and none of it is needed to make the findings above go away.
+
+Two corrections to this plan, found while working through it:
+
+- The container package list was missing **gawk**. `fedora:latest` ships no
+  `awk`, `remote_target` is built on `awk`, so in the container every app was
+  simply unreachable — and checks that assert "this failed" went green for the
+  wrong reason, F1 among them. `tests/repro.sh` now refuses to start when a
+  tool it needs is missing, and the baseline was re-verified afterwards.
+- F5 has a third bug the plan does not mention: `root_kiwi` wrote its three
+  explanatory `info` lines to **stdout**, and its stdout *is* the program path
+  the caller executes. A missing root copy therefore ran
+  `sudo ":: This needs a root-owned copy…"` with the path appended. Fixed with
+  the rest of F5.
+
 ## What is solid, and should stay as it is
 
 - The scope split (user clone in `~/.local`, root clone in `/var/lib`) and the reasoning behind it.

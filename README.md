@@ -9,11 +9,13 @@ including itself.
 No accounts, no store, no vendor. A catalog is a repo you can read, fork and
 send a pull request to.
 
-- **`kiwi`** — the CLI (needs only `git` + coreutils)
+- **`kiwi`** — the CLI (needs `git`, coreutils, `util-linux` for `flock`, and
+  `awk`; all are in the Silverblue/Bluefin base image)
 - **`kiwi-gui`** — the desktop app, **Kiwi Apps** in your app grid: search,
   filter and browse the catalogs, with a detail view per app
-- **releases are git tags** — apps follow their latest version tag; untagged
-  repos follow HEAD
+- **releases are git tags** — apps follow their latest *version* tag, meaning
+  one shaped like `v1.2.3`. Pre-releases and scratch tags are never picked up
+  by accident; untagged repos follow HEAD
 - **catalogs** — add as many as you like, managed through ordinary git
 - **systemd timers** — background updates for user apps and, opt-in, system apps
 
@@ -124,6 +126,12 @@ where there is no GTK stack.
 
 Release by tagging: `git tag v1.3.0 && git push --tags`.
 
+A tag counts as a release only if it matches `^v?[0-9]+(\.[0-9]+){0,3}$` —
+`v1`, `v1.2`, `1.2.3` and `v1.2.3.4` all qualify. `v2.0.0-rc1`, `nightly` and
+`wip-test` do not, so a pre-release never overtakes the release it precedes.
+Someone who wants one can ask for it by name with `ref=v2.0.0-rc1` on their
+`apps.list` line. A repo with no version tag follows its default branch.
+
 ## Catalogs
 
 A catalog is a git repo with an `apps.list` and, optionally, a
@@ -201,6 +209,15 @@ nothing outside your home is ever written.
 | `kiwi-updater.timer` (user) | user | `kiwi update --all --user` every 6 h + a notification |
 | `kiwi-updater-system.timer` (opt-in) | root | `kiwi update --all --system` every 6 h, and self-updates the root copy |
 
+> **Upgrading from 1.2.1 or earlier with the system scope installed:** the root
+> copy could not update itself before 1.3.0, so it cannot pick this release up
+> on its own. Re-run the bootstrap once:
+> ```bash
+> curl -fsSL .../get-kiwi.sh | bash -s -- --with-system
+> ```
+> `kiwi version` shows both copies, and `kiwi update` warns while they differ.
+> Installs without the system scope need nothing.
+
 ### Root, and when you are asked for a password
 
 | | needs root | asks for a password |
@@ -230,7 +247,15 @@ remote desktop sessions can report as non-local.
 
 - `kiwi check` exits `10` when updates are available (script-friendly).
 - `kiwi list` fetches app metadata the first time so it can show descriptions
-  and components; `--no-sync` skips that.
+  and components; `--no-sync` skips that. `kiwi list --check` and `kiwi sync`
+  also bring those cached clones up to the release an install would use, so a
+  listing describes what you would get rather than what was current when the
+  app was first seen.
+- Whether an app has an update is decided by comparing the remote against the
+  commit recorded in each scope's own marker file, so a system app updated by
+  root shows as up to date for the user too.
+- `kiwi install` needs an app name or an explicit `--all`. `kiwi update` with
+  no arguments means everything already installed.
 - Concurrent runs are prevented with per-scope lock files. A command waits
   briefly (`KIWI_LOCK_WAIT`, 20s) rather than failing instantly, since the
   usual collision is the background timer; if it still cannot get the lock it

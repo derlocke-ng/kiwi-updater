@@ -7,7 +7,11 @@
 # NAME         what you type in `kiwi install <name>`
 # DESCRIPTION  ONE line. It is the subtitle in the explorer and what `kiwi
 #              search` matches against, so lead with what the thing does.
-# VERSION      your version string; keep it in sync with your git tag
+# VERSION      your version string; keep it in sync with your git tag.
+#              kiwi installs the latest tag matching ^v?[0-9]+(\.[0-9]+){0,3}$
+#              — v1.2.3 counts, v2.0.0-rc1 and nightly do not, so a
+#              pre-release never overtakes a release. No version tag at all
+#              means your default branch is followed.
 # AUTHOR       who maintains it (shown in the detail view)
 # HOMEPAGE     project page
 # LICENSE      SPDX identifier, e.g. GPL-3.0-or-later

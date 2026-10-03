@@ -141,14 +141,10 @@ list_file()  { [[ $1 == system ]] && echo "$SYS_LIST"   || echo "$USER_LIST"; }
 repos_dir()  { [[ $1 == system ]] && echo "$SYS_REPOS"  || echo "$USER_REPOS"; }
 prefix_for() { [[ $1 == system ]] && echo "$SYS_PREFIX" || echo "$USER_PREFIX"; }
 
-# scopes visible to the current invocation
-scopes() {
-    if [[ $EUID -eq 0 ]]; then echo system
-    elif [[ $SCOPE_FILTER == user ]]; then echo user
-    elif [[ $SCOPE_FILTER == system ]]; then echo system
-    else echo "user system"
-    fi
-}
+# The scopes whose clones this invocation can actually read. Not the same as
+# the --user/--system filter: a listing describes both halves of a dual-scope
+# app whichever one you asked about.
+real_scopes() { [[ $EUID -eq 0 ]] && echo system || echo "user system"; }
 
 catalogs_dir() { [[ $EUID -eq 0 ]] && echo "$SYS_DATA_DIR/catalogs" || echo "$USER_DATA_DIR/catalogs"; }
 
@@ -282,36 +278,85 @@ sync_all_meta() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# What is installed is recorded in each scope's own marker, so that is what a
+# "newer version available?" question has to be asked against.
+#
+# It used to compare the remote against HEAD of the *metadata* clone in the
+# user's home. For a system app that is the wrong repository entirely: after
+# root updated it, the user's metadata clone had not moved, so the app showed
+# update-available for ever — and because the GUI is a thin layer over
+# `list --porcelain --check`, it showed "1 update ready" permanently.
+# ---------------------------------------------------------------------------
+
+# the commit a scope actually installed (line 1 of its marker). The system
+# repos are world-readable, so a user can read root's record directly, which
+# `git -C` cannot do: it refuses another user's repo as "dubious ownership".
+marker_sha() { # repo_dir
+    head -1 "$1/.kiwi-installed" 2>/dev/null || true
+}
+
+is_installed_any() { # url
+    local sc
+    for sc in $(real_scopes); do is_installed "$sc" "$1" && return 0; done
+    return 1
+}
+
+# the clone that describes what is installed; the metadata clone if nothing is
+scope_dir() { # scope url
+    echo "$(repos_dir "$1")/$(dir_name "$2")"
+}
+installed_dir() { # url
+    local sc
+    for sc in $(real_scopes); do
+        is_installed "$sc" "$1" && { scope_dir "$sc" "$1"; return; }
+    done
+    echo "$(meta_dir)/$(dir_name "$1")"
+}
+
+# which installed scopes of this app are not sitting on <sha>
+outdated_scopes() { # url sha -> scope names
+    local sc out=()
+    for sc in $(real_scopes); do
+        is_installed "$sc" "$1" || continue
+        [[ "$(marker_sha "$(scope_dir "$sc" "$1")")" == "$2" ]] || out+=("$sc")
+    done
+    echo "${out[*]:-}"
+}
+
+# Bring a metadata-only clone up to the release an install would use, so a
+# listing shows what you would get rather than whatever was current the day the
+# app was first listed. A clone something was installed from is never touched
+# here: moving its working tree behind the installer's back is `update`'s job.
+refresh_meta() { # url opts
+    local dir t sha
+    dir="$(meta_dir)/$(dir_name "$1")"
+    [[ -d "$dir/.git" && ! -f "$dir/.kiwi-installed" ]] || return 0
+    t="$(remote_target "$1" "${2:-}" || true)"
+    [[ -n $t ]] || return 0
+    IFS=$'\t' read -r sha _ <<<"$t"
+    [[ "$(local_head "$dir")" == "$sha" ]] && return 0
+    git_net -C "$dir" fetch --quiet --tags origin 2>/dev/null &&
+        git -C "$dir" -c advice.detachedHead=false checkout --quiet --force "$sha" 2>/dev/null ||
+        warn "could not refresh the cached details for $1"
+    return 0
+}
+
+# `kiwi sync` means "bring what you know up to date", which includes the cached
+# manifests, not only the catalog lists.
+refresh_all_meta() {
+    local url opts
+    while IFS=$'\t' read -r url opts; do
+        [[ -z $url ]] && continue
+        refresh_meta "$url" "$opts"
+    done < <(app_entries)
+}
+
 scope_label() { # "user system" -> "user+system"
     local j="$*"
     echo "${j// /+}"
 }
 
-# local list entries + catalog entries for a scope, as "url opts" lines
-raw_entries() { # scope
-    local f; f="$(list_file "$1")"
-    if [[ -r $f ]]; then grep -Ev '^[[:space:]]*(#|$)' "$f" 2>/dev/null || true; fi
-    local c url opts
-    for c in "$(catalogs_dir)"/*/; do
-        [[ -f "${c}apps.list" ]] || continue
-        while read -r url opts; do
-            [[ -z ${url:-} ]] && continue
-            [[ "$(entry_opt "${opts:-}" scope user)" == "$1" ]] && printf '%s %s\n' "$url" "${opts:-}"
-        done < <(grep -Ev '^[[:space:]]*(#|$)' "${c}apps.list" 2>/dev/null || true)
-    done
-}
-
-# print "url<TAB>opts" for every app of a scope, deduped (local list wins)
-entries() { # scope
-    local url opts d seen=" "
-    while read -r url opts; do
-        [[ -z $url ]] && continue
-        d="$(dir_name "$url")"
-        [[ $seen == *" $d "* ]] && continue
-        seen+="$d "
-        printf '%s\t%s\n' "$url" "${opts:-}"
-    done < <(raw_entries "$1")
-}
 
 dir_name() { # url -> repo directory name
     local b; b="$(basename "$1")"
@@ -782,7 +827,10 @@ cmd_list() {
     while IFS=$'\t' read -r url opts; do
         [[ -z $url ]] && continue
         found=1
-        dir="$(meta_dir)/$(dir_name "$url")"
+        (( check )) && refresh_meta "$url" "$opts"
+        # read the details out of the clone the app was installed from, so the
+        # version shown is the version running
+        dir="$(installed_dir "$url")"
         name="$(manifest_get "$dir" NAME "$(dir_name "$url")")"
         comp="$(manifest_get "$dir" COMPONENTS "$(manifest_get "$dir" TYPE "?")")"
         ver="$(manifest_get "$dir" VERSION "-")"
@@ -807,15 +855,21 @@ cmd_list() {
             status="not-installed"
         fi
         if (( inst )); then
-            # a cli+gui app on a headless box really did only get the CLI
-            for sc in $scs; do
-                [[ $comp == *gui* && "$(marker_gui "$sc" "$url")" == 0 ]] && comp="$comp (cli-only)"
-            done
+            # a cli+gui app on a headless box really did only get the CLI.
+            # Once, not once per scope — a dual-scope app read "(cli-only)
+            # (cli-only)".
+            if [[ $comp == *gui* ]]; then
+                for sc in $scs; do
+                    if is_installed "$sc" "$url" && [[ "$(marker_gui "$sc" "$url")" == 0 ]]; then
+                        comp="$comp (cli-only)"; break
+                    fi
+                done
+            fi
             if (( check )); then
                 target="$(remote_target "$url" "$opts" || true)"
                 IFS=$'\t' read -r tsha tref <<<"$target"
                 if [[ -z ${tsha:-} ]]; then status="unreachable"
-                elif [[ $tsha != "$(local_head "$dir")" ]]; then status="update-available"; fi
+                elif [[ -n "$(outdated_scopes "$url" "$tsha")" ]]; then status="update-available"; fi
             fi
         fi
 
@@ -935,22 +989,27 @@ cmd_info() { # [--porcelain] name
     fi
 }
 
+# One source of truth with cmd_list: app_entries for what exists, the per-scope
+# marker for what is installed. The old version still used the pre-manifest
+# model where a catalog entry without scope= was user-only, so it reported
+# "everything is up to date" and exited 0 while a system app from a catalog had
+# an update waiting.
 cmd_check() {
     sync_catalogs
-    local scope url opts dir n=0 target tsha tref
-    for scope in $(scopes); do
-        while IFS=$'\t' read -r url opts; do
-            [[ -z $url ]] && continue
-            is_installed "$scope" "$url" || continue
-            dir="$(repos_dir "$scope")/$(dir_name "$url")"
-            target="$(remote_target "$url" "$opts" || true)"
-            IFS=$'\t' read -r tsha tref <<<"$target"
-            if [[ -n ${tsha:-} && $tsha != "$(local_head "$dir")" ]]; then
-                log "${c_ylw}update available:${c_off} $(app_name "$scope" "$url") ($scope) -> $tref"
-                n=$((n+1))
-            fi
-        done < <(entries "$scope")
-    done
+    local url opts sc n=0 target tsha tref
+    while IFS=$'\t' read -r url opts; do
+        [[ -z $url ]] && continue
+        # only installed apps are worth a network round trip
+        is_installed_any "$url" || continue
+        target="$(remote_target "$url" "$opts" || true)"
+        IFS=$'\t' read -r tsha tref <<<"$target"
+        [[ -n ${tsha:-} ]] || continue
+        for sc in $(outdated_scopes "$url" "$tsha"); do
+            [[ -n $SCOPE_FILTER && $sc != "$SCOPE_FILTER" ]] && continue
+            log "${c_ylw}update available:${c_off} $(app_name "$sc" "$url") ($sc) -> $tref"
+            n=$((n+1))
+        done
+    done < <(app_entries)
     if (( n > 0 )); then
         notify "Updates available" "$n app(s) can be updated"
         log "$n update(s) available"
@@ -1138,7 +1197,7 @@ case "$CMD" in
     add)         add_args=(); [[ $SCOPE_FILTER == system ]] && add_args=(--system)
                  cmd_add ${ARGS[@]+"${ARGS[@]}"} ${add_args[@]+"${add_args[@]}"} ;;
     catalog)     cmd_catalog ${ARGS[@]+"${ARGS[@]}"} ;;
-    sync)        sync_catalogs; sync_all_meta; info "catalogs synced" ;;
+    sync)        sync_catalogs; sync_all_meta; refresh_all_meta; info "catalogs synced" ;;
     # No implicit --all. `kiwi install` with no arguments installed every app in
     # every registered catalog, running each one's installer — including, on a
     # default install, apps that ask for root. `kiwi update` with no arguments

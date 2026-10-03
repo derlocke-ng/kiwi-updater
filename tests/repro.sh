@@ -202,6 +202,18 @@ t_F11() { # two catalogs whose repo names collide
     check F11 "second catalog with the same repo name is refused or fully usable" f
 }
 
+t_F11b() { # an installed app must not be silently re-pointed at another repo
+    mkapp a shifty user 'echo "installer from A"'
+    ku add $GITROOT/a/shifty.git >/dev/null
+    ku install shifty >/dev/null
+    # a different repo, same basename, with a visibly different installer
+    mkapp b shifty user 'touch /tmp/kt-ran-from-B'
+    echo "$GITROOT/b/shifty.git" > $TH/.config/kiwi-updater/apps.list
+    ku install shifty >/dev/null 2>&1; local rc=$?
+    f() { [[ $rc -ne 0 && ! -e /tmp/kt-ran-from-B ]]; }
+    check F11b "an installed app is not silently reinstalled from a changed URL" f
+}
+
 t_F12() { # --cli-only must survive more than one update
     mkapp a flav user 'echo "KIWI_GUI=$KIWI_GUI"'
     ku add $GITROOT/a/flav.git >/dev/null
@@ -306,7 +318,7 @@ t_S2() { # root must not resolve apps from a list the user can write
     check S2 "root kiwi ignores HOME/XDG and user-writable lists" f
 }
 
-for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F12 F13 F14 F15 F16 F17 F18 F19 S1 S2; do run $t; done
+for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

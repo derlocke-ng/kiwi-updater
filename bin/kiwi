@@ -187,46 +187,96 @@ sync_catalogs() {
 # where we clone purely to READ a manifest (never to execute a system install)
 meta_dir() { [[ $EUID -eq 0 ]] && echo "$SYS_REPOS" || echo "$USER_REPOS"; }
 
-# every app we know about, deduped, regardless of scope: "url<TAB>opts"
+# every entry we know about, in precedence order and NOT deduped
+app_entries_raw() {
+    local f url opts c
+    for f in "$USER_LIST" "$SYS_LIST"; do
+        [[ -r $f ]] || continue
+        while read -r url opts; do
+            [[ -z ${url:-} ]] && continue
+            # an entry in the system list is itself a scope filter
+            [[ $f == "$SYS_LIST" && $opts != *scope=* ]] && opts="${opts:-} scope=system"
+            # mark it as coming from a list on THIS machine rather than from
+            # a catalog — app_scopes lets a local scope= filter overrule the
+            # manifest, and a catalog must not get that power
+            opts="${opts:-} local=1"
+            printf '%s\t%s\n' "$url" "${opts:-}"
+        done < <(grep -Ev '^[[:space:]]*(#|$)' "$f" 2>/dev/null || true)
+    done
+    for c in "$(catalogs_dir)"/*/; do
+        [[ -f "${c}apps.list" ]] || continue
+        while read -r url opts; do
+            [[ -z ${url:-} ]] && continue
+            printf '%s\t%s\n' "$url" "${opts:-}"
+        done < <(grep -Ev '^[[:space:]]*(#|$)' "${c}apps.list" 2>/dev/null || true)
+    done
+}
+
+# every app we know about, deduped by repo name, regardless of scope:
+# "url<TAB>opts". A list on this machine wins over a catalog.
 app_entries() {
-    local f url opts d seen=" " c
-    {
-        for f in "$USER_LIST" "$SYS_LIST"; do
-            [[ -r $f ]] || continue
-            while read -r url opts; do
-                [[ -z ${url:-} ]] && continue
-                # an entry in the system list is itself a scope filter
-                [[ $f == "$SYS_LIST" && $opts != *scope=* ]] && opts="${opts:-} scope=system"
-                # mark it as coming from a list on THIS machine rather than from
-                # a catalog — app_scopes lets a local scope= filter overrule the
-                # manifest, and a catalog must not get that power
-                opts="${opts:-} local=1"
-                printf '%s\t%s\n' "$url" "${opts:-}"
-            done < <(grep -Ev '^[[:space:]]*(#|$)' "$f" 2>/dev/null || true)
-        done
-        for c in "$(catalogs_dir)"/*/; do
-            [[ -f "${c}apps.list" ]] || continue
-            while read -r url opts; do
-                [[ -z ${url:-} ]] && continue
-                printf '%s\t%s\n' "$url" "${opts:-}"
-            done < <(grep -Ev '^[[:space:]]*(#|$)' "${c}apps.list" 2>/dev/null || true)
-        done
-    } | while IFS=$'\t' read -r url opts; do
+    local url opts d seen=" "
+    while IFS=$'\t' read -r url opts; do
+        [[ -z $url ]] && continue
         d="$(dir_name "$url")"
-        [[ $seen == *" $d "* ]] && continue      # local lists win over catalogs
+        [[ $seen == *" $d "* ]] && continue
         seen+="$d "
         printf '%s\t%s\n' "$url" "${opts:-}"
-    done
+    done < <(app_entries_raw)
+}
+
+# The dedup above silently drops the loser, which is fine when two lists name
+# the SAME repo and wrong when they name different ones: one app then shadows
+# the other and `kiwi install <name>` is ambiguous. Say so once, out loud.
+warn_name_collisions() {
+    local -A first=() reported=()
+    local url opts d u
+    while IFS=$'\t' read -r url opts; do
+        [[ -z $url ]] && continue
+        d="$(dir_name "$url")"; u="$(norm_url "$url")"
+        if [[ -z ${first[$d]:-} ]]; then
+            first[$d]="$u"
+        elif [[ ${first[$d]} != "$u" && -z ${reported[$d]:-} ]]; then
+            reported[$d]=1
+            warn "two different repos are both called '$d':"
+            warn "    using  ${first[$d]}"
+            warn "   hidden  $u"
+            warn "  only the first can be installed under that name."
+        fi
+    done < <(app_entries_raw)
 }
 
 # clone/refresh just enough to read the manifest. Cheap, unprivileged, and the
 # only way to know what an app needs before deciding how to install it.
+# The clone directory is the repo's BASENAME, so a cached directory can outlive
+# a change of URL behind that name. Reading the origin tells us whether the
+# clone we have is really the repo the list is talking about.
+repo_origin() { # dir -> origin url, empty if there is none
+    local u
+    u="$(git -C "$1" remote get-url origin 2>/dev/null)" && [[ -n $u ]] && { echo "$u"; return; }
+    # git refuses a repo owned by another user ("dubious ownership"); the
+    # config file itself is world-readable
+    sed -n '/^\[remote "origin"\]/,/^\[/s/^[[:space:]]*url[[:space:]]*=[[:space:]]*//p' \
+        "$1/.git/config" 2>/dev/null | head -1
+}
+
+origin_differs() { # dir url
+    local have; have="$(repo_origin "$1")"
+    [[ -n $have ]] || return 1
+    [[ "$(norm_url "$have")" != "$(norm_url "$2")" ]]
+}
+
 sync_meta() { # url opts -> repo dir on stdout
     local url="$1" opts="${2:-}" dir
     dir="$(meta_dir)/$(dir_name "$url")"
     if [[ ! -d "$dir/.git" ]]; then
         mkdir -p "$(dirname "$dir")"
         git_net clone --quiet "$url" "$dir" 2>/dev/null || return 1
+    elif origin_differs "$dir" "$url" && [[ ! -f "$dir/.kiwi-installed" ]]; then
+        # nothing was installed from this clone, so it is only a cache: point
+        # it at the URL the list actually names
+        git -C "$dir" remote set-url origin "$url" 2>/dev/null &&
+            git_net -C "$dir" fetch --quiet --tags origin 2>/dev/null || true
     fi
     echo "$dir"
 }
@@ -650,6 +700,20 @@ sync_repo() { # scope url opts -> clones + checks out the target ref, echoes rep
     if [[ ! -d "$dir/.git" ]]; then
         mkdir -p "$(repos_dir "$scope")" || return 1
         git_net clone --quiet "$url" "$dir" || { warn "clone failed: $url"; return 1; }
+    elif origin_differs "$dir" "$url"; then
+        # What `kiwi info` shows and what `kiwi install` acts on have to be the
+        # same repo. With a stale origin kiwi fetched from the OLD url, printed
+        # "fatal: reference is not a tree", ran the OLD installer and reported
+        # success.
+        if [[ -f "$dir/.kiwi-installed" ]]; then
+            warn "$(dir_name "$url") was installed from $(repo_origin "$dir")"
+            warn "  but the list now names $url."
+            warn "  kiwi will not swap the source of an installed app silently."
+            warn "  remove it first: kiwi uninstall $(dir_name "$url")"
+            return 1
+        fi
+        warn "$(dir_name "$url"): source changed, repointing the cached clone at $url"
+        git -C "$dir" remote set-url origin "$url" || return 1
     fi
     IFS=$'\t' read -r sha _ <<<"$target"
     git_net -C "$dir" fetch --quiet --tags origin || { warn "fetch failed: $url"; return 1; }
@@ -1172,6 +1236,16 @@ cmd_catalog() { # add <url> | list      (--system routes to the system file)
             fi
             mkdir -p "$(dirname "$f")"; touch "$f"
             list_has "$f" "$url" && die "catalog already registered in $f"
+            # Catalogs are cloned into a directory named after the repo, so two
+            # catalogs called e.g. org1/catalog and org2/catalog shared one
+            # directory: the second was never cloned, its apps never appeared,
+            # and removing it deleted the first one's clone.
+            local other
+            while read -r other _; do
+                [[ -n ${other:-} && "$(dir_name "$other")" == "$(dir_name "$url")" ]] &&
+                    die "a catalog directory called '$(dir_name "$url")' is already in use by $other
+Both would share one clone. Rename the repo, or use a fork with a distinct name."
+            done < <(catalog_urls)
             # A catalog is a list of repos whose install scripts you will run.
             # Anything in it that declares the system scope runs as root. Say so
             # once, plainly, at the only moment the decision is being made.
@@ -1293,6 +1367,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 command -v git >/dev/null 2>&1 || die "git is required (rpm-ostree install git)"
+
+# once per invocation, for the commands that resolve or list apps
+case "$CMD" in
+    list|search|info|show|check|install|update|uninstall|self-update)
+        warn_name_collisions ;;
+esac
 
 case "$CMD" in
     list)        cmd_list ${ARGS[@]+"${ARGS[@]}"} ;;

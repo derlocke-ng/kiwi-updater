@@ -88,13 +88,20 @@ Put a [`kiwi.manifest`](templates/kiwi.manifest) and an
 ```ini
 NAME=my-tool
 DESCRIPTION=Short description
+# COMPONENTS: cli gui daemon service gnome-extension config …
+COMPONENTS=cli
+# SCOPES: user, system, or both
+SCOPES=user
 VERSION=0.1.0
-COMPONENTS=cli            # cli gui daemon service gnome-extension config …
-SCOPES=user               # user, system, or both
 HOMEPAGE=https://…
 LICENSE=GPL-3.0-or-later
 INSTALLER=install.sh
 ```
+
+A value runs to the end of the line — comments go on their own line, never
+after a value. A description may legitimately contain a `#`, so kiwi cannot
+strip trailing comments. Copied with `COMPONENTS=cli  # … gui …` on one line,
+the comment became part of the value and the app was treated as having a GUI.
 
 `kiwi` runs your installer once **per declared scope**, with:
 

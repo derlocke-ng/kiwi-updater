@@ -1512,6 +1512,9 @@ while [[ $# -gt 0 ]]; do
         --porcelain) PORCELAIN=1 ;;
         --cli-only|--no-gui) GUI_CHOICE=0 ;;
         --gui|--with-gui)    GUI_CHOICE=1 ;;
+        # end of options: everything after this is an app name, never a flag.
+        # The root wrapper passes its validated selection after a --.
+        --) shift; while [[ $# -gt 0 ]]; do ARGS+=("$1"); shift; done; break ;;
         *) ARGS+=("$1") ;;
     esac
     shift

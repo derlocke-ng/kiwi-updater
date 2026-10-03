@@ -40,8 +40,10 @@ known() {
 
 mapfile -t KNOWN < <(known)
 for want in "$@"; do
-    # no paths, no options, no shell metacharacters — a bare app name only
-    [[ $want =~ ^[A-Za-z0-9._-]+$ ]] || { echo "refusing name: $want" >&2; exit 2; }
+    # A bare app name: no paths, no options, no shell metacharacters. The first
+    # character must be alphanumeric — the old ^[A-Za-z0-9._-]+$ also matched
+    # --all, --force and --user, which only the known-apps check below stopped.
+    [[ $want =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "refusing name: $want" >&2; exit 2; }
     ok=0
     for k in ${KNOWN[@]+"${KNOWN[@]}"}; do
         [[ $want == "$k" ]] && { ok=1; break; }
@@ -49,4 +51,6 @@ for want in "$@"; do
     (( ok )) || { echo "not a system app on this machine: $want" >&2; exit 2; }
 done
 
-exec "$KIWI" update --system --quiet "$@"
+# `--` so a name can never be read as an option, whatever kiwi's option loop
+# grows into later.
+exec "$KIWI" update --system --quiet -- "$@"

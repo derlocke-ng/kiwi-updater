@@ -284,6 +284,14 @@ t_F19() { # the app-folder glob has to match the ids apps actually use
     check F19 "sync_app_folder does not look for org.kiwinetwork.* (apps use eu.kiwinetwork.*)" f
 }
 
+t_S5() { # a name the wrapper accepts must never be able to look like an option
+    # Asserted against the pattern itself: with NAME now validated in kiwi too,
+    # there is no longer a route that gets an option-shaped name into the
+    # known-apps list to test behaviourally.
+    f() { grep -q '\^\[A-Za-z0-9\]\[A-Za-z0-9\._-\]\*\$' $W/data/kiwi-system-update; }
+    check S5 "kiwi-system-update's name pattern cannot match an option" f
+}
+
 t_S1() { # no credential helper on ANY network call, including ls-remote
     command -v python3 >/dev/null || { echo "skip S1   (needs python3)"; return 0; }
     local port=18473 log=/tmp/kt-cred.log
@@ -318,7 +326,7 @@ t_S2() { # root must not resolve apps from a list the user can write
     check S2 "root kiwi ignores HOME/XDG and user-writable lists" f
 }
 
-for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2; do run $t; done
+for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

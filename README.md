@@ -206,7 +206,7 @@ nothing outside your home is ever written.
 | | needs root | asks for a password |
 |---|---|---|
 | anything in the user scope | no | no |
-| **updating** a system app | yes | **no** — polkit authorises one fixed-purpose helper for local `wheel` users |
+| **updating** a system app | yes | **no** — polkit authorises one fixed-purpose helper for active `wheel` sessions |
 | **installing** a system app | yes | yes |
 | **uninstalling** a system app | yes | yes |
 
@@ -217,10 +217,14 @@ A plain `kiwi install` never touches root: the default install is entirely
 
 Passwordless system *updates* go through `/usr/local/libexec/kiwi-system-update`,
 which the polkit rule authorises by exact path. It takes app names but treats
-them as a **selection**: every name is checked against the root-owned
-`/etc/kiwi-updater/apps.list` and anything else is refused, so the worst a
+them as a **selection**: every name must look like a name (never an option) and
+must already appear in the root-owned `/etc/kiwi-updater/apps.list` or a
+catalog registered for root, and anything else is refused — so the worst a
 caller can ask for is an update of an app the administrator already trusts.
 With no names it updates everything, which is what the background timer wants.
+
+The rule requires an **active** session in `wheel`, not a local one: VM and
+remote desktop sessions can report as non-local.
 
 ## Notes
 

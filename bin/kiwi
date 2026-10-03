@@ -443,7 +443,13 @@ remote_target() { # url opts -> "sha<TAB>refname"; empty output on failure
         sha="$(awk -v b="$branch" '$2=="refs/heads/"b{print $1;exit}' <<<"$out")"
         [[ -n $sha ]] && printf '%s\t%s\n' "$sha" "$branch"
     else
-        tag="$(awk '$2 ~ /^refs\/tags\// && $2 !~ /\^\{\}$/{sub("refs/tags/","",$2); print $2}' <<<"$out" | sort -V | tail -1)"
+        # A RELEASE is a version tag and nothing else. Every tag used to be a
+        # candidate, and `sort -V` puts v2.0.0-rc1 after v2.0.0 — so the moment
+        # a release candidate existed, the final release was never installed
+        # again. A tag called wip-test beat every version tag there was.
+        # Pre-releases stay reachable through an explicit ref= pin.
+        tag="$(awk '$2 ~ /^refs\/tags\// && $2 !~ /\^\{\}$/{sub("refs/tags/","",$2); print $2}' <<<"$out" \
+               | grep -E '^v?[0-9]+(\.[0-9]+){0,3}$' | sort -V | tail -1 || true)"
         if [[ -n $tag ]]; then
             sha="$(awk -v t="$tag" '$2=="refs/tags/"t"^{}"{print $1;exit}' <<<"$out")"
             [[ -n $sha ]] || sha="$(awk -v t="$tag" '$2=="refs/tags/"t{print $1;exit}' <<<"$out")"

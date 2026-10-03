@@ -26,8 +26,11 @@ else
     git clone --quiet "$REPO" "$DIR"
 fi
 
-# same release rule kiwi itself uses: latest version tag, HEAD if untagged
-tag="$(git -C "$DIR" tag --sort=version:refname | tail -1)"
+# Same release rule kiwi itself uses: the latest VERSION tag, HEAD if there is
+# none. Only tags shaped like v1.2.3 count — version:refname sorts v2.0.0-rc1
+# after v2.0.0, and a stray tag like wip-test after everything.
+tag="$(git -C "$DIR" tag --sort=version:refname \
+       | grep -E '^v?[0-9]+(\.[0-9]+){0,3}$' | tail -1 || true)"
 if [[ -n $tag ]]; then
     echo ":: checking out release $tag"
     git -C "$DIR" -c advice.detachedHead=false checkout --quiet --force "$tag"

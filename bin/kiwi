@@ -545,21 +545,30 @@ effective_gui() { # repo_dir
     gui_available
 }
 
-run_installer() { # scope repo_dir action
-    local scope="$1" dir="$2" action="$3"
+run_installer() { # scope repo_dir action [purge]
+    local scope="$1" dir="$2" action="$3" purge="${4:-0}"
     local inst; inst="$(manifest_get "$dir" INSTALLER install.sh)"
     # One unusable app must not abort the run: with --all that would mean the
     # first broken repo stops every app after it from being updated.
     [[ -f "$dir/$inst" ]] || { warn "installer '$inst' not found in $dir"; return 1; }
     local gui; gui="$(effective_gui "$dir")"
-    info "running $inst $action ($scope scope, $([[ $gui == 1 ]] && echo with-gui || echo cli-only))"
+    # --purge has to reach the app. The README promises it "also drops its
+    # config", but kiwi only ever removed the URL from its own list and called
+    # the installer with a bare `uninstall`, so apps that implement
+    # `uninstall --purge` never heard about it. Passed both ways: as the
+    # argument the convention documents, and in the environment beside the
+    # other KIWI_* variables.
+    local args=("$action")
+    [[ $action == uninstall ]] && (( purge )) && args+=(--purge)
+    info "running $inst ${args[*]} ($scope scope, $([[ $gui == 1 ]] && echo with-gui || echo cli-only))"
     ( cd "$dir" &&
       env KIWI_SCOPE="$scope" \
           KIWI_ACTION="$action" \
           KIWI_APP_DIR="$dir" \
           KIWI_PREFIX="$(prefix_for "$scope")" \
           KIWI_GUI="$gui" \
-          bash "./$inst" "$action" 9>&- )
+          KIWI_PURGE="$purge" \
+          bash "./$inst" "${args[@]}" 9>&- )
 }
 
 # Every failure path RETURNS, and none of them die. This runs inside $(...),
@@ -648,7 +657,7 @@ uninstall_one() { # scope url purge
         # The clone holds the only copy of this app's uninstaller. Deleting it
         # after a failed run leaves the app's files on disk with nothing left
         # that knows how to remove them.
-        if is_installed "$scope" "$url" && ! run_installer "$scope" "$dir" uninstall; then
+        if is_installed "$scope" "$url" && ! run_installer "$scope" "$dir" uninstall "$purge"; then
             if (( FORCE )); then
                 warn "$name: the uninstaller failed — dropping $dir anyway (--force)"
             else

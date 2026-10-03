@@ -105,6 +105,11 @@ INSTALLER=install.sh
 | `KIWI_APP_DIR` | absolute path of the clone |
 | `KIWI_ACTION` | `install` \| `update` \| `uninstall` |
 | `KIWI_GUI` | `0` on a headless machine, or with `--cli-only` |
+| `KIWI_PURGE` | `1` when the user asked for `--purge` (uninstall only) |
+
+On a purging uninstall your script is also called as `./install.sh uninstall
+--purge`, so you can branch on either. Without `--purge`, leave the user's
+configuration where it is.
 
 A dual-scope installer branches on `KIWI_SCOPE` and does only that half each
 time. `COMPONENTS` containing `gui` is what makes `kiwi` skip desktop parts

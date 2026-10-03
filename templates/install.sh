@@ -8,6 +8,8 @@
 #   KIWI_APP_DIR  absolute path of this repo's clone
 #   KIWI_ACTION   same as $1
 #   KIWI_GUI      0 on a headless machine or with --cli-only
+#   KIWI_PURGE    1 when the user asked for --purge (uninstall only); your
+#                 script is also called as `./install.sh uninstall --purge`
 #
 # If your manifest says SCOPES=user system, this script is invoked TWICE — once
 # with KIWI_SCOPE=user (as the user) and once with KIWI_SCOPE=system (as root).
@@ -62,6 +64,12 @@ do_uninstall() {
     # rm -f "$KIWI_PREFIX/bin/$APP-gui" "$KIWI_PREFIX/share/applications/$APP.desktop"
     # gnome-extensions disable "$UUID" || true; rm -rf "$EXT_DIR"
     # systemctl disable --now "$APP.service" || true; rm -f /etc/systemd/system/$APP.service
+
+    # Only on --purge: an ordinary uninstall leaves the user's configuration
+    # alone, so reinstalling later picks up where they left off.
+    if [[ "${KIWI_PURGE:-0}" == 1 ]]; then
+        : # rm -rf "$HOME/.config/$APP"   (or /etc/$APP for KIWI_SCOPE=system)
+    fi
     :
 }
 
@@ -69,5 +77,5 @@ case "${1:-install}" in
     install)   do_install ;;
     update)    do_update ;;
     uninstall) do_uninstall ;;
-    *) echo "usage: $0 install|update|uninstall" >&2; exit 1 ;;
+    *) echo "usage: $0 install|update|uninstall [--purge]" >&2; exit 1 ;;
 esac

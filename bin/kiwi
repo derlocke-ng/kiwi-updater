@@ -535,6 +535,36 @@ list_drop() { # file url -> rewrite without that entry, atomically
     mv -f "$tmp" "$1"
 }
 
+# Set or clear ONE key=value option on the entry for <url>, keeping the rest of
+# the line and the rest of the file intact. An empty value removes the key. The
+# entry is appended when it is not there yet, which is what makes `kiwi pin` on
+# a catalog app work: a local entry overrides the catalog's.
+list_set_opt() { # file url key value
+    local f="$1" url="$2" key="$3" val="${4:-}"
+    local want line u rest tmp kv newopts found=0
+    want="$(norm_url "$url")"
+    mkdir -p "$(dirname "$f")" && touch "$f" || return 1
+    tmp="$(mktemp "$f.XXXXXX")" || return 1
+    while IFS= read -r line || [[ -n $line ]]; do
+        read -r u rest <<<"$line" || true
+        if [[ -n ${u:-} && $u != \#* && "$(norm_url "$u")" == "$want" ]]; then
+            found=1
+            newopts=""
+            for kv in ${rest:-}; do
+                [[ $kv == "$key="* ]] && continue
+                newopts+="${newopts:+ }$kv"
+            done
+            [[ -n $val ]] && newopts+="${newopts:+ }$key=$val"
+            printf '%s%s\n' "$u" "${newopts:+ $newopts}"
+        else
+            printf '%s\n' "$line"
+        fi
+    done < "$f" > "$tmp"
+    (( found )) || [[ -z $val ]] || printf '%s %s=%s\n' "$url" "$key" "$val" >> "$tmp"
+    chmod --reference="$f" "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$f"
+}
+
 dir_name() { # url -> repo directory name
     local b; b="$(basename "$1")"
     echo "${b%.git}"
@@ -1241,11 +1271,36 @@ deps_missing() { # "a b c" -> missing ones
     echo "${out[*]:-}"
 }
 
-cmd_info() { # [--porcelain] name
-    local porcelain=0
-    [[ ${1:-} == --porcelain ]] && { porcelain=1; shift; }
-    [[ $# -eq 1 ]] || die "usage: kiwi info [--porcelain] <app>"
+cmd_info() { # [--porcelain] [--installer] name
+    local porcelain=0 show_inst=0
+    while [[ ${1:-} == --* ]]; do
+        case "$1" in
+            --porcelain) porcelain=1 ;;
+            --installer) show_inst=1 ;;
+            *) die "unknown option for info: $1" ;;
+        esac
+        shift
+    done
+    [[ $# -eq 1 ]] || die "usage: kiwi info [--porcelain] [--installer] <app>"
     local line url opts dir scs sc
+
+    # Print the script before the first install, not after. An app's installer
+    # is the whole of what installing it does, and for these tools it is short
+    # enough to read.
+    if (( show_inst )); then
+        line="$(resolve "$1")" || die "unknown app: $1"
+        IFS=$'\t' read -r url opts <<<"$line"
+        dir="$(sync_meta "$url" "$opts")" || die "cannot reach $url"
+        scs="$(app_scopes "$dir" "$opts")"
+        local inst; inst="$(manifest_get "$dir" INSTALLER install.sh)"
+        [[ -f "$dir/$inst" ]] || die "there is no installer '$inst' in $dir"
+        info "$inst from $url"
+        [[ $scs == *system* ]] &&
+            info "${c_ylw}this app declares the system scope, so kiwi runs this as root${c_off}"
+        log ""
+        cat "$dir/$inst"
+        return 0
+    fi
 
     if (( porcelain )); then
         line="$(resolve "$1")" || die "unknown app: $1"
@@ -1305,6 +1360,112 @@ cmd_info() { # [--porcelain] name
 # model where a catalog entry without scope= was user-only, so it reported
 # "everything is up to date" and exited 0 while a system app from a catalog had
 # an update waiting.
+# ---------- pin / unpin -----------------------------------------------------
+# ref= on a list entry has always existed; this makes it a command, so "stay on
+# this tag until I say otherwise" no longer means hand-editing apps.list. The
+# cheapest real protection there is: code only changes when you say so.
+
+# 0 = the ref exists, 1 = it does not, 2 = could not reach the remote
+ref_exists() { # url ref
+    remote_target "$1" "" >/dev/null 2>&1 || return 2
+    remote_target "$1" "ref=$2" >/dev/null 2>&1 || return 1
+    return 0
+}
+
+pin_apply() { # app value   ("" clears the pin)
+    local app="$1" val="${2:-}" scope=user f line url opts rc=0
+    [[ $SCOPE_FILTER == system ]] && scope=system
+    if [[ $scope == system && $EUID -ne 0 ]]; then
+        local rk; rk="$(root_kiwi)" || return 1
+        if [[ -n $val ]]; then as_root "$rk" pin --system "$app" "$val" 9>&-
+        else                   as_root "$rk" unpin --system "$app" 9>&-
+        fi
+        return
+    fi
+    line="$(resolve "$app")" || die "unknown app: $app (check 'kiwi list')"
+    IFS=$'\t' read -r url opts <<<"$line"
+    f="$(list_file "$scope")"
+    if [[ -n $val ]]; then
+        ref_exists "$url" "$val" || rc=$?
+        (( rc == 1 )) && die "$(dir_name "$url") has no tag or branch called '$val'"
+        (( rc == 2 )) && warn "could not reach $url to confirm '$val' exists — pinning anyway"
+    fi
+    list_set_opt "$f" "$url" ref "$val" || die "could not update $f"
+    if [[ -n $val ]]; then
+        info "${c_grn}$(dir_name "$url") pinned to $val${c_off} in $f"
+        info "  it stays there until 'kiwi unpin $(dir_name "$url")'"
+    else
+        info "${c_grn}$(dir_name "$url") unpinned${c_off} in $f — it follows its latest release again"
+    fi
+}
+
+cmd_pin() {
+    [[ $# -eq 2 ]] || die "usage: kiwi pin <app> <tag-or-branch> [--system]"
+    pin_apply "$1" "$2"
+}
+
+cmd_unpin() {
+    [[ $# -eq 1 ]] || die "usage: kiwi unpin <app> [--system]"
+    pin_apply "$1" ""
+}
+
+# ---------- diff ------------------------------------------------------------
+# What an update would actually change, before it changes it. The marker is the
+# record of what is installed, so this is simply marker..target — and the
+# installer gets shown in full, because for a catalog of small tools that is
+# the code that is about to run as you or as root, and it is short enough to
+# read.
+cmd_diff() {
+    [[ $# -eq 1 ]] || die "usage: kiwi diff <app> [--user|--system]"
+    local app="$1" line url opts sc dir from target tsha tref inst n=0
+    line="$(resolve "$app")" || die "unknown app: $app (check 'kiwi list')"
+    IFS=$'\t' read -r url opts <<<"$line"
+
+    for sc in $(real_scopes); do
+        is_installed "$sc" "$url" || continue
+        [[ -n $SCOPE_FILTER && $sc != "$SCOPE_FILTER" ]] && continue
+        n=$((n+1))
+        dir="$(scope_dir "$sc" "$url")"
+        if ! git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
+            # root-owned clone, read as the user: git refuses it outright
+            warn "$(app_name "$sc" "$url") ($sc) is installed in a clone this user cannot read."
+            warn "  try: sudo kiwi diff --system $app"
+            continue
+        fi
+        from="$(marker_sha "$dir")"
+        target="$(remote_target "$url" "$opts" || true)"
+        [[ -n $target ]] || { warn "cannot reach $url"; continue; }
+        IFS=$'\t' read -r tsha tref <<<"$target"
+        info "$(app_name "$sc" "$url") ($sc): $tref"
+        if [[ $from == "$tsha" ]]; then
+            log "  already on that commit — an update would change nothing"
+            continue
+        fi
+        git_net -C "$dir" fetch --quiet --tags origin 2>/dev/null ||
+            warn "could not fetch — showing only what is already local"
+        if ! git -C "$dir" rev-parse --quiet --verify "$from^{commit}" >/dev/null 2>&1; then
+            warn "the installed commit $from is not in the remote history any more"
+            continue
+        fi
+        log ""
+        log "${c_bold}commits${c_off}"
+        git -C "$dir" log --oneline --no-decorate "$from..$tsha" 2>/dev/null | sed 's/^/  /'
+        log ""
+        log "${c_bold}files${c_off}"
+        git -C "$dir" diff --stat "$from" "$tsha" 2>/dev/null | sed 's/^/  /'
+        inst="$(manifest_get "$dir" INSTALLER install.sh)"
+        log ""
+        if git -C "$dir" diff --quiet "$from" "$tsha" -- "$inst" 2>/dev/null; then
+            log "${c_dim}$inst is unchanged${c_off}"
+        else
+            log "${c_ylw}$inst changes — this is the script that runs on update${c_off}"
+            git -C "$dir" diff "$from" "$tsha" -- "$inst" 2>/dev/null | sed 's/^/  /'
+        fi
+    done
+    (( n )) || die "$app is not installed, so there is nothing to compare.
+'kiwi info --installer $app' shows the script a first install would run."
+}
+
 cmd_check() {
     sync_catalogs
     local url opts sc n=0 target tsha tref
@@ -1466,6 +1627,9 @@ kiwi $KIWI_VERSION — install and update open-source apps from git catalogs
   kiwi list [--check]        every app this machine knows about (--no-sync to skip fetching)
   kiwi search <term>         find an app across all registered catalogs
   kiwi info <app>            what it is, what it installs, whether it needs root
+  kiwi info --installer <a>  print the script an install would run, before it runs
+  kiwi diff <app>            what an update would change, including its installer
+  kiwi pin <app> <tag>       stay on that tag; kiwi unpin <app> to follow releases again
   kiwi install <app>|--all   install (or re-install) an app; --all needs asking for
   kiwi update [<app>]|--all  update everything that has a new release
   kiwi uninstall <app>       remove it  (--purge also drops its config)
@@ -1569,6 +1733,9 @@ case "$CMD" in
     update)      sync_catalogs; collect_targets "${ARGS[@]:---all}"; dispatch update ;;
     uninstall)   [[ ${#ARGS[@]} -gt 0 ]] || die "usage: kiwi uninstall <name...>"
                  collect_targets "${ARGS[@]}"; dispatch uninstall ;;
+    pin)         cmd_pin ${ARGS[@]+"${ARGS[@]}"} ;;
+    unpin)       cmd_unpin ${ARGS[@]+"${ARGS[@]}"} ;;
+    diff)        cmd_diff ${ARGS[@]+"${ARGS[@]}"} ;;
     self-update) cmd_self_update ;;
     version)     echo "kiwi $KIWI_VERSION"
                  root_v="$(root_version || true)"

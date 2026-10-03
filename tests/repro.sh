@@ -326,7 +326,47 @@ t_S2() { # root must not resolve apps from a list the user can write
     check S2 "root kiwi ignores HOME/XDG and user-writable lists" f
 }
 
-for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5; do run $t; done
+# ---------------------------------------------------------------------------
+# Phase 4 features. Not findings — these assert that what the plan asked for
+# actually behaves, so the same harness covers them.
+# ---------------------------------------------------------------------------
+t_P1() { # pin holds a version across updates; unpin releases it
+    mkapp a pinned user 'echo installing'
+    ku add $GITROOT/a/pinned.git >/dev/null
+    ku install pinned >/dev/null
+    release a pinned v1.1.0
+    ku pin pinned v1.0.0 >/dev/null 2>&1
+    ku update pinned >/dev/null 2>&1
+    local held; held="$(sed -n 's/^VERSION=//p' "$(urepo pinned)/kiwi.manifest" | head -1)"
+    ku unpin pinned >/dev/null 2>&1
+    ku update pinned >/dev/null 2>&1
+    local freed; freed="$(sed -n 's/^VERSION=//p' "$(urepo pinned)/kiwi.manifest" | head -1)"
+    f() { [[ $held == 1.0.0 && $freed == 1.1.0 ]]; }
+    check P1 "kiwi pin holds a version, kiwi unpin releases it (held=$held freed=$freed)" f
+}
+
+t_P2() { # diff shows the installer change an update would bring
+    mkapp a dif user 'echo one'
+    ku add $GITROOT/a/dif.git >/dev/null; ku install dif >/dev/null
+    ( cd /tmp/kt-work-a-dif &&
+      sed -i 's/^VERSION=.*/VERSION=1.1.0/' kiwi.manifest &&
+      printf '#!/usr/bin/env bash\nset -euo pipefail\necho two\n' > install.sh &&
+      git commit -qam two && git tag -a v1.1.0 -m v1.1.0 && git push -q origin HEAD --tags )
+    local out; out="$(ku diff dif 2>&1)"
+    f() { grep -q 'install.sh changes' <<<"$out" && grep -q 'echo two' <<<"$out"; }
+    check P2 "kiwi diff shows the installer diff an update would apply" f
+}
+
+t_P3() { # info --installer prints the script before anything runs
+    mkapp a shown user 'echo "the thing that runs"'
+    ku add $GITROOT/a/shown.git >/dev/null
+    local out; out="$(ku info --installer shown 2>&1)"
+    f() { grep -q 'the thing that runs' <<<"$out" && [[ ! -f $(urepo shown)/.kiwi-installed ]]; }
+    check P3 "kiwi info --installer shows the script and installs nothing" f
+}
+
+for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
+         P1 P2 P3; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

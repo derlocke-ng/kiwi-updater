@@ -3,6 +3,27 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 1.3.1 — 2026-10-03
+
+Fixes a bug introduced in 1.3.0.
+
+An app listed in **both** `apps.list` files — which kiwi-updater itself is, by
+design — was shown as belonging only to the scope of whichever entry survived
+the dedup. `kiwi list` labelled kiwi-updater `scopes=user` while it was
+installed in both, so:
+
+- the marker comparison correctly saw that the root half was behind and
+  reported `update-available`,
+- but `kiwi update kiwi-updater` only ever acted on the user half and answered
+  "is up to date",
+- so the GUI showed an update that nothing the user could do would clear.
+
+The scopes to act on are now the ones the entry and manifest declare *plus any
+scope the app is actually installed in*. Something already installed is a fact,
+and it outranks what one list entry happened to say. `kiwi update
+<app>` now reaches the root half of such an app, passwordlessly through the
+usual wrapper.
+
 ## 1.3.0 — 2026-10-03
 
 A full audit of 1.2.1 (see `FIXPLAN.md`), worked through one finding per

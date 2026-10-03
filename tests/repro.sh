@@ -443,8 +443,30 @@ t_P7() { # a shallow metadata clone must not stop you installing an OLDER tag
     check P7 "an older pinned tag installs from a shallow clone (shallow=$shallow got=$got)" f
 }
 
+t_P9() { # an app listed in BOTH lists must stay reachable in both scopes
+    # kiwi-updater's own situation: a user-list entry with no scope filter plus a
+    # system-list entry asking for the system scope. app_entries dedups by name,
+    # so the second was thrown away and the root half became unreachable — a
+    # permanent "update available" that no command could clear.
+    mkapp a dual user 'echo "scope=$KIWI_SCOPE"'
+    mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
+    install -Dm755 $K /usr/local/bin/kiwi      # something for root to escalate to
+    echo "$GITROOT/a/dual.git" > /etc/kiwi-updater/apps.list
+    ku add $GITROOT/a/dual.git >/dev/null
+    ku install dual >/dev/null 2>&1
+    kr install --system dual >/dev/null 2>&1
+    release a dual v1.1.0
+    local line scopes status
+    line="$(ku list --porcelain --check 2>/dev/null | grep '^dual')"
+    scopes="$(cut -f2 <<<"$line")"; status="$(cut -f4 <<<"$line")"
+    : > $ESC
+    ku update dual >/dev/null 2>&1
+    f() { [[ $scopes == *system* && $status == update-available ]] && grep -q dual $ESC; }
+    check P9 "an app in both lists shows both scopes and its root half is reachable (scopes=$scopes status=$status)" f
+}
+
 for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
-         P1 P2 P3 P4 P5 P6 P7 P8; do run $t; done
+         P1 P2 P3 P4 P5 P6 P7 P8 P9; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

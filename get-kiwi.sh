@@ -11,29 +11,42 @@
 # checks out the latest release tag, and runs the normal installer.
 set -euo pipefail
 
-REPO="${KIWI_REPO:-https://github.com/derlocke-ng/kiwi-updater.git}"
-DIR="${XDG_DATA_HOME:-$HOME/.local/share}/kiwi-updater/repos/kiwi-updater"
+# Everything is inside main(), which is called on the very last line. Piping a
+# script into bash executes whatever has arrived so far, so a download cut off
+# part way through would otherwise run a prefix of this — a half-finished
+# clone, or a checkout with no install after it. Nothing happens until the
+# whole file is here.
+main() {
+    local REPO DIR tag
+    REPO="${KIWI_REPO:-https://github.com/derlocke-ng/kiwi-updater.git}"
+    DIR="${XDG_DATA_HOME:-$HOME/.local/share}/kiwi-updater/repos/kiwi-updater"
 
-command -v git >/dev/null 2>&1 || { echo "error: git is required (in the base image on Silverblue/Bluefin)" >&2; exit 1; }
+    command -v git >/dev/null 2>&1 || {
+        echo "error: git is required (in the base image on Silverblue/Bluefin)" >&2
+        exit 1
+    }
 
-if [[ -d "$DIR/.git" ]]; then
-    echo ":: refreshing existing clone in $DIR"
-    git -C "$DIR" fetch --quiet --tags origin
-    git -C "$DIR" reset --hard --quiet origin/HEAD
-else
-    echo ":: cloning $REPO"
-    mkdir -p "$(dirname "$DIR")"
-    git clone --quiet "$REPO" "$DIR"
-fi
+    if [[ -d "$DIR/.git" ]]; then
+        echo ":: refreshing existing clone in $DIR"
+        git -C "$DIR" fetch --quiet --tags origin
+        git -C "$DIR" reset --hard --quiet origin/HEAD
+    else
+        echo ":: cloning $REPO"
+        mkdir -p "$(dirname "$DIR")"
+        git clone --quiet -- "$REPO" "$DIR"
+    fi
 
-# Same release rule kiwi itself uses: the latest VERSION tag, HEAD if there is
-# none. Only tags shaped like v1.2.3 count — version:refname sorts v2.0.0-rc1
-# after v2.0.0, and a stray tag like wip-test after everything.
-tag="$(git -C "$DIR" tag --sort=version:refname \
-       | grep -E '^v?[0-9]+(\.[0-9]+){0,3}$' | tail -1 || true)"
-if [[ -n $tag ]]; then
-    echo ":: checking out release $tag"
-    git -C "$DIR" -c advice.detachedHead=false checkout --quiet --force "$tag"
-fi
+    # Same release rule kiwi itself uses: the latest VERSION tag, HEAD if there
+    # is none. Only tags shaped like v1.2.3 count — version:refname sorts
+    # v2.0.0-rc1 after v2.0.0, and a stray tag like wip-test after everything.
+    tag="$(git -C "$DIR" tag --sort=version:refname \
+           | grep -E '^v?[0-9]+(\.[0-9]+){0,3}$' | tail -1 || true)"
+    if [[ -n $tag ]]; then
+        echo ":: checking out release $tag"
+        git -C "$DIR" -c advice.detachedHead=false checkout --quiet --force "$tag"
+    fi
 
-exec bash "$DIR/install.sh" install "$@"
+    exec bash "$DIR/install.sh" install "$@"
+}
+
+main "$@"

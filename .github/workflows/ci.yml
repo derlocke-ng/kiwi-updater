@@ -9,7 +9,8 @@ jobs:
       - name: shellcheck
         run: |
           shellcheck -S warning bin/kiwi install.sh get-kiwi.sh \
-            data/kiwi-system-update templates/install.sh tests/*.sh
+            data/kiwi-system-update data/bash-completion/kiwi \
+            templates/install.sh tests/*.sh
       - name: the GUI has to at least parse
         run: python3 -m py_compile gui/kiwi-gui
       - name: version agrees in all three places

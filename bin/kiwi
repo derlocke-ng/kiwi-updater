@@ -153,7 +153,8 @@ die()  { printf '%serror:%s %s\n' "$c_red" "$c_off" "$*" >&2; exit 1; }
 notify() { # summary body
     (( NOTIFY )) || return 0
     command -v notify-send >/dev/null 2>&1 || return 0
-    notify-send --app-name="Kiwi Updater" --icon=eu.kiwinetwork.KiwiUpdater "$1" "$2" 2>/dev/null || true
+    # the desktop app is "Kiwi Apps"; the project is kiwi-updater (see 1.1.3)
+    notify-send --app-name="Kiwi Apps" --icon=eu.kiwinetwork.KiwiUpdater "$1" "$2" 2>/dev/null || true
 }
 
 # ---------- helpers ---------------------------------------------------------
@@ -1046,7 +1047,6 @@ collect_targets() { # all|names...
 # never blocks another run and never asks for a password.
 dry_run_plan() { # verb
     local verb="$1" i sc url opts dir mdir inst pin target tsha tref
-    local row
     row() { (( QUIET )) || printf '    %-10s %s\n' "$1" "$2"; }
     info "dry run — nothing below is actually done"
     for i in "${!T_URL[@]}"; do
@@ -1828,13 +1828,13 @@ kiwi $KIWI_VERSION — install and update open-source apps from git catalogs
   kiwi update [<app>]|--all  update everything that has a new release
   kiwi uninstall <app>       remove it  (--purge also drops its config)
   kiwi check                 exit 10 if anything has an update
-  kiwi doctor                check this install for the things that go wrong quietly
 
   kiwi add <git-url>         track one repo directly, without a catalog
   kiwi catalog add <url>     register a catalog of apps
   kiwi catalog list|remove   manage registered catalogs
   kiwi sync                  refresh catalogs now
   kiwi self-update           update kiwi itself
+  kiwi doctor                check this install for the things that go wrong quietly
 
 Options: --user / --system (limit to one scope), --cli-only / --gui,
          --purge, --force, --dry-run, --quiet, --notify, --version

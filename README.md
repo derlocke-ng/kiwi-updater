@@ -45,10 +45,20 @@ kiwi list
 kiwi list [--check]        # everything this machine knows about
 kiwi search vpn            # find an app across every registered catalog
 kiwi info kiwi-killswitch  # what it installs, and whether it needs root
-kiwi install <app>         # or --all
+kiwi install <app>         # a name, or an explicit --all
 kiwi update                # everything with a new release
 kiwi uninstall <app>       # --purge also drops its config
 kiwi-gui                   # the desktop app ("Kiwi Apps")
+```
+
+Before you run something, and when something goes wrong:
+
+```bash
+kiwi info --installer <app> # print the script an install would run
+kiwi diff <app>             # what an update would change, installer included
+kiwi pin <app> v1.2.0       # stay there; kiwi unpin <app> to follow releases
+kiwi install <app> --dry-run # scope, URL, ref, installer path — and do nothing
+kiwi doctor                 # stale locks, version skew, bad list files, timers
 ```
 
 ## One app, one line — even when it needs root
@@ -161,21 +171,27 @@ system scope runs it **as root**. `kiwi` says so when you add a catalog, and
 by whoever maintains them — they are not audited. Add catalogs you trust, the
 same way you would add a package repository.
 
-## Planned: choosing what you run
+## Choosing what you run
 
 Installing an app runs that repo's `install.sh`, as root when it declares the
-system scope. Nothing below changes that — they exist to make the choice
-deliberate rather than automatic. In rough order of how much they actually buy:
+system scope. None of this changes that — it exists to make the choice
+deliberate rather than automatic.
 
-- [ ] **`kiwi pin <app> <tag>` / `kiwi unpin`** — promote the existing `ref=`
-      entry option to a first-class command, so code only changes when you say
-      so. The cheapest real protection there is.
-- [ ] **`kiwi diff <app>`** — show what changed between the installed ref and
-      the one an update would move you to, *before* updating. For a catalog of
+Shipped in 1.3.0:
+
+- [x] **`kiwi pin <app> <tag>` / `kiwi unpin`** — the existing `ref=` entry
+      option as a first-class command, so code only changes when you say so.
+      The cheapest real protection there is.
+- [x] **`kiwi diff <app>`** — what changed between the installed commit and the
+      one an update would move you to, *before* updating. For a catalog of
       small tools this is the strong one: a forty-line installer change is
-      something you can actually read.
-- [ ] **`kiwi info --installer <app>`** — print the script that is about to run,
+      something you can actually read, so the installer's diff is shown in
+      full.
+- [x] **`kiwi info --installer <app>`** — the script that is about to run,
       before the first install.
+
+Still planned:
+
 - [ ] **A hosted registry of trusted catalogs** — `kiwi catalog browse` listing
       known catalogs with their maintainer, so catalogs can be discovered
       instead of pasted from somewhere. Catalogs stay opt-in either way.
@@ -266,4 +282,7 @@ remote desktop sessions can report as non-local.
 
 ## License
 
-GPL-3.0-or-later.
+GPL-3.0-or-later — see [LICENSE](LICENSE).
+
+Release notes are in [CHANGELOG.md](CHANGELOG.md); the 1.3.0 audit that
+produced most of them is in [FIXPLAN.md](FIXPLAN.md).

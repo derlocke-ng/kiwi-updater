@@ -169,6 +169,10 @@ user_install() {
         say "no GTK4 stack (or --cli-only) — skipping GUI"
     fi
 
+    # bash completion is a plain file; no service, nothing to enable
+    install -Dm644 "$SRC/data/bash-completion/kiwi" \
+        "${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions/kiwi"
+
     say "installing user update service"
     install -Dm644 "$SRC/data/systemd/kiwi-updater.service" "$USER_UNIT_DIR/kiwi-updater.service"
     install -Dm644 "$SRC/data/systemd/kiwi-updater.timer"   "$USER_UNIT_DIR/kiwi-updater.timer"
@@ -210,6 +214,7 @@ user_uninstall() {
     rm -f "$USER_UNIT_DIR/kiwi-updater.service" "$USER_UNIT_DIR/kiwi-updater.timer"
     systemctl --user daemon-reload
     rm -f "$USER_BIN/kiwi" "$USER_BIN/kiwi-gui" \
+          "${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions/kiwi" \
           "$USER_APPS/eu.kiwinetwork.KiwiUpdater.desktop" "$USER_APPS/kiwi-gui.desktop" \
           "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps/eu.kiwinetwork.KiwiUpdater.png" \
           "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps/eu.kiwinetwork.KiwiUpdater.svg"
@@ -227,6 +232,9 @@ root_install() {
     install -Dm755 "$SRC/bin/kiwi" "$SYS_BIN/kiwi"
     # fixed-purpose wrapper for passwordless GUI/CLI system updates
     install -Dm755 "$SRC/data/kiwi-system-update" /usr/local/libexec/kiwi-system-update
+    # /usr is immutable on ostree; /usr/local is the writable one
+    install -Dm644 "$SRC/data/bash-completion/kiwi" \
+        /usr/local/share/bash-completion/completions/kiwi
 
     say "installing system update service"
     install -Dm644 "$SRC/data/systemd/kiwi-updater-system.service" "$SYS_UNIT_DIR/kiwi-updater-system.service"
@@ -261,7 +269,8 @@ root_uninstall() {
     rm -f "$SYS_UNIT_DIR/kiwi-updater-system.service" "$SYS_UNIT_DIR/kiwi-updater-system.timer" \
           /etc/polkit-1/rules.d/50-kiwi-updater.rules
     systemctl daemon-reload
-    rm -f "$SYS_BIN/kiwi" /usr/local/libexec/kiwi-system-update
+    rm -f "$SYS_BIN/kiwi" /usr/local/libexec/kiwi-system-update \
+          /usr/local/share/bash-completion/completions/kiwi
 
     if (( PURGE )); then
         local other=() d

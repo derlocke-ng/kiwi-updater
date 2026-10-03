@@ -1,6 +1,9 @@
 [Unit]
 Description=Kiwi Updater — auto-update user apps
-After=network-online.target
+# No After=network-online.target here: that is a system target and means
+# nothing in the user manager, so it never did anything. Being offline is
+# handled where it actually matters — an update that cannot reach a remote says
+# so and leaves the recorded version alone, and the timer is Persistent.
 
 [Service]
 Type=oneshot

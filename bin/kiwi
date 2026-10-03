@@ -389,7 +389,19 @@ is_installed() { # scope url
 # marker records the installed commit plus whether GUI parts were installed
 # (the effective KIWI_GUI decision) — so listings and updates stay consistent
 write_marker() { # repo_dir
-    { local_head "$1"; echo "gui=$(effective_gui "$1")"; } > "$1/.kiwi-installed"
+    # Both values BEFORE the file is opened. `>` truncates it, and
+    # effective_gui reads the previous gui= line out of that same file to keep
+    # a cli-only install cli-only — so the old value was already gone and the
+    # flavour fell back to auto-detection. On a desktop that meant a
+    # --cli-only app quietly grew its GUI on the second update.
+    #
+    # Temp file plus mv, so an interrupted write cannot leave a marker with a
+    # commit and no flavour.
+    local g h
+    g="$(effective_gui "$1")"
+    h="$(local_head "$1")"
+    printf '%s\ngui=%s\n' "$h" "$g" > "$1/.kiwi-installed.tmp" &&
+        mv -f "$1/.kiwi-installed.tmp" "$1/.kiwi-installed"
 }
 
 marker_gui() { # scope url -> 0 | 1 | "" (pre-0.5 markers have no flag)

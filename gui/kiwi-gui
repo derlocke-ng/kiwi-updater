@@ -24,6 +24,29 @@ from gi.repository import Gtk, Adw, Gio, GLib, GObject, Gdk, Pango  # noqa: E402
 
 APP_ID = "eu.kiwinetwork.KiwiUpdater"
 
+# Adw.ActionRow titles and subtitles, and Adw.PreferencesGroup descriptions,
+# are Pango markup by default. Every one of these strings comes out of an app's
+# kiwi.manifest, so a description containing a bare & rendered the row empty
+# and a crafted manifest could inject markup into the row that explains why an
+# app wants root.
+esc = GLib.markup_escape_text
+
+
+def repo_path(repo_dir, rel):
+    """Resolve a manifest-supplied path inside the app's own clone.
+
+    ICON, SCREENSHOTS and ABOUT are repo-relative by convention but were joined
+    to the repo directory unchecked, so an absolute path or one with ../ read
+    any file the user can read into the dialog. Returns None unless the result
+    stays inside the clone and exists."""
+    if not repo_dir or not rel:
+        return None
+    base = os.path.realpath(repo_dir)
+    p = os.path.realpath(os.path.join(base, rel))
+    if p != base and not p.startswith(base + os.sep):
+        return None
+    return p if os.path.exists(p) else None
+
 STATUS = {
     "installed":        ("Installed",       "ok"),
     "update-available": ("Update",          "upd"),
@@ -292,7 +315,7 @@ class DetailDialog(Adw.Dialog):
     def _load(self):
         try:
             out = subprocess.run([self.win.kiwi, "info", "--porcelain", self.app["name"]],
-                                 capture_output=True, text=True, timeout=120).stdout
+                                 capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120).stdout
         except Exception as e:  # noqa: BLE001
             out = ""
             GLib.idle_add(self.win.append_log, "info failed: %s\n" % e)
@@ -306,17 +329,17 @@ class DetailDialog(Adw.Dialog):
         self.box.remove(self._placeholder)
         rd = info.get("repo_dir", "")
 
-        icon = info.get("icon", "")
-        if icon and rd and os.path.exists(os.path.join(rd, icon)):
-            pic = Gtk.Image.new_from_file(os.path.join(rd, icon))
+        icon = repo_path(rd, info.get("icon", ""))
+        if icon:
+            pic = Gtk.Image.new_from_file(icon)
             pic.set_pixel_size(96)
             parent = self.big_icon.get_parent()
             parent.insert_child_after(pic, None)
             parent.remove(self.big_icon)
             self.big_icon = pic
 
-        shots = [os.path.join(rd, p) for p in info.get("screenshots", "").split()]
-        shots = [p for p in shots if os.path.exists(p)]
+        shots = [repo_path(rd, p) for p in info.get("screenshots", "").split()]
+        shots = [p for p in shots if p]
         if shots:
             car = Adw.Carousel(allow_scroll_wheel=False)
             car.set_size_request(-1, 320)
@@ -334,10 +357,10 @@ class DetailDialog(Adw.Dialog):
         for key, label in (("version", "Version"), ("author", "Author"),
                            ("license", "License"), ("category", "Category")):
             if info.get(key):
-                facts.add(Adw.ActionRow(title=label, subtitle=info[key]))
+                facts.add(Adw.ActionRow(title=label, subtitle=esc(info[key])))
                 got = True
         if info.get("homepage"):
-            r = Adw.ActionRow(title="Homepage", subtitle=info["homepage"],
+            r = Adw.ActionRow(title="Homepage", subtitle=esc(info["homepage"]),
                               activatable=True)
             r.add_suffix(Gtk.Image(icon_name=ui_icon("adw-external-link-symbolic", "external-link", "go-jump")))
             r.connect("activated", lambda *_: Gtk.UriLauncher(
@@ -347,8 +370,9 @@ class DetailDialog(Adw.Dialog):
         if got:
             self.box.append(facts)
 
-        inst = Adw.PreferencesGroup(title="What it installs",
-                                    description=info.get("components") or None)
+        inst = Adw.PreferencesGroup(
+            title="What it installs",
+            description=esc(info["components"]) if info.get("components") else None)
         scopes = info.get("scopes", "").split()
         if "user" in scopes:
             inst.add(Adw.ActionRow(
@@ -357,8 +381,8 @@ class DetailDialog(Adw.Dialog):
         if "system" in scopes:
             r = Adw.ActionRow(
                 title="Outside your home directory",
-                subtitle=info.get("root_reason")
-                or "installs files and services system-wide")
+                subtitle=esc(info.get("root_reason")
+                             or "installs files and services system-wide"))
             r.add_prefix(Gtk.Image(icon_name=ui_icon("dialog-warning-symbolic", "dialog-warning")))
             r.add_suffix(pill("ROOT", "root"))
             inst.add(r)
@@ -372,7 +396,7 @@ class DetailDialog(Adw.Dialog):
                 description=("Something is missing — the installer may fail"
                              if missing else "All present on this machine"))
             for d in deps:
-                r = Adw.ActionRow(title=d)
+                r = Adw.ActionRow(title=esc(d))
                 ok = d not in missing
                 img = Gtk.Image(icon_name=ui_icon("object-select-symbolic", "object-select", "emblem-ok") if ok
                                 else ui_icon("dialog-warning-symbolic", "dialog-warning"))
@@ -381,11 +405,10 @@ class DetailDialog(Adw.Dialog):
                 g.add(r)
             self.box.append(g)
 
-        about = info.get("about", "")
-        if about and rd and os.path.exists(os.path.join(rd, about)):
+        about = repo_path(rd, info.get("about", ""))
+        if about:
             try:
-                text = open(os.path.join(rd, about), encoding="utf-8",
-                            errors="replace").read()
+                text = open(about, encoding="utf-8", errors="replace").read()
             except OSError:
                 text = ""
             text = "\n".join(l for l in text.splitlines()
@@ -402,7 +425,7 @@ class DetailDialog(Adw.Dialog):
                 self.box.append(g)
 
         src = Adw.PreferencesGroup(title="Source")
-        r = Adw.ActionRow(title="Repository", subtitle=info.get("url", ""))
+        r = Adw.ActionRow(title="Repository", subtitle=esc(info.get("url", "")))
         r.set_subtitle_lines(2)
         src.add(r)
         self.box.append(src)
@@ -456,7 +479,7 @@ class CatalogDialog(Adw.Dialog):
         rows = 0
         try:
             out = subprocess.run([self.win.kiwi, "catalog", "list", "--porcelain"],
-                                 capture_output=True, text=True, timeout=60).stdout
+                                 capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60).stdout
         except Exception as e:  # noqa: BLE001
             out = ""
             self.win.append_log("catalog list failed: %s\n" % e)
@@ -919,7 +942,7 @@ class Window(Adw.ApplicationWindow):
         def worker():
             try:
                 out = subprocess.run([self.kiwi, "list", "--porcelain", "--check"],
-                                     capture_output=True, text=True, timeout=600).stdout
+                                     capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=600).stdout
             except Exception as e:  # noqa: BLE001
                 out = ""
                 GLib.idle_add(self.append_log, "refresh failed: %s\n" % e)
@@ -939,7 +962,8 @@ class Window(Adw.ApplicationWindow):
                      tref=p[7] if len(p) > 7 else "",
                      category=p[8] if len(p) > 8 else "",
                      tags=p[9] if len(p) > 9 else "",
-                     repo_dir=p[10] if len(p) > 10 else "")
+                     repo_dir=p[10] if len(p) > 10 else "",
+                     root_reason=p[11] if len(p) > 11 else "")
             if d["status"] == "update-available":
                 updates += 1
             if d["category"]:
@@ -996,9 +1020,39 @@ class Window(Adw.ApplicationWindow):
             self.category = value
             self._refilter()
 
-    def run_action(self, verb, names):
+    def _confirm_root(self, verb, names, root_apps):
+        """Installing an app that declares the system scope runs its installer
+        as root. Say that, and say why, while it is still a decision — not at
+        the password prompt, by which point the choice has been made."""
+        parts = []
+        for a in root_apps:
+            parts.append("<b>%s</b>\n%s" % (
+                esc(a["name"]),
+                esc(a["root_reason"]
+                    or "installs files and services outside your home directory")))
+        dlg = Adw.AlertDialog(
+            heading="Install with root access?",
+            body="\n\n".join(parts) + "\n\nYou will be asked to authenticate.")
+        dlg.set_body_use_markup(True)
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("install", "Install")
+        dlg.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
+        dlg.set_default_response("cancel")
+        dlg.set_close_response("cancel")
+        dlg.connect("response", lambda _d, r: r == "install"
+                    and self.run_action(verb, names, confirmed=True))
+        dlg.present(self)
+
+    def run_action(self, verb, names, confirmed=False):
         if self.busy or not names:
             return
+        if verb == "install" and not confirmed:
+            wanted = set(names)
+            root_apps = [a for a in self._all()
+                         if a["name"] in wanted and a.needs_root]
+            if root_apps:
+                self._confirm_root(verb, names, root_apps)
+                return
         cmd = [self.kiwi, verb] + list(names)
         self.btn_log.set_active(True)
         self.set_busy(True, "%s %d app(s)…" % (verb.capitalize(), len(names)))
@@ -1008,8 +1062,14 @@ class Window(Adw.ApplicationWindow):
                           "\n$ %s\n" % " ".join(shlex.quote(c) for c in cmd))
             rc = 1
             try:
+                # stdin=DEVNULL: inheriting the terminal kiwi-gui was
+                # launched from made kiwi's as_root see a tty, choose sudo, and
+                # prompt for a password in that terminal while the window sat
+                # there looking hung. With no stdin it uses pkexec, which has a
+                # dialog.
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT, text=True)
+                                        stderr=subprocess.STDOUT, text=True,
+                                        stdin=subprocess.DEVNULL)
                 for line in proc.stdout:
                     GLib.idle_add(self.append_log, line)
                 rc = proc.wait()
@@ -1030,8 +1090,14 @@ class Window(Adw.ApplicationWindow):
                           "\n$ %s\n" % " ".join(shlex.quote(c) for c in cmd))
             rc = 1
             try:
+                # stdin=DEVNULL: inheriting the terminal kiwi-gui was
+                # launched from made kiwi's as_root see a tty, choose sudo, and
+                # prompt for a password in that terminal while the window sat
+                # there looking hung. With no stdin it uses pkexec, which has a
+                # dialog.
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT, text=True)
+                                        stderr=subprocess.STDOUT, text=True,
+                                        stdin=subprocess.DEVNULL)
                 for line in proc.stdout:
                     GLib.idle_add(self.append_log, line)
                 rc = proc.wait()

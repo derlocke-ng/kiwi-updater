@@ -1183,11 +1183,13 @@ cmd_list() {
         fi
 
         if (( porcelain )); then
-            # porcelain carries the real values; truncation is for humans only
-            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            # porcelain carries the real values; truncation is for humans only.
+            # APPEND new fields only — the GUI indexes by position.
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
                 "$name" "$scs" "$comp_full" "$status" "$ver" "$url" "$desc" "${tref:-}" \
                 "$(manifest_get "$dir" CATEGORY "")" \
-                "$(manifest_get "$dir" TAGS "")" "$dir"
+                "$(manifest_get "$dir" TAGS "")" "$dir" \
+                "$(manifest_get "$dir" ROOT_REASON "")"
         else
             local col=""
             [[ $status == update-available ]] && col="$c_ylw"

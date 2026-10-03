@@ -84,6 +84,25 @@ SYS_DATA_DIR="/var/lib/kiwi-updater"
 SYS_REPOS="$SYS_DATA_DIR/repos"
 SYS_PREFIX="/usr/local"
 
+# ---------------------------------------------------------------------------
+# Root derives NOTHING about its paths from the environment.
+#
+# pkexec and the systemd unit sanitise HOME and XDG_*, and Fedora's default
+# sudoers resets them — but with `sudo -E`, an env_keep entry, or a distro that
+# preserves HOME, root resolved app names through the "user" paths above. A
+# leaked XDG_CONFIG_HOME was enough to make root run an installer named by a
+# list the calling user can write, and local entries beat catalogs.
+# ---------------------------------------------------------------------------
+if [[ $EUID -eq 0 ]]; then
+    HOME=/root
+    USER_CONFIG_DIR=/root/.config/kiwi-updater
+    USER_DATA_DIR=/root/.local/share/kiwi-updater
+    USER_LIST="$USER_CONFIG_DIR/apps.list"
+    USER_CATALOGS="$USER_CONFIG_DIR/catalogs.list"
+    USER_REPOS="$USER_DATA_DIR/repos"
+    USER_PREFIX=/root/.local
+fi
+
 MANIFEST="kiwi.manifest"
 LS_REMOTE_TIMEOUT=10
 # Every network git call is bounded. An unbounded clone or fetch on a flaky
@@ -143,6 +162,25 @@ as_root() {
     fi
 }
 
+# A list decides which installers run, and as root that means which installers
+# run as root. Refuse one that is not root-owned, or that anyone else can
+# write. Unprivileged runs trust the user's own files as before.
+list_trusted() { # file
+    [[ $EUID -eq 0 ]] || return 0
+    local st owner mode
+    st="$(stat -c '%u %a' "$1" 2>/dev/null)" || return 0   # missing: nothing to read
+    read -r owner mode <<<"$st"
+    if [[ $owner != 0 ]]; then
+        warn "ignoring $1: not owned by root"
+        return 1
+    fi
+    if (( (8#$mode & 8#022) != 0 )); then
+        warn "ignoring $1: writable by group or other (mode $mode)"
+        return 1
+    fi
+    return 0
+}
+
 list_file()  { [[ $1 == system ]] && echo "$SYS_LIST"   || echo "$USER_LIST"; }
 repos_dir()  { [[ $1 == system ]] && echo "$SYS_REPOS"  || echo "$USER_REPOS"; }
 prefix_for() { [[ $1 == system ]] && echo "$SYS_PREFIX" || echo "$USER_PREFIX"; }
@@ -158,7 +196,7 @@ catalog_urls() {
     local f files=()
     [[ $EUID -eq 0 ]] && files=("$SYS_CATALOGS") || files=("$USER_CATALOGS" "$SYS_CATALOGS")
     for f in "${files[@]}"; do
-        [[ -r $f ]] && grep -Ev '^[[:space:]]*(#|$)' "$f" 2>/dev/null
+        [[ -r $f ]] && list_trusted "$f" && grep -Ev '^[[:space:]]*(#|$)' "$f" 2>/dev/null
     done | sort -u
 }
 
@@ -195,9 +233,13 @@ meta_dir() { [[ $EUID -eq 0 ]] && echo "$SYS_REPOS" || echo "$USER_REPOS"; }
 
 # every entry we know about, in precedence order and NOT deduped
 app_entries_raw() {
-    local f url opts c
-    for f in "$USER_LIST" "$SYS_LIST"; do
+    local f url opts c lists=("$USER_LIST" "$SYS_LIST")
+    # as root there is no user scope: never resolve an app name from a list the
+    # calling user could write
+    [[ $EUID -eq 0 ]] && lists=("$SYS_LIST")
+    for f in "${lists[@]}"; do
         [[ -r $f ]] || continue
+        list_trusted "$f" || continue
         while read -r url opts; do
             [[ -z ${url:-} ]] && continue
             # an entry in the system list is itself a scope filter
@@ -211,6 +253,7 @@ app_entries_raw() {
     done
     for c in "$(catalogs_dir)"/*/; do
         [[ -f "${c}apps.list" ]] || continue
+        list_trusted "${c}apps.list" || continue
         while read -r url opts; do
             [[ -z ${url:-} ]] && continue
             printf '%s\t%s\n' "$url" "${opts:-}"
@@ -1251,6 +1294,13 @@ cmd_add() {
     [[ -n $url ]] || die "usage: kiwi add <git-url> [--system]"
     local scope=user f
     (( system )) && scope=system
+    # There is no useful root "user" list: `kiwi add <url>` from a root shell
+    # means the system list, or it means nothing at all. It used to write to
+    # /root/.config, which no scope ever reads back.
+    if [[ $EUID -eq 0 && $scope == user ]]; then
+        scope=system
+        info "running as root — adding to the system list"
+    fi
     f="$(list_file "$scope")"
     if [[ $scope == system && $EUID -ne 0 ]]; then
         local rk; rk="$(root_kiwi)" || return 1

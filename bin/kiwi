@@ -123,6 +123,13 @@ export GIT_TERMINAL_PROMPT=0
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0=
 unset GIT_ASKPASS SSH_ASKPASS 2>/dev/null || true
 
+# Transport allowlist, enforced by git itself. `kiwi list` clones every entry
+# of every registered catalog before you have chosen to install anything, and
+# the root timer does the same as root — so the set of usable transports should
+# not be "whatever this git was built with". git blocks ext:: by default
+# already; this is the belt to that braces.
+export GIT_ALLOW_PROTOCOL=https:http:file
+
 # git that talks to a remote: hard wall-clock cap, plus git's own stalled
 # transfer abort so a connection that goes quiet does not sit there.
 git_net() {
@@ -200,6 +207,16 @@ catalog_urls() {
     done | sort -u
 }
 
+# the registered catalogs, minus anything unusable
+valid_catalog_urls() {
+    local u
+    while read -r u _; do
+        [[ -z ${u:-} ]] && continue
+        valid_url "$u" || { warn "ignoring unusable catalog url: '$u'"; continue; }
+        printf '%s\n' "$u"
+    done < <(catalog_urls)
+}
+
 # clone/refresh all registered catalog repos (best effort — offline is fine)
 sync_catalogs() {
     local url _ dir cdir; cdir="$(catalogs_dir)"
@@ -212,9 +229,9 @@ sync_catalogs() {
                 warn "catalog sync failed, using cached copy: $url"
         else
             mkdir -p "$cdir"
-            git_net clone --quiet "$url" "$dir" 2>/dev/null || warn "cannot fetch catalog: $url"
+            git_net clone --quiet -- "$url" "$dir" 2>/dev/null || warn "cannot fetch catalog: $url"
         fi
-    done < <(catalog_urls)
+    done < <(valid_catalog_urls)
 }
 
 # ---------------------------------------------------------------------------
@@ -267,6 +284,7 @@ app_entries() {
     local url opts d seen=" "
     while IFS=$'\t' read -r url opts; do
         [[ -z $url ]] && continue
+        valid_url "$url" || continue     # reported once by check_lists
         d="$(dir_name "$url")"
         [[ $seen == *" $d "* ]] && continue
         seen+="$d "
@@ -277,11 +295,16 @@ app_entries() {
 # The dedup above silently drops the loser, which is fine when two lists name
 # the SAME repo and wrong when they name different ones: one app then shadows
 # the other and `kiwi install <name>` is ambiguous. Say so once, out loud.
-warn_name_collisions() {
+check_lists() {
     local -A first=() reported=()
     local url opts d u
     while IFS=$'\t' read -r url opts; do
         [[ -z $url ]] && continue
+        if ! valid_url "$url"; then
+            warn "ignoring an unusable entry: '$url'"
+            warn "  expected https://…, http://… or an absolute path"
+            continue
+        fi
         d="$(dir_name "$url")"; u="$(norm_url "$url")"
         if [[ -z ${first[$d]:-} ]]; then
             first[$d]="$u"
@@ -320,11 +343,11 @@ sync_meta() { # url opts -> repo dir on stdout
     dir="$(meta_dir)/$(dir_name "$url")"
     if [[ ! -d "$dir/.git" ]]; then
         mkdir -p "$(dirname "$dir")"
-        git_net clone --quiet "$url" "$dir" 2>/dev/null || return 1
+        git_net clone --quiet -- "$url" "$dir" 2>/dev/null || return 1
     elif origin_differs "$dir" "$url" && [[ ! -f "$dir/.kiwi-installed" ]]; then
         # nothing was installed from this clone, so it is only a cache: point
         # it at the URL the list actually names
-        git -C "$dir" remote set-url origin "$url" 2>/dev/null &&
+        git -C "$dir" remote set-url origin -- "$url" 2>/dev/null &&
             git_net -C "$dir" fetch --quiet --tags origin 2>/dev/null || true
     fi
     echo "$dir"
@@ -469,6 +492,26 @@ scope_label() { # "user system" -> "user+system"
 # ---------------------------------------------------------------------------
 norm_url() { local u="${1%/}"; echo "${u%.git}"; }
 
+# A URL out of a catalog is data from someone else, and it is about to be
+# handed to git and turned into a directory name. Nothing checked its scheme or
+# its shape, and nothing put `--` in front of it. No exploit was demonstrated,
+# so this is defence in depth: a shape that cannot be mistaken for an option,
+# and a basename that cannot escape the repos directory.
+valid_url() { # url
+    local u="$1" b
+    [[ -n $u ]] || return 1
+    [[ $u == -* ]] && return 1                       # would read as an option
+    [[ $u == *[[:space:]]* ]] && return 1
+    [[ $u == *[[:cntrl:]]* ]] && return 1
+    case "$u" in
+        https://?*|http://?*|file:///?*|/?*) ;;      # local paths: dev and tests
+        *) return 1 ;;
+    esac
+    b="$(dir_name "$u")"
+    [[ -n $b && $b != . && $b != .. && $b != */* ]] || return 1
+    return 0
+}
+
 list_has() { # file url
     [[ -r $1 ]] || return 1
     local want u; want="$(norm_url "$2")"
@@ -596,7 +639,7 @@ local_head() { # repo_dir
 # resolve the commit an app should be at: ref= pin > branch= > latest tag > HEAD
 remote_target() { # url opts -> "sha<TAB>refname"; empty output on failure
     local url="$1" opts="${2:-}" out sha="" ref branch tag
-    out="$(timeout "$LS_REMOTE_TIMEOUT" git ls-remote --quiet "$url" 2>/dev/null)" || return 1
+    out="$(timeout "$LS_REMOTE_TIMEOUT" git ls-remote --quiet -- "$url" 2>/dev/null)" || return 1
     [[ -n $out ]] || return 1
     ref="$(entry_opt "$opts" ref "")"
     branch="$(entry_opt "$opts" branch "")"
@@ -759,6 +802,7 @@ run_installer() { # scope repo_dir action [purge]
     # legitimately clones something of its own.
     ( cd "$dir" &&
       env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 \
+          -u GIT_ALLOW_PROTOCOL \
           KIWI_SCOPE="$scope" \
           KIWI_ACTION="$action" \
           KIWI_APP_DIR="$dir" \
@@ -773,13 +817,14 @@ run_installer() { # scope repo_dir action [purge]
 # exit status it was not checking, and carried on to mark the app installed.
 sync_repo() { # scope url opts -> clones + checks out the target ref, echoes repo dir
     local scope="$1" url="$2" opts="${3:-}"
+    valid_url "$url" || { warn "refusing an unusable url: '$url'"; return 1; }
     local dir; dir="$(repos_dir "$scope")/$(dir_name "$url")"
     local target sha
     target="$(remote_target "$url" "$opts" || true)"
     [[ -n $target ]] || { warn "cannot reach $url"; return 1; }
     if [[ ! -d "$dir/.git" ]]; then
         mkdir -p "$(repos_dir "$scope")" || return 1
-        git_net clone --quiet "$url" "$dir" || { warn "clone failed: $url"; return 1; }
+        git_net clone --quiet -- "$url" "$dir" || { warn "clone failed: $url"; return 1; }
     elif origin_differs "$dir" "$url"; then
         # What `kiwi info` shows and what `kiwi install` acts on have to be the
         # same repo. With a stale origin kiwi fetched from the OLD url, printed
@@ -793,7 +838,7 @@ sync_repo() { # scope url opts -> clones + checks out the target ref, echoes rep
             return 1
         fi
         warn "$(dir_name "$url"): source changed, repointing the cached clone at $url"
-        git -C "$dir" remote set-url origin "$url" || return 1
+        git -C "$dir" remote set-url origin -- "$url" || return 1
     fi
     IFS=$'\t' read -r sha _ <<<"$target"
     git_net -C "$dir" fetch --quiet --tags origin || { warn "fetch failed: $url"; return 1; }
@@ -1292,6 +1337,9 @@ cmd_add() {
         esac; shift
     done
     [[ -n $url ]] || die "usage: kiwi add <git-url> [--system]"
+    valid_url "$url" || die "not a usable git url: '$url'
+expected https://…, http://… or an absolute path to a local repo."
+    [[ $url == http://* ]] && warn "http:// is not encrypted; anyone on the path can change what you install"
     local scope=user f
     (( system )) && scope=system
     # There is no useful root "user" list: `kiwi add <url>` from a root shell
@@ -1327,6 +1375,9 @@ cmd_catalog() { # add <url> | list      (--system routes to the system file)
         add)
             local url="${1:-}"
             [[ -n $url ]] || die "usage: kiwi catalog add <git-url> [--system]"
+            valid_url "$url" || die "not a usable git url: '$url'
+expected https://…, http://… or an absolute path to a local repo."
+            [[ $url == http://* ]] && warn "http:// is not encrypted; anyone on the path can change what you install"
             local f="$USER_CATALOGS"
             [[ $SCOPE_FILTER == system ]] && f="$SYS_CATALOGS"
             if [[ $f == "$SYS_CATALOGS" && $EUID -ne 0 ]]; then
@@ -1471,7 +1522,7 @@ command -v git >/dev/null 2>&1 || die "git is required (rpm-ostree install git)"
 # once per invocation, for the commands that resolve or list apps
 case "$CMD" in
     list|search|info|show|check|install|update|uninstall|self-update)
-        warn_name_collisions ;;
+        check_lists ;;
 esac
 
 case "$CMD" in

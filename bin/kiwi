@@ -1004,6 +1004,42 @@ collect_targets() { # all|names...
     fi
 }
 
+# --dry-run: say exactly what would happen and change nothing. Deliberately
+# before the lock and before any escalation, so asking "what would this do?"
+# never blocks another run and never asks for a password.
+dry_run_plan() { # verb
+    local verb="$1" i sc url opts dir mdir inst pin target tsha tref
+    local row
+    row() { (( QUIET )) || printf '    %-10s %s\n' "$1" "$2"; }
+    info "dry run — nothing below is actually done"
+    for i in "${!T_URL[@]}"; do
+        sc="${T_SCOPE[$i]}"; url="${T_URL[$i]}"; opts="${T_OPTS[$i]}"
+        dir="$(scope_dir "$sc" "$url")"
+        mdir="$(meta_dir)/$(dir_name "$url")"
+        inst="$(manifest_get "$mdir" INSTALLER install.sh)"
+        pin="$(entry_opt "$opts" ref "")"
+        [[ -z $pin ]] && pin="$(entry_opt "$opts" branch "")"
+        target="$(remote_target "$url" "$opts" || true)"
+        tsha=""; tref=""
+        [[ -n $target ]] && IFS=$'\t' read -r tsha tref <<<"$target"
+        (( QUIET )) || printf '  %s%s%s (%s scope)\n' \
+            "$c_bold" "$(app_name "$sc" "$url")" "$c_off" "$sc"
+        row action "$verb"
+        row url "$url"
+        row ref "${tref:-could not reach the remote}${tsha:+ -> $tsha}${pin:+  [pinned: $pin]}"
+        if is_installed "$sc" "$url"; then
+            row installed "$(marker_sha "$dir")"
+        else
+            row installed "no"
+            [[ $verb == update ]] && row note "would be skipped: not installed"
+        fi
+        row installer "$dir/$inst"
+        row prefix "$(prefix_for "$sc")"
+        [[ $verb == uninstall ]] && row purge "$([[ ${PURGE:-0} == 1 ]] && echo yes || echo no)"
+        [[ $sc == system && $EUID -ne 0 ]] && row note "needs root — would escalate"
+    done
+}
+
 dispatch() { # verb extra_flag
     local verb="$1" i had_user=0 sys_names=() rc_pre=0
     for i in "${!T_URL[@]}"; do
@@ -1032,6 +1068,8 @@ dispatch() { # verb extra_flag
         fi
         sys_names+=("$(app_name system "${T_URL[$i]}")")
     done
+
+    if (( DRY_RUN )); then dry_run_plan "$verb"; return 0; fi
 
     if (( had_user )); then acquire_lock user; fi
     if [[ $EUID -eq 0 ]]; then acquire_lock system; fi
@@ -1490,6 +1528,119 @@ cmd_check() {
     log "everything is up to date"
 }
 
+# ---------- doctor ----------------------------------------------------------
+# Every condition here is one that used to be invisible until it bit someone:
+# a stale lock that failed every command, a root copy frozen three releases
+# back, a list root would silently ignore, a clone whose origin no longer
+# matches its entry, a timer that never got enabled because the install
+# aborted. Exits non-zero when something needs attention.
+cmd_doctor() {
+    local problems=0 sc d lock who host pid f st owner mode url opts dir have
+    local me; me="$(hostname 2>/dev/null || echo unknown)"
+    _bad()  { warn "$*"; problems=$((problems+1)); }
+    _good() { log "  ${c_grn}ok${c_off}    $*"; }
+    _note() { log "  ${c_ylw}note${c_off}  $*"; }
+
+    info "tools"
+    for f in git awk sed grep flock timeout; do
+        if command -v "$f" >/dev/null 2>&1; then _good "$f"
+        else _bad "$f is missing — kiwi needs git, coreutils, util-linux and awk"; fi
+    done
+
+    info "versions"
+    _good "this copy is $KIWI_VERSION ($0)"
+    if have="$(root_version)"; then
+        if [[ $have == "$KIWI_VERSION" ]]; then
+            _good "root-owned copy at $ROOT_KIWI is $have"
+        else
+            _bad "root-owned copy at $ROOT_KIWI is $have, this one is $KIWI_VERSION.
+  A copy at 1.2.1 or older cannot update itself; re-run the bootstrap once:
+  curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system"
+        fi
+    else
+        _good "no system scope installed (nothing runs as root)"
+    fi
+
+    info "locks"
+    for sc in $(real_scopes); do
+        [[ $sc == system ]] && d="$SYS_DATA_DIR" || d="$USER_DATA_DIR"
+        lock="$d/lock"
+        if [[ ! -f $lock ]]; then _good "$sc: no lock file"; continue; fi
+        who="$(head -1 "$lock" 2>/dev/null || true)"
+        host="${who%% *}"; pid="${who#*pid=}"; pid="${pid%% *}"; pid="${pid//[!0-9]/}"
+        if [[ ! -w $lock ]]; then
+            _note "$sc: $lock is not writable by this user, cannot test it"
+        elif ( exec 8<>"$lock" && flock -n 8 ) 2>/dev/null; then
+            _good "$sc: free"
+        elif [[ $host == "$me" && -n $pid ]] && ! kill -0 "$pid" 2>/dev/null; then
+            _bad "$sc: lock held but pid $pid is gone — stale. Remove $lock"
+        else
+            _note "$sc: held right now${who:+ by $who}"
+        fi
+    done
+
+    info "list files"
+    for f in "$SYS_LIST" "$SYS_CATALOGS"; do
+        [[ -e $f ]] || continue
+        st="$(stat -c '%u %a' "$f" 2>/dev/null)" || continue
+        read -r owner mode <<<"$st"
+        if [[ $owner != 0 ]]; then
+            _bad "$f is not owned by root — root ignores it. chown root $f"
+        elif (( (8#$mode & 8#022) != 0 )); then
+            _bad "$f is writable by group or other (mode $mode) — root ignores it. chmod 644 $f"
+        else
+            _good "$f (root-owned, mode $mode)"
+        fi
+    done
+
+    info "clones"
+    while IFS=$'\t' read -r url opts; do
+        [[ -z $url ]] && continue
+        for sc in $(real_scopes); do
+            is_installed "$sc" "$url" || continue
+            dir="$(scope_dir "$sc" "$url")"
+            have="$(repo_origin "$dir")"
+            if [[ -n $have ]] && [[ "$(norm_url "$have")" != "$(norm_url "$url")" ]]; then
+                _bad "$(dir_name "$url") ($sc) was installed from $have but the list says $url.
+  Updates refuse to switch source silently. Remove it first: kiwi uninstall $(dir_name "$url")"
+            elif [[ -z "$(marker_sha "$dir")" ]]; then
+                _bad "$(dir_name "$url") ($sc) has an installed marker with no commit in it: $dir"
+            else
+                _good "$(dir_name "$url") ($sc)"
+            fi
+        done
+    done < <(app_entries)
+
+    info "background updates"
+    if ! command -v systemctl >/dev/null 2>&1; then
+        _note "no systemctl here, so nothing to check"
+    else
+        if [[ $EUID -ne 0 ]]; then
+            if [[ "$(systemctl --user is-enabled kiwi-updater.timer 2>/dev/null || true)" == enabled ]]; then
+                _good "user timer is enabled"
+            else
+                _bad "the user update timer is not enabled.
+  systemctl --user enable --now kiwi-updater.timer"
+            fi
+        fi
+        if [[ -x $ROOT_KIWI ]]; then
+            if [[ "$(systemctl is-enabled kiwi-updater-system.timer 2>/dev/null || true)" == enabled ]]; then
+                _good "system timer is enabled"
+            else
+                _bad "the system scope is installed but its timer is not enabled.
+  sudo systemctl enable --now kiwi-updater-system.timer"
+            fi
+        fi
+    fi
+
+    log ""
+    if (( problems )); then
+        log "${c_ylw}$problems thing(s) need attention${c_off}"
+        return 1
+    fi
+    log "${c_grn}no problems found${c_off}"
+}
+
 cmd_add() {
     local url="" system=0
     while [[ $# -gt 0 ]]; do
@@ -1634,6 +1785,7 @@ kiwi $KIWI_VERSION — install and update open-source apps from git catalogs
   kiwi update [<app>]|--all  update everything that has a new release
   kiwi uninstall <app>       remove it  (--purge also drops its config)
   kiwi check                 exit 10 if anything has an update
+  kiwi doctor                check this install for the things that go wrong quietly
 
   kiwi add <git-url>         track one repo directly, without a catalog
   kiwi catalog add <url>     register a catalog of apps
@@ -1736,6 +1888,7 @@ case "$CMD" in
     pin)         cmd_pin ${ARGS[@]+"${ARGS[@]}"} ;;
     unpin)       cmd_unpin ${ARGS[@]+"${ARGS[@]}"} ;;
     diff)        cmd_diff ${ARGS[@]+"${ARGS[@]}"} ;;
+    doctor)      cmd_doctor ;;
     self-update) cmd_self_update ;;
     version)     echo "kiwi $KIWI_VERSION"
                  root_v="$(root_version || true)"

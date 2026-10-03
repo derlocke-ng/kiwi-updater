@@ -365,8 +365,42 @@ t_P3() { # info --installer prints the script before anything runs
     check P3 "kiwi info --installer shows the script and installs nothing" f
 }
 
+t_P4() { # --dry-run must describe the work and do none of it
+    mkapp a dry user 'touch /tmp/kt-dry-ran'
+    ku add $GITROOT/a/dry.git >/dev/null
+    local out; out="$(ku install dry --dry-run 2>&1)"
+    f() { [[ ! -e /tmp/kt-dry-ran && ! -f $(urepo dry)/.kiwi-installed ]] &&
+          grep -q 'install.sh' <<<"$out" && grep -q 'v1.0.0' <<<"$out"; }
+    check P4 "install --dry-run names the installer and ref, and runs nothing" f
+}
+
+t_P5() { # doctor has to actually spot a stale lock and a bad list file
+    mkapp a dok user
+    ku add $GITROOT/a/dok.git >/dev/null; ku install dok >/dev/null
+    local L=$TH/.local/share/kiwi-updater/lock
+    mkdir -p "$(dirname $L)"; : > $L; chown -R $T "$(dirname $L)"
+    # Hold the flock from a process that is NOT the pid recorded in the file:
+    # the orphaned-fd case from F6, which is the only way a lock can really be
+    # stuck (if the recorded holder were gone, the kernel would have released
+    # it). Same host fallback acquire_lock uses, so doctor matches on it.
+    setsid bash -c "exec 9<>$L; flock 9; sleep 60" >/dev/null 2>&1 &
+    local holder=$!
+    sleep 1
+    printf '%s pid=999999 started=now\n' "$(hostname 2>/dev/null || echo unknown)" > $L
+    chown $T $L
+    # a system list root would ignore
+    mkdir -p /etc/kiwi-updater; echo "# x" > /etc/kiwi-updater/apps.list
+    chmod 666 /etc/kiwi-updater/apps.list
+    local out rc
+    out="$(ku doctor 2>&1)"; rc=$?
+    kill $holder 2>/dev/null; pkill -f "flock 9" 2>/dev/null
+    f() { [[ $rc -ne 0 ]] && grep -qi 'stale' <<<"$out" &&
+          grep -qi 'writable by group or other' <<<"$out"; }
+    check P5 "kiwi doctor finds a stale lock and a world-writable system list" f
+}
+
 for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
-         P1 P2 P3; do run $t; done
+         P1 P2 P3 P4 P5; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

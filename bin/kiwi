@@ -1478,7 +1478,10 @@ kiwi $KIWI_VERSION — install and update open-source apps from git catalogs
   kiwi self-update           update kiwi itself
 
 Options: --user / --system (limit to one scope), --cli-only / --gui,
-         --purge, --force, --quiet, --notify
+         --purge, --force, --dry-run, --quiet, --notify, --version
+
+Options may go anywhere, before the command included. An unknown one is an
+error rather than an app name, and -- ends the options.
 
 An app declares the scopes it needs in its kiwi.manifest, so a catalog lists it
 once even when it has both a root service and a desktop component. Apps marked
@@ -1499,11 +1502,21 @@ FORCE=0
 ALL_MODE=0
 PURGE=0
 PORCELAIN=0
+DRY_RUN=0
 GUI_CHOICE=""      # ""=auto/keep, 0=cli-only, 1=with-gui (install/update)
 ARGS=()
-CMD="${1:-}"; shift || true
+CMD=""
+
+# Options may appear anywhere, the command included, and an unknown one is an
+# error. Options used to be read only from $2 onwards, so `kiwi --quiet list`
+# took "--quiet" as the command name, and anything unrecognised fell through to
+# the app names — a typo answered "unknown app: --frce" instead of saying it
+# was not an option.
+end_of_opts=0
+take() { if [[ -z $CMD ]]; then CMD="$1"; else ARGS+=("$1"); fi; }
 
 while [[ $# -gt 0 ]]; do
+    if (( end_of_opts )); then take "$1"; shift; continue; fi
     case "$1" in
         --user)     SCOPE_FILTER=user ;;
         --system)   SCOPE_FILTER=system ;;
@@ -1512,12 +1525,18 @@ while [[ $# -gt 0 ]]; do
         --force)    FORCE=1 ;;
         --purge)    PURGE=1 ;;
         --porcelain) PORCELAIN=1 ;;
+        --dry-run)  DRY_RUN=1 ;;
         --cli-only|--no-gui) GUI_CHOICE=0 ;;
         --gui|--with-gui)    GUI_CHOICE=1 ;;
-        # end of options: everything after this is an app name, never a flag.
-        # The root wrapper passes its validated selection after a --.
-        --) shift; while [[ $# -gt 0 ]]; do ARGS+=("$1"); shift; done; break ;;
-        *) ARGS+=("$1") ;;
+        --version)  [[ -z $CMD ]] || die "unknown option: $1"; CMD=version ;;
+        -h|--help)  [[ -z $CMD ]] || die "unknown option: $1"; CMD=help ;;
+        # read by a subcommand rather than here
+        --all|--check|--no-sync|--installer) ARGS+=("$1") ;;
+        # end of options: everything after this is a name, never a flag. The
+        # root wrapper passes its validated selection after a --.
+        --)         end_of_opts=1 ;;
+        -*)         die "unknown option: $1 (see 'kiwi help')" ;;
+        *)          take "$1" ;;
     esac
     shift
 done
@@ -1526,7 +1545,7 @@ command -v git >/dev/null 2>&1 || die "git is required (rpm-ostree install git)"
 
 # once per invocation, for the commands that resolve or list apps
 case "$CMD" in
-    list|search|info|show|check|install|update|uninstall|self-update)
+    list|search|info|show|check|install|update|uninstall|self-update|pin|unpin|diff|doctor)
         check_lists ;;
 esac
 
@@ -1554,6 +1573,6 @@ case "$CMD" in
     version)     echo "kiwi $KIWI_VERSION"
                  root_v="$(root_version || true)"
                  [[ -n ${root_v:-} ]] && echo "root-owned copy at $ROOT_KIWI: $root_v" ;;
-    ""|help|-h|--help) usage ;;
+    ""|help)     usage ;;
     *)           die "unknown command: $CMD (see 'kiwi help')" ;;
 esac

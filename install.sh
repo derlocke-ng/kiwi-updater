@@ -74,13 +74,26 @@ seed_list() { # file header-comment
     [[ -f $1 ]] || printf '# %s\n' "$2" > "$1"
 }
 
+# Same exact-first-field match kiwi uses. `grep -qF` matches a substring, so a
+# list already holding .../kiwi-catalog-extra counted as holding
+# .../kiwi-catalog and the real entry was never added.
+list_has() { # file url
+    [[ -r $1 ]] || return 1
+    local u want="${2%/}"; want="${want%.git}"
+    while read -r u _; do
+        [[ -z ${u:-} || $u == \#* ]] && continue
+        u="${u%/}"; [[ "${u%.git}" == "$want" ]] && return 0
+    done < "$1"
+    return 1
+}
+
 register_self() { # list-file repos-dir
     local url; url="$(origin_url)"
     if [[ -z $url ]]; then
         say "note: no git origin found — self-update not registered"
         return 0
     fi
-    grep -qF "$url" "$1" || echo "$url" >> "$1"
+    list_has "$1" "$url" || echo "$url" >> "$1"
     local d="$2/kiwi-updater"
     if [[ "$(realpath "$SRC")" != "$(realpath -m "$d")" && ! -d "$d/.git" ]]; then
         git clone --quiet "$url" "$d"
@@ -126,7 +139,7 @@ user_install() {
     mkdir -p "$USER_CONF" "$USER_DATA/repos"
     seed_list "$USER_CONF/apps.list"     "kiwi user apps — one git URL per line; options: branch=<b> ref=<tag>"
     seed_list "$USER_CONF/catalogs.list" "kiwi catalogs — git URLs of catalog repos (shared app lists)"
-    grep -qF "$DEFAULT_CATALOG" "$USER_CONF/catalogs.list" || {
+    list_has "$USER_CONF/catalogs.list" "$DEFAULT_CATALOG" || {
         echo "$DEFAULT_CATALOG" >> "$USER_CONF/catalogs.list"
         say "registered default catalog ($DEFAULT_CATALOG)"
     }
@@ -184,7 +197,7 @@ root_install() {
     chmod 755 "$SYS_DATA" "$SYS_DATA/repos"
     seed_list "$SYS_CONF/apps.list"     "kiwi system apps — installed as root; options: branch=<b> ref=<tag>"
     seed_list "$SYS_CONF/catalogs.list" "kiwi system catalogs — git URLs of catalog repos"
-    grep -qF "$DEFAULT_CATALOG" "$SYS_CONF/catalogs.list" || echo "$DEFAULT_CATALOG" >> "$SYS_CONF/catalogs.list"
+    list_has "$SYS_CONF/catalogs.list" "$DEFAULT_CATALOG" || echo "$DEFAULT_CATALOG" >> "$SYS_CONF/catalogs.list"
     register_self "$SYS_CONF/apps.list" "$SYS_DATA/repos"
 }
 

@@ -358,6 +358,41 @@ scope_label() { # "user system" -> "user+system"
 }
 
 
+# ---------------------------------------------------------------------------
+# List files hold one URL per line plus options. They were searched with
+# `grep -qF` and rewritten with `grep -vF`, which matches a SUBSTRING: with
+# .../foo-bar listed, `kiwi add .../foo` answered "already in", and purging
+# .../foo deleted the .../foo-bar line as well. The rewrite was `cat tmp >
+# file`, which leaves a truncated list if it is interrupted.
+#
+# Compare the first field exactly, ignoring a trailing slash and .git so the
+# three spellings of one repo are one entry.
+# ---------------------------------------------------------------------------
+norm_url() { local u="${1%/}"; echo "${u%.git}"; }
+
+list_has() { # file url
+    [[ -r $1 ]] || return 1
+    local want u; want="$(norm_url "$2")"
+    while read -r u _; do
+        [[ -z ${u:-} || $u == \#* ]] && continue
+        [[ "$(norm_url "$u")" == "$want" ]] && return 0
+    done < "$1"
+    return 1
+}
+
+list_drop() { # file url -> rewrite without that entry, atomically
+    [[ -f $1 ]] || return 0
+    local want u line tmp; want="$(norm_url "$2")"
+    tmp="$(mktemp "$1.XXXXXX")" || return 1
+    while IFS= read -r line || [[ -n $line ]]; do
+        read -r u _ <<<"$line" || true
+        [[ -n ${u:-} && $u != \#* && "$(norm_url "$u")" == "$want" ]] && continue
+        printf '%s\n' "$line"
+    done < "$1" > "$tmp"
+    chmod --reference="$1" "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$1"
+}
+
 dir_name() { # url -> repo directory name
     local b; b="$(basename "$1")"
     echo "${b%.git}"
@@ -674,10 +709,10 @@ uninstall_one() { # scope url purge
     fi
     if [[ $purge -eq 1 ]]; then
         local f; f="$(list_file "$scope")"
-        local tmp; tmp="$(mktemp)"
-        grep -vF "$url" "$f" > "$tmp" || true
-        cat "$tmp" > "$f"; rm -f "$tmp"
-        info "removed $name from $f"
+        if list_has "$f" "$url"; then
+            list_drop "$f" "$url"
+            info "removed $name from $f"
+        fi
     fi
 }
 
@@ -1077,7 +1112,7 @@ cmd_add() {
         return
     fi
     mkdir -p "$(dirname "$f")"; touch "$f"
-    grep -qF "$url" "$f" && die "already in $f"
+    list_has "$f" "$url" && die "already in $f"
     echo "$url" >> "$f"
     info "added $(dir_name "$url") to $scope list — install it with: kiwi install $(dir_name "$url")"
 }
@@ -1104,7 +1139,7 @@ cmd_catalog() { # add <url> | list      (--system routes to the system file)
                 return
             fi
             mkdir -p "$(dirname "$f")"; touch "$f"
-            grep -qF "$url" "$f" && die "catalog already registered in $f"
+            list_has "$f" "$url" && die "catalog already registered in $f"
             # A catalog is a list of repos whose install scripts you will run.
             # Anything in it that declares the system scope runs as root. Say so
             # once, plainly, at the only moment the decision is being made.
@@ -1145,10 +1180,8 @@ cmd_catalog() { # add <url> | list      (--system routes to the system file)
                 as_root "$rk" catalog remove "$url" --system
                 return
             fi
-            [[ -f $f ]] && grep -qF "$url" "$f" || die "not registered in $f"
-            local tmp; tmp="$(mktemp)"
-            grep -vF "$url" "$f" > "$tmp" || true
-            cat "$tmp" > "$f"; rm -f "$tmp"
+            list_has "$f" "$url" || die "not registered in $f"
+            list_drop "$f" "$url"
             local cdir; cdir="$(catalogs_dir)/$(dir_name "$url")"
             rm -rf "${cdir:?}"
             info "catalog removed (installed apps stay until uninstalled)"

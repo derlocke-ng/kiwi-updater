@@ -1075,7 +1075,7 @@ kiwi $KIWI_VERSION — install and update open-source apps from git catalogs
   kiwi list [--check]        every app this machine knows about (--no-sync to skip fetching)
   kiwi search <term>         find an app across all registered catalogs
   kiwi info <app>            what it is, what it installs, whether it needs root
-  kiwi install <app>|--all   install (or re-install) an app
+  kiwi install <app>|--all   install (or re-install) an app; --all needs asking for
   kiwi update [<app>]|--all  update everything that has a new release
   kiwi uninstall <app>       remove it  (--purge also drops its config)
   kiwi check                 exit 10 if anything has an update
@@ -1139,7 +1139,13 @@ case "$CMD" in
                  cmd_add ${ARGS[@]+"${ARGS[@]}"} ${add_args[@]+"${add_args[@]}"} ;;
     catalog)     cmd_catalog ${ARGS[@]+"${ARGS[@]}"} ;;
     sync)        sync_catalogs; sync_all_meta; info "catalogs synced" ;;
-    install)     sync_catalogs; collect_targets "${ARGS[@]:---all}"; dispatch install ;;
+    # No implicit --all. `kiwi install` with no arguments installed every app in
+    # every registered catalog, running each one's installer — including, on a
+    # default install, apps that ask for root. `kiwi update` with no arguments
+    # still means "everything already installed", which is a safe default.
+    install)     [[ ${#ARGS[@]} -gt 0 ]] ||
+                     die "usage: kiwi install <app>... | --all   (--all installs every listed app)"
+                 sync_catalogs; collect_targets "${ARGS[@]}"; dispatch install ;;
     update)      sync_catalogs; collect_targets "${ARGS[@]:---all}"; dispatch update ;;
     uninstall)   [[ ${#ARGS[@]} -gt 0 ]] || die "usage: kiwi uninstall <name...>"
                  collect_targets "${ARGS[@]}"; dispatch uninstall ;;

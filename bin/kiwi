@@ -793,7 +793,7 @@ dispatch() { # verb extra_flag
 }
 
 # maintain a "Kiwi Tools" folder in the GNOME app grid, grouping every
-# installed Kiwi app that ships a desktop entry (org.kiwinetwork.*). Rebuilt
+# installed Kiwi app that ships a desktop entry (eu.kiwinetwork.*). Rebuilt
 # from what's actually present, so it self-heals on install/uninstall.
 # User scope + a live GNOME session only; a no-op everywhere else.
 sync_app_folder() {
@@ -805,7 +805,7 @@ sync_app_folder() {
     local schema="org.gnome.desktop.app-folders"
     local path="/org/gnome/desktop/app-folders/folders/kiwi-tools/"
     local ids=() f
-    for f in "$appsdir"/org.kiwinetwork.*.desktop; do
+    for f in "$appsdir"/eu.kiwinetwork.*.desktop; do
         [[ -e $f ]] && ids+=("$(basename "$f")")
     done
 

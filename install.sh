@@ -229,6 +229,11 @@ else
     # the root copy updates itself via its own timer anyway)
     if (( WITH_SYSTEM )) || { [[ $ACTION != install && -t 0 ]] && system_present; }; then
         say "handling system scope (root)"
-        as_root bash "$SELF" "$ACTION" ${PURGE:+--purge}
+        # PURGE is 0 or 1 and never empty, so ${PURGE:+--purge} expanded on
+        # every single call: an uninstall without --purge still deleted
+        # /etc/kiwi-updater and /var/lib/kiwi-updater, taking the clones of
+        # every system app that was still installed with it.
+        root_args=(); (( PURGE )) && root_args+=(--purge)
+        as_root bash "$SELF" "$ACTION" ${root_args[@]+"${root_args[@]}"}
     fi
 fi

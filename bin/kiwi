@@ -11,14 +11,13 @@
 set -euo pipefail
 
 KIWI_VERSION=1.2.1
-SELF="$(realpath "${BASH_SOURCE[0]}")"
 
 # systemd system services start without $HOME (set -u would abort at the
 # path definitions below) — root's user-scope paths are never used anyway
 export HOME="${HOME:-/root}"
 
 # root-owned copy used for system-scope work (installed by 'install.sh --with-system');
-# escalating to it instead of $SELF means root never executes a user-writable file
+# escalating to it instead of this script means root never executes a user-writable file
 ROOT_KIWI="/usr/local/bin/kiwi"
 
 # NEVER returns $SELF. Running ~/.local/bin/kiwi as root would hand every
@@ -450,7 +449,7 @@ run_installer() { # scope repo_dir action
 sync_repo() { # scope url opts -> clones + checks out the target ref, echoes repo dir
     local scope="$1" url="$2" opts="${3:-}"
     local dir; dir="$(repos_dir "$scope")/$(dir_name "$url")"
-    local target sha refname
+    local target sha
     target="$(remote_target "$url" "$opts" || true)"
     if [[ ! -d "$dir/.git" ]]; then
         [[ -n $target ]] || die "cannot reach $url"
@@ -458,7 +457,7 @@ sync_repo() { # scope url opts -> clones + checks out the target ref, echoes rep
         git_net clone --quiet "$url" "$dir"
     fi
     if [[ -n $target ]]; then
-        IFS=$'\t' read -r sha refname <<<"$target"
+        IFS=$'\t' read -r sha _ <<<"$target"
         git_net -C "$dir" fetch --quiet --tags origin
         git -C "$dir" -c advice.detachedHead=false checkout --quiet --force "$sha"
     fi
@@ -489,7 +488,7 @@ update_one() { # scope url opts   (appends to global UPDATED array)
         log "${c_dim}skipping $name (not installed)${c_off}"
         return 0
     fi
-    local dir="$(repos_dir "$scope")/$(dir_name "$url")"
+    local dir; dir="$(repos_dir "$scope")/$(dir_name "$url")"
     local before; before="$(local_head "$dir")"
     sync_repo "$scope" "$url" "$opts" >/dev/null
     if [[ "$(local_head "$dir")" == "$before" && ${FORCE:-0} -eq 0 ]]; then
@@ -505,7 +504,7 @@ update_one() { # scope url opts   (appends to global UPDATED array)
 uninstall_one() { # scope url purge
     local scope="$1" url="$2" purge="$3"
     local name; name="$(app_name "$scope" "$url")"
-    local dir="$(repos_dir "$scope")/$(dir_name "$url")"
+    local dir; dir="$(repos_dir "$scope")/$(dir_name "$url")"
     if [[ -d $dir ]]; then
         is_installed "$scope" "$url" && run_installer "$scope" "$dir" uninstall
         rm -rf "$dir"
@@ -952,7 +951,8 @@ cmd_catalog() { # add <url> | list      (--system routes to the system file)
             local tmp; tmp="$(mktemp)"
             grep -vF "$url" "$f" > "$tmp" || true
             cat "$tmp" > "$f"; rm -f "$tmp"
-            rm -rf "$(catalogs_dir)/$(dir_name "$url")"
+            local cdir; cdir="$(catalogs_dir)/$(dir_name "$url")"
+            rm -rf "${cdir:?}"
             info "catalog removed (installed apps stay until uninstalled)"
             ;;
         *) die "usage: kiwi catalog add|remove <git-url> [--system] | kiwi catalog list" ;;
@@ -1033,9 +1033,11 @@ command -v git >/dev/null 2>&1 || die "git is required (rpm-ostree install git)"
 case "$CMD" in
     list)        cmd_list ${ARGS[@]+"${ARGS[@]}"} ;;
     search)      cmd_search ${ARGS[@]+"${ARGS[@]}"} ;;
-    info|show)   cmd_info $( (( PORCELAIN )) && echo --porcelain || true ) ${ARGS[@]+"${ARGS[@]}"} ;;
+    info|show)   info_args=(); (( PORCELAIN )) && info_args=(--porcelain)
+                 cmd_info ${info_args[@]+"${info_args[@]}"} ${ARGS[@]+"${ARGS[@]}"} ;;
     check)       cmd_check ;;
-    add)         cmd_add ${ARGS[@]+"${ARGS[@]}"} $( [[ $SCOPE_FILTER == system ]] && echo --system || true ) ;;
+    add)         add_args=(); [[ $SCOPE_FILTER == system ]] && add_args=(--system)
+                 cmd_add ${ARGS[@]+"${ARGS[@]}"} ${add_args[@]+"${add_args[@]}"} ;;
     catalog)     cmd_catalog ${ARGS[@]+"${ARGS[@]}"} ;;
     sync)        sync_catalogs; sync_all_meta; info "catalogs synced" ;;
     install)     sync_catalogs; collect_targets "${ARGS[@]:---all}"; dispatch install ;;

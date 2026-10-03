@@ -13,7 +13,6 @@ set -euo pipefail
 
 KIWI=/usr/local/bin/kiwi
 SYS_LIST=/etc/kiwi-updater/apps.list
-SYS_REPOS=/var/lib/kiwi-updater/repos
 
 [[ -x $KIWI ]] || { echo "kiwi is not installed at $KIWI" >&2; exit 1; }
 

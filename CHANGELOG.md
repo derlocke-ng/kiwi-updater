@@ -3,6 +3,12 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 1.6.1 — 2026-10-03
+
+The pin warning added in 1.6.0 printed "not this pinv0.1.0" — a bad parameter
+expansion glued the word to the value. Seen the first time the warning fired
+on a real machine.
+
 ## 1.6.0 — 2026-10-03
 
 A fresh full pass over the CLI and GUI.

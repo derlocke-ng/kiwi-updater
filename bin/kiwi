@@ -10,7 +10,7 @@
 #   system — listed in /etc/kiwi-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-KIWI_VERSION=1.6.0
+KIWI_VERSION=1.6.1
 
 # systemd system services start without $HOME (set -u would abort at the
 # path definitions below) — root's user-scope paths are never used anyway
@@ -1581,11 +1581,13 @@ pin_apply() { # app value   ("" clears the pin)
     # so "code only changes when I say so" would quietly not cover the part
     # that runs as root. Say so, with the exact command.
     if [[ $scope == user ]] && is_installed system "$url"; then
-        local verb
-        verb="pin --system $(dir_name "$url")${val:+ $val}"
-        [[ -z $val ]] && verb="unpin --system $(dir_name "$url")"
-        warn "the system half of $(dir_name "$url") follows root's own list, not this ${val:+pin}${val:-change}."
-        warn "  to do the same there (one password prompt):  kiwi $verb"
+        if [[ -n $val ]]; then
+            warn "the system half of $(dir_name "$url") follows root's own list; this pin does not hold it."
+            warn "  to hold it too (one password prompt):  kiwi pin --system $(dir_name "$url") $val"
+        else
+            warn "the system half of $(dir_name "$url") follows root's own list; it was not unpinned here."
+            warn "  if it carries its own pin, clear it with:  kiwi unpin --system $(dir_name "$url")"
+        fi
     fi
 }
 

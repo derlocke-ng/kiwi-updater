@@ -10,7 +10,7 @@
 #   system — listed in /etc/kiwi-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-KIWI_VERSION=1.4.0
+KIWI_VERSION=1.5.0
 
 # systemd system services start without $HOME (set -u would abort at the
 # path definitions below) — root's user-scope paths are never used anyway
@@ -1683,16 +1683,35 @@ cmd_doctor() {
     done
 
     info "list files"
-    for f in "$SYS_LIST" "$SYS_CATALOGS"; do
-        [[ -e $f ]] || continue
+    # The user's own lists are checked too. They decide which installers run as
+    # you, so one that anyone else on the machine can write is a way to get code
+    # executed as you — the same reasoning as the root-owned rule, one privilege
+    # level down. They were missing here entirely.
+    local want_owner
+    for f in "$USER_LIST" "$USER_CATALOGS" "$SYS_LIST" "$SYS_CATALOGS"; do
+        if [[ ! -e $f ]]; then
+            case "$f" in
+                "$USER_LIST"|"$USER_CATALOGS") _note "$f does not exist yet" ;;
+            esac
+            continue
+        fi
         st="$(stat -c '%u %a' "$f" 2>/dev/null)" || continue
         read -r owner mode <<<"$st"
-        if [[ $owner != 0 ]]; then
-            _bad "$f is not owned by root — root ignores it. chown root $f"
+        case "$f" in
+            "$SYS_LIST"|"$SYS_CATALOGS") want_owner=0 ;;
+            *)                           want_owner=$EUID ;;
+        esac
+        if [[ $owner != "$want_owner" ]]; then
+            if (( want_owner == 0 )); then
+                _bad "$f is not owned by root — root ignores it. chown root $f"
+            else
+                _bad "$f is owned by uid $owner, not you. chown $EUID $f"
+            fi
         elif (( (8#$mode & 8#022) != 0 )); then
-            _bad "$f is writable by group or other (mode $mode) — root ignores it. chmod 644 $f"
+            _bad "$f is writable by group or other (mode $mode) — anything written
+  there runs as the owner of that scope. chmod 644 $f"
         else
-            _good "$f (root-owned, mode $mode)"
+            _good "$f (mode $mode)"
         fi
     done
 

@@ -481,8 +481,21 @@ t_P10() { # the porcelain must tell the GUI which scopes are actually installed
     check P10 "porcelain carries installed scopes and the pin (fields=$nf installed='$inst' pinned='$pinf')" f
 }
 
+t_P11() { # doctor has to check the user's OWN lists, not only root's
+    # They decide which installers run as you, so one anybody local can write
+    # is a way to get code executed as you.
+    mkapp a ul user
+    ku add $GITROOT/a/ul.git >/dev/null
+    chmod 666 $TH/.config/kiwi-updater/apps.list
+    local out rc
+    out="$(ku doctor 2>&1)"; rc=$?
+    f() { [[ $rc -ne 0 ]] &&
+          grep -q "$TH/.config/kiwi-updater/apps.list is writable by group or other" <<<"$out"; }
+    check P11 "kiwi doctor checks the user's own list files too" f
+}
+
 for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
-         P1 P2 P3 P4 P5 P6 P7 P8 P9 P10; do run $t; done
+         P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

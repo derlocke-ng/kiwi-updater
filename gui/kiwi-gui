@@ -11,6 +11,7 @@ which stays the single source of truth. Images are read from the app's own
 cloned repo, so nothing here fetches from the network.
 """
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -152,7 +153,150 @@ CSS = b"""
 .kiwi-card-desc  { opacity: .7; font-size: .9em; }
 .kiwi-dep-ok  { color: @success_color; }
 .kiwi-dep-bad { color: @error_color; }
+
+/* "daemon cli gui gnome-extension" as a line of words says nothing at a
+   glance; one labelled chip per component is scannable and gives each thing an
+   icon. */
+.kiwi-comp { border-radius: 999px; padding: 4px 11px 4px 8px;
+             background: alpha(@accent_bg_color, .14);
+             font-size: .86em; font-weight: 600; }
+
+/* A README is a document, so it gets document shapes rather than one long dim
+   paragraph. Colours come from the theme's accent, so this follows light/dark. */
+.kiwi-md-h1 { font-size: 1.3em;  font-weight: 800; color: @accent_color; }
+.kiwi-md-h2 { font-size: 1.12em; font-weight: 700; color: @accent_color; }
+.kiwi-md-h3 { font-weight: 700; }
+.kiwi-md-code { background: alpha(@window_fg_color, .07); border-radius: 8px;
+                padding: 9px 11px; }
+.kiwi-md-quote { border-left: 3px solid alpha(@accent_bg_color, .5);
+                 padding-left: 10px; opacity: .85; }
+.kiwi-shot-btn { padding: 0; }
 """
+
+
+_MD_CODE = re.compile(r"`([^`\n]+)`")
+_MD_BOLD = re.compile(r"\*\*([^*\n]+)\*\*")
+_MD_ITAL = re.compile(r"(?<![*\w])\*([^*\n]+)\*(?!\*)")
+_MD_LINK = re.compile(r"\[([^\]\n]+)\]\(([^)\n]+)\)")
+_MD_IMG = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+
+
+def _md_inline(s):
+    """Inline markdown to Pango markup. Escaped FIRST, so nothing in the
+    document can inject markup — only then are the markers turned into tags."""
+    s = _MD_IMG.sub("", s)
+    s = esc(s)
+    s = _MD_CODE.sub(r"<tt>\1</tt>", s)
+    s = _MD_BOLD.sub(r"<b>\1</b>", s)
+    s = _MD_ITAL.sub(r"<i>\1</i>", s)
+    s = _MD_LINK.sub(r"<u>\1</u>", s)
+    return s
+
+
+def markdown_widget(text, limit=40000):
+    """A README rendered as a document rather than one long dim paragraph.
+
+    Deliberately small: headings, emphasis, inline and fenced code, lists,
+    block quotes, rules and tables-as-monospace. Colours come from CSS classes
+    so they follow the theme instead of being baked into the markup."""
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
+    para, code, in_code = [], [], False
+
+    def label(markup, css=None, mono=False):
+        lbl = Gtk.Label(xalign=0, wrap=True, selectable=True, use_markup=True,
+                        label=markup)
+        lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        if mono:
+            lbl.add_css_class("monospace")
+        if css:
+            lbl.add_css_class(css)
+        return lbl
+
+    def flush_para():
+        if para:
+            box.append(label(" ".join(para)))
+            para.clear()
+
+    def flush_code():
+        if code:
+            lbl = label("<tt>%s</tt>" % esc("\n".join(code)), "kiwi-md-code", mono=True)
+            lbl.set_wrap(False)
+            sc = Gtk.ScrolledWindow(child=lbl, vscrollbar_policy=Gtk.PolicyType.NEVER)
+            sc.add_css_class("kiwi-md-code")
+            box.append(sc)
+            code.clear()
+
+    for raw in text[:limit].splitlines():
+        if raw.lstrip().startswith("```"):
+            flush_para()
+            in_code = not in_code
+            if not in_code:
+                flush_code()
+            continue
+        if in_code:
+            code.append(raw)
+            continue
+        s = raw.strip()
+        if not s:
+            flush_para()
+            continue
+        if len(s) >= 3 and set(s) <= set("-=_* "):          # horizontal rule
+            flush_para()
+            box.append(Gtk.Separator(margin_top=6, margin_bottom=6))
+            continue
+        m = re.match(r"(#{1,6})\s+(.*)", s)
+        if m:
+            flush_para()
+            lvl = min(3, len(m.group(1)))
+            lbl = label(_md_inline(m.group(2)), "kiwi-md-h%d" % lvl)
+            lbl.set_margin_top(8 if lvl > 1 else 12)
+            box.append(lbl)
+            continue
+        if s.startswith(">"):
+            flush_para()
+            box.append(label(_md_inline(s.lstrip("> ")), "kiwi-md-quote"))
+            continue
+        m = re.match(r"[-*+]\s+(.*)", s) or re.match(r"(\d+)[.)]\s+(.*)", s)
+        if m:
+            flush_para()
+            body = m.group(m.lastindex)
+            lbl = label("• " + _md_inline(body))
+            lbl.set_margin_start(10)
+            box.append(lbl)
+            continue
+        if s.startswith("|"):                               # table: keep aligned
+            flush_para()
+            code.append(raw)
+            continue
+        flush_code()
+        para.append(_md_inline(s))
+
+    flush_para()
+    flush_code()
+    return box
+
+
+def component_chips(components):
+    """One chip per component, with the icon that component already maps to."""
+    parts = [c for c in (components or "").split() if c]
+    if not parts:
+        return None
+    box = Adw.WrapBox(child_spacing=7, line_spacing=7) if hasattr(Adw, "WrapBox") else \
+        Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=7)
+    for c in parts:
+        names = None
+        for key, cands in COMPONENT_ICON:
+            if key == c.lower():
+                names = cands
+                break
+        chip = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
+                       valign=Gtk.Align.CENTER)
+        chip.add_css_class("kiwi-comp")
+        chip.append(Gtk.Image(icon_name=best_icon(names or FALLBACK_ICON),
+                              pixel_size=14))
+        chip.append(Gtk.Label(label=c.replace("-", " ")))
+        box.append(chip)
+    return box
 
 def find_kiwi():
     for c in (shutil.which("kiwi"),
@@ -269,6 +413,139 @@ class App(GObject.Object):
     def haystack(self):
         return " ".join((self["name"], self["desc"], self["tags"],
                          self["category"], self["comp"])).lower()
+
+
+class ReadmeDialog(Adw.Dialog):
+    """The README with the whole window to itself, for the long ones."""
+
+    def __init__(self, text, name):
+        super().__init__(title=name)
+        self.set_content_width(900)
+        self.set_content_height(820)
+        body = markdown_widget(text)
+        body.set_margin_top(18)
+        body.set_margin_bottom(28)
+        body.set_margin_start(18)
+        body.set_margin_end(18)
+        sc = Gtk.ScrolledWindow(child=Adw.Clamp(child=body, maximum_size=760),
+                                hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
+        tb = Adw.ToolbarView(content=sc)
+        tb.add_top_bar(Adw.HeaderBar())
+        self.set_child(tb)
+
+
+class ShotDialog(Adw.Dialog):
+    """A screenshot big enough to actually read, with zoom.
+
+    In the carousel they are thumbnails, and the detail in a screenshot is
+    usually the whole reason for looking at one."""
+
+    ZOOMS = (0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0)
+
+    def __init__(self, paths, index=0):
+        super().__init__(title="Screenshot")
+        self.set_content_width(1100)
+        self.set_content_height(760)
+        self.paths = paths
+        self.index = index
+        self.zoom = None               # None = fit to the window
+
+        self.pic = Gtk.Picture(halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+        self.scroll = Gtk.ScrolledWindow(child=self.pic, hexpand=True, vexpand=True)
+
+        header = Adw.HeaderBar()
+        nav = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        nav.add_css_class("linked")
+        self.prev = Gtk.Button(icon_name=ui_icon("go-previous-symbolic", "go-previous"))
+        self.next = Gtk.Button(icon_name=ui_icon("go-next-symbolic", "go-next"))
+        self.prev.connect("clicked", lambda *_: self._step(-1))
+        self.next.connect("clicked", lambda *_: self._step(1))
+        nav.append(self.prev)
+        nav.append(self.next)
+        if len(paths) > 1:
+            header.pack_start(nav)
+
+        zb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        zb.add_css_class("linked")
+        out = Gtk.Button(icon_name=ui_icon("zoom-out-symbolic", "zoom-out"),
+                         tooltip_text="Zoom out")
+        inn = Gtk.Button(icon_name=ui_icon("zoom-in-symbolic", "zoom-in"),
+                         tooltip_text="Zoom in")
+        fit = Gtk.Button(icon_name=ui_icon("zoom-fit-best-symbolic", "zoom-fit-best",
+                                           "view-fullscreen-symbolic"),
+                         tooltip_text="Fit to the window")
+        out.connect("clicked", lambda *_: self._nudge(-1))
+        inn.connect("clicked", lambda *_: self._nudge(1))
+        fit.connect("clicked", lambda *_: self._set_zoom(None))
+        zb.append(out)
+        zb.append(fit)
+        zb.append(inn)
+        header.pack_end(zb)
+
+        self.counter = Adw.WindowTitle(title="Screenshot", subtitle="")
+        header.set_title_widget(self.counter)
+
+        tb = Adw.ToolbarView(content=self.scroll)
+        tb.add_top_bar(header)
+        self.set_child(tb)
+
+        # Scroll wheel zooming is what everyone tries first on an image.
+        ctl = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
+        ctl.connect("scroll", self._on_scroll)
+        self.pic.add_controller(ctl)
+
+        self._show()
+
+    def _on_scroll(self, _c, _dx, dy):
+        self._nudge(-1 if dy > 0 else 1)
+        return True
+
+    def _step(self, by):
+        self.index = (self.index + by) % len(self.paths)
+        self.zoom = None
+        self._show()
+
+    def _nudge(self, by):
+        cur = self.zoom if self.zoom is not None else 1.0
+        # nearest step, then move one
+        near = min(range(len(self.ZOOMS)), key=lambda i: abs(self.ZOOMS[i] - cur))
+        self._set_zoom(self.ZOOMS[max(0, min(len(self.ZOOMS) - 1, near + by))])
+
+    def _set_zoom(self, z):
+        self.zoom = z
+        self._apply()
+
+    def _show(self):
+        path = self.paths[self.index]
+        try:
+            self.tex = Gdk.Texture.new_from_filename(path)
+            self.pic.set_paintable(self.tex)
+        except Exception:  # noqa: BLE001
+            self.tex = None
+            self.pic.set_filename(path)
+        self.counter.set_title(os.path.basename(path))
+        self.counter.set_subtitle(
+            "%d of %d" % (self.index + 1, len(self.paths)) if len(self.paths) > 1 else "")
+        self._apply()
+
+    def _apply(self):
+        if self.zoom is None or self.tex is None:
+            self.pic.set_content_fit(Gtk.ContentFit.CONTAIN)
+            self.pic.set_size_request(-1, -1)
+            self.pic.set_hexpand(True)
+            self.pic.set_vexpand(True)
+            self.counter.set_subtitle(
+                ("%d of %d · " % (self.index + 1, len(self.paths)) if len(self.paths) > 1 else "")
+                + "fit")
+            return
+        self.pic.set_content_fit(Gtk.ContentFit.FILL)
+        self.pic.set_hexpand(False)
+        self.pic.set_vexpand(False)
+        self.pic.set_size_request(int(self.tex.get_width() * self.zoom),
+                                  int(self.tex.get_height() * self.zoom))
+        self.counter.set_subtitle(
+            ("%d of %d · " % (self.index + 1, len(self.paths)) if len(self.paths) > 1 else "")
+            + "%d%%" % round(self.zoom * 100))
 
 
 class DetailDialog(Adw.Dialog):
@@ -471,13 +748,21 @@ class DetailDialog(Adw.Dialog):
         shots = [repo_path(rd, p) for p in info.get("screenshots", "").split()]
         shots = [p for p in shots if p]
         if shots:
-            car = Adw.Carousel(allow_scroll_wheel=False)
+            # spacing, so two screenshots stop touching; and each one opens a
+            # viewer, because a 320px-tall thumbnail of a screenshot is not
+            # something you can read
+            car = Adw.Carousel(allow_scroll_wheel=False, spacing=14)
             car.set_size_request(-1, 320)
-            for p in shots:
+            for i, p in enumerate(shots):
                 pic = Gtk.Picture.new_for_filename(p)
                 pic.set_content_fit(Gtk.ContentFit.CONTAIN)
                 pic.add_css_class("kiwi-shot")
-                car.append(pic)
+                btn = Gtk.Button(child=pic, tooltip_text="Open full size")
+                btn.add_css_class("flat")
+                btn.add_css_class("kiwi-shot-btn")
+                btn.connect("clicked",
+                            lambda _b, idx=i: ShotDialog(shots, idx).present(self))
+                car.append(btn)
             self.box.append(car)
             if len(shots) > 1:
                 self.box.append(Adw.CarouselIndicatorDots(carousel=car))
@@ -500,9 +785,16 @@ class DetailDialog(Adw.Dialog):
         if got:
             self.box.append(facts)
 
-        inst = Adw.PreferencesGroup(
-            title="What it installs",
-            description=esc(info["components"]) if info.get("components") else None)
+        inst = Adw.PreferencesGroup(title="What it installs")
+        chips = component_chips(info.get("components"))
+        if chips:
+            holder = Adw.PreferencesRow(activatable=False, selectable=False)
+            chips.set_margin_top(12)
+            chips.set_margin_bottom(12)
+            chips.set_margin_start(12)
+            chips.set_margin_end(12)
+            holder.set_child(chips)
+            inst.add(holder)
         scopes = info.get("scopes", "").split()
         # `kiwi info --porcelain` has reported installed_<scope> all along; the
         # dialog never showed it, so there was nowhere in the GUI that said
@@ -553,17 +845,29 @@ class DetailDialog(Adw.Dialog):
                 text = open(about, encoding="utf-8", errors="replace").read()
             except OSError:
                 text = ""
-            text = "\n".join(l for l in text.splitlines()
-                             if not l.strip().startswith(("```", "![", "[!", "|")))
-            text = text.strip()[:4000]
-            if text:
+            if text.strip():
+                # Rendered, and behind an expander like the installer: a README
+                # is often the longest thing in the dialog, and it used to be
+                # stripped of its code blocks and tables and flattened into one
+                # dim paragraph.
                 g = Adw.PreferencesGroup(title="Read me")
-                lbl = Gtk.Label(label=text, xalign=0, wrap=True, selectable=True,
-                                margin_top=10, margin_bottom=10,
-                                margin_start=10, margin_end=10)
-                lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-                lbl.add_css_class("dim-label")
-                g.add(Gtk.Frame(child=lbl))
+                e = Adw.ExpanderRow(title=os.path.basename(about),
+                                    subtitle="the project's own README")
+                body = markdown_widget(text)
+                body.set_margin_top(12)
+                body.set_margin_bottom(14)
+                body.set_margin_start(14)
+                body.set_margin_end(14)
+                sc = Gtk.ScrolledWindow(child=body,
+                                        hscrollbar_policy=Gtk.PolicyType.NEVER)
+                sc.set_size_request(-1, 420)
+                e.add_row(sc)
+                b = Gtk.Button(label="Open", valign=Gtk.Align.CENTER)
+                b.add_css_class("flat")
+                b.connect("clicked", lambda *_, t=text, n=os.path.basename(about):
+                          ReadmeDialog(t, n).present(self))
+                e.add_suffix(b)
+                g.add(e)
                 self.box.append(g)
 
         src = Adw.PreferencesGroup(title="Source")

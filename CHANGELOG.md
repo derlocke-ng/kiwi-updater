@@ -3,6 +3,36 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 1.5.0 — 2026-10-03
+
+### Fixed
+
+- **`kiwi doctor` never checked your own list files.** It only looked at
+  `/etc/kiwi-updater/`, because the root-ownership rule applies there — but
+  `~/.config/kiwi-updater/apps.list` and `catalogs.list` decide which
+  installers run as *you*, so one that anybody local can write is a way to get
+  code executed as you. Both are checked now, for ownership and for group and
+  other write, and it says when they do not exist yet.
+- kiwi-updater's own manifest had no `CATEGORY`, so the GUI fell back to
+  showing `COMPONENTS` — the card read "cli gui". It declares `CATEGORY=System`
+  now, which is one of the documented categories and already has an icon.
+
+### Added
+
+- **Component chips.** "daemon cli gui gnome-extension" was a line of words;
+  each component is now a labelled chip with the icon it already maps to.
+- **Screenshots can be read.** The carousel had no spacing between images and
+  no way to enlarge one. Images are spaced, each opens a viewer with zoom
+  (buttons or the scroll wheel, 25%–400%, or fit), and the viewer steps through
+  the whole set.
+- **The README is rendered.** It used to be stripped of its code blocks and
+  tables and flattened into one dim 4000-character paragraph. Headings,
+  emphasis, inline and fenced code, lists, block quotes, rules and tables now
+  render as a document, with theme-aware colours; it sits behind an expander
+  like the installer, with an "Open" button for a full-window view. Markup is
+  escaped before any markdown is interpreted, so a README cannot inject Pango
+  tags.
+
 ## 1.4.0 — 2026-10-03
 
 The GUI catches up with the CLI, and finally shows which scopes an app is

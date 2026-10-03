@@ -3,6 +3,22 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 1.5.2 — 2026-10-03
+
+`kiwi info` and `kiwi list` disagreed about an app's scopes, so the GUI detail
+view was missing the root half of a dual-scope app.
+
+1.3.1 taught `kiwi list` to report the scopes an app is actually installed in
+as well as the ones it declares. `kiwi info` was not given the same treatment,
+so for kiwi-updater — listed in both apps.list files by design — `info` reported
+`scopes=user` and printed no `installed_system` line at all, while `list` said
+`user system`. The detail dialog is built from `info`, so its "What it installs"
+section showed only "Into your home directory" even on a machine where the root
+half was installed. Plain `kiwi info` was wrong in the same way.
+
+All three scope computations in `cmd_info` now use the same helper `cmd_list`
+does. `tests/repro.sh` gains P12, which asserts the two commands agree.
+
 ## 1.5.1 — 2026-10-03
 
 The screenshot viewer added in 1.5.0 had a zoom control it did not need. These

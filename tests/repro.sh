@@ -494,8 +494,27 @@ t_P11() { # doctor has to check the user's OWN lists, not only root's
     check P11 "kiwi doctor checks the user's own list files too" f
 }
 
+t_P12() { # `kiwi info` and `kiwi list` must agree about an app's scopes
+    # They did not, for an app listed in both lists: list used effective_scopes
+    # and info did not, so info reported scopes=user with no installed_system
+    # line at all — and the GUI detail view, which is built from info, had no
+    # root row to show for an app installed as root.
+    mkapp a bothsc user 'echo "scope=$KIWI_SCOPE"'
+    mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
+    echo "$GITROOT/a/bothsc.git" > /etc/kiwi-updater/apps.list
+    ku add $GITROOT/a/bothsc.git >/dev/null
+    ku install bothsc >/dev/null 2>&1
+    kr install --system bothsc >/dev/null 2>&1
+    local lsc isc isys
+    lsc="$(ku list --porcelain --no-sync 2>/dev/null | awk -F'\t' '$1=="bothsc"{print $2}')"
+    isc="$(ku info --porcelain bothsc 2>/dev/null | sed -n 's/^scopes=//p')"
+    isys="$(ku info --porcelain bothsc 2>/dev/null | sed -n 's/^installed_system=//p')"
+    f() { [[ "$lsc" == "$isc" && $lsc == *system* && $isys == 1 ]]; }
+    check P12 "info and list agree on scopes (list='$lsc' info='$isc' installed_system='$isys')" f
+}
+
 for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
-         P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11; do run $t; done
+         P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

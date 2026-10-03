@@ -10,7 +10,7 @@
 #   system — listed in /etc/kiwi-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-KIWI_VERSION=1.5.1
+KIWI_VERSION=1.5.2
 
 # systemd system services start without $HOME (set -u would abort at the
 # path definitions below) — root's user-scope paths are never used anyway
@@ -1415,7 +1415,7 @@ cmd_info() { # [--porcelain] [--installer] name
         line="$(resolve "$1")" || die "unknown app: $1"
         IFS=$'\t' read -r url opts <<<"$line"
         dir="$(sync_meta "$url" "$opts")" || die "cannot reach $url"
-        scs="$(app_scopes "$dir" "$opts")"
+        scs="$(effective_scopes "$dir" "$opts" "$url")"
         local inst; inst="$(manifest_get "$dir" INSTALLER install.sh)"
         [[ -f "$dir/$inst" ]] || die "there is no installer '$inst' in $dir"
         info "$inst from $url"
@@ -1430,7 +1430,7 @@ cmd_info() { # [--porcelain] [--installer] name
         line="$(resolve "$1")" || die "unknown app: $1"
         IFS=$'\t' read -r url opts <<<"$line"
         dir="$(sync_meta "$url" "$opts")" || die "cannot reach $url"
-        scs="$(app_scopes "$dir" "$opts")"
+        scs="$(effective_scopes "$dir" "$opts" "$url")"
         local deps; deps="$(manifest_get "$dir" DEPENDS "")"
         printf 'name=%s\n'        "$(manifest_name "$dir" "$(dir_name "$url")")"
         printf 'description=%s\n' "$(manifest_get "$dir" DESCRIPTION "")"
@@ -1461,7 +1461,12 @@ cmd_info() { # [--porcelain] [--installer] name
     line="$(resolve "$1")" || die "unknown app: $1"
     IFS=$'\t' read -r url opts <<<"$line"
     dir="$(sync_meta "$url" "$opts")" || die "cannot reach $url"
-    scs="$(app_scopes "$dir" "$opts")"
+    # effective_scopes, the same as cmd_list: what the entry and manifest
+    # declare PLUS any scope the app is actually installed in. With app_scopes
+    # here, `kiwi info kiwi-updater` reported scopes=user and printed no
+    # installed_system line at all, while `kiwi list` said user+system — so the
+    # GUI detail view, which is built from info, had no root row to show.
+    scs="$(effective_scopes "$dir" "$opts" "$url")"
     printf '%s%s%s\n' "$c_bold" "$(manifest_name "$dir" "$(dir_name "$url")")" "$c_off"
     printf '  %s\n\n' "$(manifest_get "$dir" DESCRIPTION "")"
     printf '  %-12s %s\n' version    "$(manifest_get "$dir" VERSION "-")"

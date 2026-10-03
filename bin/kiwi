@@ -296,7 +296,7 @@ app_entries() {
 # the SAME repo and wrong when they name different ones: one app then shadows
 # the other and `kiwi install <name>` is ambiguous. Say so once, out loud.
 check_lists() {
-    local -A first=() reported=()
+    local -A first_url=() reported=()
     local url opts d u
     while IFS=$'\t' read -r url opts; do
         [[ -z $url ]] && continue
@@ -306,12 +306,12 @@ check_lists() {
             continue
         fi
         d="$(dir_name "$url")"; u="$(norm_url "$url")"
-        if [[ -z ${first[$d]:-} ]]; then
-            first[$d]="$u"
-        elif [[ ${first[$d]} != "$u" && -z ${reported[$d]:-} ]]; then
+        if [[ -z ${first_url[$d]:-} ]]; then
+            first_url[$d]="$u"
+        elif [[ ${first_url[$d]} != "$u" && -z ${reported[$d]:-} ]]; then
             reported[$d]=1
             warn "two different repos are both called '$d':"
-            warn "    using  ${first[$d]}"
+            warn "    using  ${first_url[$d]}"
             warn "   hidden  $u"
             warn "  only the first can be installed under that name."
         fi

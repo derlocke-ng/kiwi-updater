@@ -40,7 +40,7 @@ checkout is missing. Set it up with:
     info "This needs a root-owned copy of kiwi: root must never execute a file" >&2
     info "you can write, or anything running as you could edit it and become" >&2
     info "root on the next update. Installing it now — one password prompt." >&2
-    as_root bash "$repo/install.sh" install --with-system >&2 ||
+    as_root bash "$repo/install.sh" install --with-system >&2 9>&- ||
         die "could not set up the system scope"
     [[ -x $ROOT_KIWI ]] || die "the system scope did not install ($ROOT_KIWI is still missing)"
     echo "$ROOT_KIWI"
@@ -425,6 +425,14 @@ acquire_lock() { # scope
     mkdir -p "$dir"; lock="$dir/lock"
     me="$(hostname 2>/dev/null || echo unknown)"
 
+    # fd 9 is inherited by every child unless it is closed explicitly, so each
+    # exec of something that might outlive us closes it (`9>&-`). An installer
+    # that starts a background process outside systemd used to leave that
+    # process holding the flock after kiwi exited, and every later kiwi command
+    # then waited and failed with "another kiwi is already running", naming a
+    # pid that no longer existed. Same wedge 1.2.0 fixed for stalled fetches,
+    # reached a different way.
+    #
     # Open read-write rather than truncating: a plain > would wipe the holder's
     # own record on the way to discovering we cannot have the lock, so we could
     # never say who has it.
@@ -488,7 +496,7 @@ run_installer() { # scope repo_dir action
           KIWI_APP_DIR="$dir" \
           KIWI_PREFIX="$(prefix_for "$scope")" \
           KIWI_GUI="$gui" \
-          bash "./$inst" "$action" )
+          bash "./$inst" "$action" 9>&- )
 }
 
 # Every failure path RETURNS, and none of them die. This runs inside $(...),
@@ -668,7 +676,7 @@ dispatch() { # verb extra_flag
         # each name against the root-owned system list and refuses anything
         # else, so updating one app no longer means updating all of them.
         info "updating system app(s) without a password: ${sys_names[*]}"
-        if pkexec "$sys_wrapper" "${sys_names[@]}"; then
+        if pkexec "$sys_wrapper" "${sys_names[@]}" 9>&-; then
             sys_names=()
             info "${c_grn}system apps updated${c_off}"
         else
@@ -696,7 +704,7 @@ dispatch() { # verb extra_flag
         # copy, and inside $(...) that exit leaves only the subshell — the
         # caller went on to run `pkexec "" update --system …`.
         local rk; rk="$(root_kiwi)" || return 1
-        as_root "$rk" "$verb" --system "${sys_names[@]}" "${extra[@]+"${extra[@]}"}" || rc=1
+        as_root "$rk" "$verb" --system "${sys_names[@]}" "${extra[@]+"${extra[@]}"}" 9>&- || rc=1
     fi
 
     if [[ $verb == update && ${#UPDATED[@]} -gt 0 ]]; then

@@ -1586,8 +1586,29 @@ class Window(Adw.ApplicationWindow):
                     and self.run_action(verb, names, confirmed=True))
         dlg.present(self)
 
+    def _confirm_uninstall(self, names):
+        """Removing a catalog asks first; removing an actual app did not —
+        one click on a button next to the one you meant and the uninstaller
+        had already run."""
+        dlg = Adw.AlertDialog(
+            heading="Uninstall %s?" % (esc(names[0]) if len(names) == 1
+                                       else "%d apps" % len(names)),
+            body="Its own uninstaller removes its files. Configuration is "
+                 "kept, so reinstalling later picks up where you left off.")
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("remove", "Uninstall")
+        dlg.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
+        dlg.set_default_response("cancel")
+        dlg.set_close_response("cancel")
+        dlg.connect("response", lambda _d, r: r == "remove"
+                    and self.run_action("uninstall", names, confirmed=True))
+        dlg.present(self)
+
     def run_action(self, verb, names, confirmed=False):
         if self.busy or not names:
+            return
+        if verb == "uninstall" and not confirmed:
+            self._confirm_uninstall(names)
             return
         if verb == "install" and not confirmed:
             wanted = set(names)

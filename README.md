@@ -218,6 +218,30 @@ change.
 The immutable `/usr` is never touched. If you never install a system app,
 nothing outside your home is ever written.
 
+### Why two copies of the same binary
+
+It looks odd until you try to remove either one.
+
+- Root cannot run `~/.local/bin/kiwi`: anything running as you could edit that
+  file and own root on the next timer tick. So the root timer needs a
+  root-owned copy. That is `/usr/local/bin/kiwi`.
+- Making the root-owned copy the *only* copy would mean a password for the
+  very first `kiwi install`, and the default install is deliberately 100%
+  user-level — no root, ever, until an app genuinely needs it.
+
+Two copies of one file is the smallest honest implementation of both rules.
+The alternatives are a package (not ostree-friendly, and a chicken-and-egg for
+a tool whose job is installing things) or a root daemon with IPC (far more
+code listening as root than a 2000-line script run by a timer).
+
+The split has real costs, and kiwi carries tooling for each: the copies can
+drift (`kiwi version` shows both, `kiwi doctor` and `kiwi update` warn),
+kiwi manages itself in both scopes at once (each scope follows its own list
+entry, so a pin on one half never silently holds or blocks the other), and
+the one bootstrap exception — `install --with-system` running a user-writable
+script as root once, password-gated — exists because no root-owned copy is
+there yet to do it instead.
+
 ## Background updates
 
 | unit | scope | what |

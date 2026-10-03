@@ -3,6 +3,43 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 1.6.0 — 2026-10-03
+
+A fresh full pass over the CLI and GUI.
+
+### Fixed
+
+- **A user-side pin no longer marks the root half update-available for ever.**
+  Each scope follows its own list entry — you pin your half, root's list keeps
+  following releases — but "is there an update?" was answered against the one
+  deduped entry's target. Pin a dual-scope app and the system half became
+  permanently "update-available" while `kiwi update` said "up to date": both
+  halves sat exactly where their own configuration wanted them. Outdatedness
+  is now computed per scope against that scope's own entry (both list files
+  are world-readable, so either side can read the other's pins). Third member
+  of the stuck-indicator family, after F8 and the 1.3.1 dedup bug.
+- **`kiwi version` exited 1** on every machine without the system scope — the
+  trailing `[[ -n $root_v ]] &&` was the script's last command. Anything
+  scripted as `kiwi version && …` broke.
+- **`kiwi catalog list --porcelain` emitted a two-line app count** for a
+  catalog whose apps.list holds only comments: `$(grep -c … || echo 0)`
+  captures grep's own `0` *and* the fallback. Found because a new test made
+  the identical mistake.
+- `kiwi pin` refused nothing: a value with whitespace — possible whenever the
+  remote is unreachable, since "pinning anyway" skips the existence check —
+  was written into the space-separated list file and corrupted the entry. The
+  shape is validated before anything touches the file.
+
+### Added
+
+- `kiwi pin`/`unpin` on a dual-scope app now says plainly that the system
+  half follows root's own list and names the `kiwi pin --system` command that
+  holds it too.
+- **The GUI confirms uninstalls.** Removing a catalog asked first; removing an
+  actual app ran its uninstaller on one click.
+- README: a section on why the split layout and the two binaries exist at
+  all, with the costs and what mitigates them.
+
 ## 1.5.2 — 2026-10-03
 
 `kiwi info` and `kiwi list` disagreed about an app's scopes, so the GUI detail

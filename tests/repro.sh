@@ -513,8 +513,44 @@ t_P12() { # `kiwi info` and `kiwi list` must agree about an app's scopes
     check P12 "info and list agree on scopes (list='$lsc' info='$isc' installed_system='$isys')" f
 }
 
+t_P13() { # a user-side pin must not mark the root half update-available for ever
+    # Each scope follows its OWN list entry: the user pins, root's list keeps
+    # following releases. Comparing both markers against the deduped row's
+    # (pinned) target made the root half permanently outdated — both halves
+    # sat exactly where their configuration wanted them, `kiwi update` said
+    # "up to date", and nothing cleared the indicator.
+    mkapp a dualpin "user system"
+    mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
+    install -Dm755 $K /usr/local/bin/kiwi
+    echo "$GITROOT/a/dualpin.git" > /etc/kiwi-updater/apps.list
+    ku add $GITROOT/a/dualpin.git >/dev/null
+    ku install dualpin --user >/dev/null 2>&1
+    kr install --system dualpin >/dev/null 2>&1
+    release a dualpin v1.1.0
+    ku pin dualpin v1.0.0 >/dev/null 2>&1
+    kr update --all --system --quiet >/dev/null 2>&1   # roots timer, unpinned
+    local st; st="$(ku list --porcelain --check 2>/dev/null | awk -F'\t' '$1=="dualpin"{print $4}')"
+    f() { [[ $st == installed ]]; }
+    check P13 "a pinned user half plus roots updated half is 'installed', not stuck (status=$st)" f
+}
+
+t_P14() { # `kiwi version` has to exit 0 on a machine without the system scope
+    ku version >/dev/null 2>&1; local rc=$?
+    f() { [[ $rc -eq 0 ]]; }
+    check P14 "kiwi version exits 0 with no root copy installed (rc=$rc)" f
+}
+
+t_P15() { # a pin value that would corrupt the list file is refused
+    mkapp a pv user
+    ku add $GITROOT/a/pv.git >/dev/null
+    mv $GITROOT/a/pv.git $GITROOT/a/pv.gone      # unreachable: nothing to disprove a typo
+    ku pin pv 'v1 --force' >/dev/null 2>&1; local rc=$?
+    f() { [[ $rc -ne 0 ]] && ! grep -q 'ref=' $TH/.config/kiwi-updater/apps.list; }
+    check P15 "a pin value with whitespace is refused before touching the list" f
+}
+
 for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
-         P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12; do run $t; done
+         P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

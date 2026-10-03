@@ -399,8 +399,38 @@ t_P5() { # doctor has to actually spot a stale lock and a bad list file
     check P5 "kiwi doctor finds a stale lock and a world-writable system list" f
 }
 
+t_P6() { # a missing dependency is named before the installer runs, and by info
+    mkapp a needy user 'echo ran'
+    ( cd /tmp/kt-work-a-needy && printf 'DEPENDS=definitely-not-a-real-command\n' >> kiwi.manifest &&
+      git commit -qam deps && git tag -a v1.0.1 -m x && git push -q origin HEAD --tags )
+    ku add $GITROOT/a/needy.git >/dev/null
+    local ins inf
+    ins="$(ku install needy 2>&1)"
+    inf="$(ku info needy 2>&1)"
+    f() { grep -q 'definitely-not-a-real-command' <<<"$ins" &&
+          grep -q 'definitely-not-a-real-command' <<<"$inf"; }
+    check P6 "a missing DEPENDS entry is reported by install and by info" f
+}
+
+t_P7() { # a shallow metadata clone must not stop you installing an OLDER tag
+    # file:// rather than a bare path: git ignores --depth on local clones, so
+    # a path remote would never produce the shallow clone this is about.
+    mkapp a deep user 'echo "v=$(sed -n "s/^VERSION=//p" kiwi.manifest|head -1)"'
+    release a deep v1.1.0
+    release a deep v1.2.0
+    ku add "file://$GITROOT/a/deep.git" >/dev/null
+    ku list >/dev/null 2>&1                 # shallow metadata clone happens here
+    local shallow=no
+    [[ -f $(urepo deep)/.git/shallow ]] && shallow=yes
+    ku pin deep v1.0.0 >/dev/null 2>&1
+    ku install deep >/dev/null 2>&1; local rc=$?
+    local got; got="$(sed -n 's/^VERSION=//p' "$(urepo deep)/kiwi.manifest" 2>/dev/null | head -1)"
+    f() { [[ $rc -eq 0 && $got == 1.0.0 ]]; }
+    check P7 "an older pinned tag installs from a shallow clone (shallow=$shallow got=$got)" f
+}
+
 for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
-         P1 P2 P3 P4 P5; do run $t; done
+         P1 P2 P3 P4 P5 P6 P7; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

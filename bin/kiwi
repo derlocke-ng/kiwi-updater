@@ -343,7 +343,12 @@ sync_meta() { # url opts -> repo dir on stdout
     dir="$(meta_dir)/$(dir_name "$url")"
     if [[ ! -d "$dir/.git" ]]; then
         mkdir -p "$(dirname "$dir")"
-        git_net clone --quiet -- "$url" "$dir" 2>/dev/null || return 1
+        # --depth 1: browsing a catalog should not mean downloading every
+        # app's entire history. These clones exist to read a manifest. The one
+        # that gets installed from is deepened again in sync_repo, because a
+        # specific commit — an older tag, a pin — has to be reachable.
+        git_net clone --quiet --depth 1 -- "$url" "$dir" 2>/dev/null ||
+            git_net clone --quiet -- "$url" "$dir" 2>/dev/null || return 1
     elif origin_differs "$dir" "$url" && [[ ! -f "$dir/.kiwi-installed" ]]; then
         # nothing was installed from this clone, so it is only a cache: point
         # it at the URL the list actually names
@@ -387,16 +392,27 @@ app_scopes() { # dir opts
 # are. A catalog entry is just a URL — the description, components and scopes
 # all live in the app's own manifest, so browsing means having the manifests.
 # Clones are cached, so this is slow once and instant afterwards.
+#
+# In parallel, because these are independent network round trips and doing a
+# catalog of fifty tools strictly one after another is the slowest part of a
+# first `kiwi list` by a wide margin.
 sync_all_meta() {
-    local url opts n=0
+    local url opts line todo=() running=0 max="${KIWI_FETCH_JOBS:-4}"
     while IFS=$'\t' read -r url opts; do
         [[ -z $url ]] && continue
         [[ -d "$(meta_dir)/$(dir_name "$url")/.git" ]] && continue
-        (( n == 0 )) && info "fetching app details (first run only)…"
-        n=$((n+1))
-        sync_meta "$url" "$opts" >/dev/null 2>&1 || warn "cannot reach $url"
+        todo+=("$url"$'\t'"${opts:-}")
     done < <(app_entries)
-    (( n > 0 )) && info "fetched $n app(s)"
+    [[ ${#todo[@]} -eq 0 ]] && return 0
+    info "fetching details for ${#todo[@]} app(s) (first run only)…"
+    for line in "${todo[@]}"; do
+        IFS=$'\t' read -r url opts <<<"$line"
+        ( sync_meta "$url" "$opts" >/dev/null 2>&1 || warn "cannot reach $url" ) &
+        running=$((running+1))
+        if (( running >= max )); then wait -n 2>/dev/null || true; running=$((running-1)); fi
+    done
+    wait
+    info "fetched ${#todo[@]} app(s)"
     return 0
 }
 
@@ -459,7 +475,7 @@ refresh_meta() { # url opts
     IFS=$'\t' read -r sha _ <<<"$t"
     [[ "$(local_head "$dir")" == "$sha" ]] && return 0
     git_net -C "$dir" fetch --quiet --tags origin 2>/dev/null &&
-        git -C "$dir" -c advice.detachedHead=false checkout --quiet --force "$sha" 2>/dev/null ||
+        checkout_target "$dir" "$sha" ||
         warn "could not refresh the cached details for $1"
     return 0
 }
@@ -845,6 +861,17 @@ run_installer() { # scope repo_dir action [purge]
 # Every failure path RETURNS, and none of them die. This runs inside $(...),
 # where `die` exits only the subshell: the caller saw an empty directory, an
 # exit status it was not checking, and carried on to mark the app installed.
+# Metadata clones are shallow (see sync_meta), and the commit we want may be
+# outside that history — an older tag, or a ref= pin. Deepen only when it turns
+# out to be needed, so installing the release you just listed stays cheap.
+checkout_target() { # dir sha
+    local dir="$1" sha="$2"
+    git -C "$dir" -c advice.detachedHead=false checkout --quiet --force "$sha" 2>/dev/null && return 0
+    [[ -f "$dir/.git/shallow" ]] || return 1
+    git_net -C "$dir" fetch --quiet --unshallow --tags origin 2>/dev/null || return 1
+    git -C "$dir" -c advice.detachedHead=false checkout --quiet --force "$sha" 2>/dev/null
+}
+
 sync_repo() { # scope url opts -> clones + checks out the target ref, echoes repo dir
     local scope="$1" url="$2" opts="${3:-}"
     valid_url "$url" || { warn "refusing an unusable url: '$url'"; return 1; }
@@ -872,8 +899,7 @@ sync_repo() { # scope url opts -> clones + checks out the target ref, echoes rep
     fi
     IFS=$'\t' read -r sha _ <<<"$target"
     git_net -C "$dir" fetch --quiet --tags origin || { warn "fetch failed: $url"; return 1; }
-    git -C "$dir" -c advice.detachedHead=false checkout --quiet --force "$sha" ||
-        { warn "cannot check out $sha in $dir"; return 1; }
+    checkout_target "$dir" "$sha" || { warn "cannot check out $sha in $dir"; return 1; }
     echo "$dir"
 }
 
@@ -888,6 +914,17 @@ install_one() { # scope url opts
     local mscopes; mscopes="$(app_scopes "$dir" "$opts")"
     [[ -n $mscopes && " $mscopes " != *" $scope "* ]] && \
         warn "$(app_name "$scope" "$url"): manifest declares SCOPES=$mscopes, not $scope"
+
+    # The manifest template says kiwi "shows what is missing before
+    # installing"; until now only `info --porcelain` did, so the first anyone
+    # heard of a missing dependency was the installer failing on it.
+    local deps miss
+    deps="$(manifest_get "$dir" DEPENDS "")"
+    if [[ -n $deps ]]; then
+        miss="$(deps_missing "$deps")"
+        [[ -n $miss ]] && warn "$(app_name "$scope" "$url") needs these, and they are not here: $miss
+  its installer will probably fail. Install them first if it does."
+    fi
 
     # set -e does not apply inside a function called on the left of ||, which is
     # exactly how dispatch calls this one. Check the step, or a failed installer
@@ -1380,6 +1417,12 @@ cmd_info() { # [--porcelain] [--installer] name
     printf '  %-12s %s\n' components "$(manifest_get "$dir" COMPONENTS "$(manifest_get "$dir" TYPE "?")")"
     printf '  %-12s %s\n' scopes     "$(scope_label $scs)"
     printf '  %-12s %s\n' source     "$url"
+    local ideps imiss; ideps="$(manifest_get "$dir" DEPENDS "")"
+    if [[ -n $ideps ]]; then
+        printf '  %-12s %s\n' depends "$ideps"
+        imiss="$(deps_missing "$ideps")"
+        [[ -n $imiss ]] && printf '  %-12s %s%s%s\n' missing "$c_ylw" "$imiss" "$c_off"
+    fi
     local hp lic; hp="$(manifest_get "$dir" HOMEPAGE "")"; lic="$(manifest_get "$dir" LICENSE "")"
     [[ -n $hp ]]  && printf '  %-12s %s\n' homepage "$hp"
     [[ -n $lic ]] && printf '  %-12s %s\n' license  "$lic"

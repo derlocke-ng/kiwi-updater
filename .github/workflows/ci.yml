@@ -26,5 +26,5 @@ jobs:
       - name: findings stay fixed
         run: |
           docker run --rm -v "$PWD":/src:ro fedora:latest bash -c \
-            'dnf -y -q install git-core util-linux shadow-utils procps-ng python3 >/dev/null &&
+            'dnf -y -q install git-core gawk util-linux shadow-utils procps-ng python3 >/dev/null &&
              bash /src/tests/repro.sh'

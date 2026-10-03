@@ -49,9 +49,12 @@ Rules for Claude while working on this repo:
   `/etc/kiwi-updater`, `/var/lib/kiwi-updater` and `/usr/local/bin/kiwi`. Container only:
   ```bash
   podman run --rm -v "$PWD":/src:ro,Z fedora:latest bash -c \
-    'dnf -y -q install git-core util-linux shadow-utils procps-ng python3 >/dev/null && bash /src/tests/repro.sh'
+    'dnf -y -q install git-core gawk util-linux shadow-utils procps-ng python3 >/dev/null && bash /src/tests/repro.sh'
   ```
-  (The script was run on an Ubuntu 24.04 sandbox. The Fedora package list above is untested; adjust if a tool is missing.)
+  (Verified on `fedora:latest` with podman. `gawk` had to be added to the list in
+  the original plan: the image ships no `awk`, so `remote_target` failed for every
+  app and several checks reported `ok` only because nothing could be reached.
+  `tests/repro.sh` now refuses to start when a tool it needs is missing.)
 - Never run `install.sh`, `get-kiwi.sh`, `sudo` or `pkexec` on the host to "try something".
 - One finding per commit, message in the repo's existing style (`1.2.2 — <what the user would have noticed>`).
 - A fix is done when its check prints `ok` **and** no other check regressed.

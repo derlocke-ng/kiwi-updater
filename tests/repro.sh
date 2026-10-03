@@ -11,7 +11,10 @@
 # Run it in a throwaway container, never on your real machine:
 #
 #   podman run --rm -v "$PWD":/src:ro,Z fedora:latest bash -c \
-#     'dnf -y -q install git-core util-linux shadow-utils procps-ng python3 >/dev/null && bash /src/tests/repro.sh'
+#     'dnf -y -q install git-core gawk util-linux shadow-utils procps-ng python3 >/dev/null && bash /src/tests/repro.sh'
+#
+# gawk matters: fedora:latest ships no awk, and without it remote_target fails
+# on every app, so checks "pass" because nothing can be reached at all.
 #
 #   bash tests/repro.sh F1 F6      # run only some checks (F9 runs as part of F8)
 set -uo pipefail
@@ -21,8 +24,8 @@ if [[ ! -f /run/.containerenv && ! -f /.dockerenv && ${KIWI_REPRO_FORCE:-0} != 1
     exit 2
 fi
 [[ $EUID -eq 0 ]] || { echo "must run as root (inside the container)" >&2; exit 2; }
-for c in git flock timeout runuser useradd pkill; do
-    command -v "$c" >/dev/null || { echo "missing: $c" >&2; exit 2; }
+for c in git awk sed grep flock timeout runuser useradd pkill; do
+    command -v "$c" >/dev/null || { echo "missing: $c (the suite would report false passes without it)" >&2; exit 2; }
 done
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

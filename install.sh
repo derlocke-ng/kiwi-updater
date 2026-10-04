@@ -214,7 +214,8 @@ user_install() {
     # so testing the flag announced "not set up" on every single update — even
     # on a machine where the system scope had been installed as root.
     if (( ! WITH_SYSTEM )) && ! system_present; then
-        say "system scope (root apps) not set up — rerun with --with-system if you need it"
+        say "system scope not set up: apps with a root half (kiwi-killswitch) cannot install"
+        say "  that half until it is. Add it any time with:  get-kiwi.sh --with-system"
     fi
 }
 

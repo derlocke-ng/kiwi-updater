@@ -10,7 +10,7 @@
 #   system — listed in /etc/kiwi-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-KIWI_VERSION=1.7.1
+KIWI_VERSION=1.7.2
 
 # systemd system services start without $HOME (set -u would abort at the
 # path definitions below) — root's user-scope paths are never used anyway
@@ -1205,6 +1205,16 @@ dispatch() { # verb extra_flag
         # a user-level catalog lists, the user authenticated and root answered
         # "unknown app". Root refusing is right — asking first was the bug.
         if [[ $verb == install ]] && ! root_knows "${T_URL[$i]}"; then
+            if [[ ! -x $ROOT_KIWI ]]; then
+                # The common case is simpler than "no root-owned list names it":
+                # there is no system scope on this machine at all. Say that, and
+                # say what the user half on its own is worth.
+                warn "$(app_name system "${T_URL[$i]}") has a root half, and this machine has no system scope yet."
+                warn "  the user half installs now; the root half cannot until the system scope exists."
+                warn "  set it up once (one password prompt), then install again:"
+                warn "    curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system"
+                rc_pre=1; continue
+            fi
             warn "$(app_name system "${T_URL[$i]}") needs the system scope, but no root-owned list names it."
             warn "  root installs only what a root-owned list names, so your password"
             warn "  could not have helped here. Register it for root first, with one of:"

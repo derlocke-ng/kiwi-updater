@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# kiwi-updater bootstrap — install with one line:
+# kiwi-updater bootstrap — install with one line.
 #
-#   curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash
-#
-# with the optional system scope (root via pkexec):
+# Recommended on a desktop: the user scope plus the root-owned system scope
+# (one password prompt). Apps with a root half — kiwi-killswitch — need it:
 #
 #   curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system
+#
+# Minimal, 100% user-level, no root ever (complete for user-only apps):
+#
+#   curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash
 #
 # Clones straight into kiwi's own repo cache (so self-update just works),
 # checks out the latest release tag, and runs the normal installer.

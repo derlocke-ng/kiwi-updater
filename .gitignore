@@ -4,3 +4,4 @@ __pycache__/
 CLAUDE.md
 .claude/
 reference-fixes.patch
+FIXPLAN.md

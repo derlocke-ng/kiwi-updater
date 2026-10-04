@@ -3,6 +3,27 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 1.7.2 — 2026-10-04
+
+Documentation, and one message.
+
+- **The README now recommends `--with-system` on a desktop**, and says plainly
+  which apps need it: anything with a root half — kiwi-killswitch — installs
+  only its desktop part on a user-only install, and only the system scope's
+  own timer keeps a root half updated. The minimal install stays documented as
+  complete for user-only apps.
+- A new section lines kiwi up against rpm/apt, flatpak and brew. The shape is
+  flatpak's — a user installation that needs no root plus an optional system
+  installation guarded by polkit and a root-owned helper — and the second copy
+  of kiwi *is* that helper. It looks odd only because kiwi installs itself
+  from git into `~/.local` rather than arriving as a root-owned package.
+- When a dual-scope app is installed on a machine with no system scope at all,
+  kiwi now says exactly that — the user half installs, the root half cannot
+  until the scope exists, here is the command — instead of "no root-owned list
+  names it". P22 covers it.
+- `install.sh` and `get-kiwi.sh` say the same thing in their closing hint and
+  header.
+
 ## 1.7.1 — 2026-10-04
 
 Two things found on a real machine right after 1.7.0.

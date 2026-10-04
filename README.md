@@ -21,16 +21,26 @@ send a pull request to.
 
 ## Install
 
+**Recommended on a desktop** — the user scope plus the root-owned system
+scope, one password prompt:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system
+```
+
+**Minimal** — 100 % user-level: `~/.local`, no root, no password, ever:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash
 ```
 
-That is **100 % user-level** — `~/.local`, no root, no password. Add the
-optional system scope (one root prompt) if you want apps that install services:
-
-```bash
-curl -fsSL .../get-kiwi.sh | bash -s -- --with-system
-```
+Which one you need depends on the apps. Anything that is only files in your
+home — the CLI tools, ensconce — is complete on the minimal install. An app
+with a **root half** is not: kiwi-killswitch is a root firewall daemon plus a
+desktop part, and without the system scope `kiwi install kiwi-killswitch` puts
+in the desktop part, refuses the daemon, and tells you why. It is also the
+system scope's own timer that keeps a root half updated afterwards. Adding the
+scope later is the same `--with-system` command; nothing gets reinstalled.
 
 Then register a catalog:
 
@@ -218,21 +228,35 @@ change.
 The immutable `/usr` is never touched. If you never install a system app,
 nothing outside your home is ever written.
 
-### Why two copies of the same binary
+### Why two copies — and how rpm, apt, flatpak and brew do the same job
 
-It looks odd until you try to remove either one.
+Every installer that can touch the system answers one question: **what runs as
+root, and who can edit that file?** Line kiwi up against the others and the
+shape stops looking strange.
 
-- Root cannot run `~/.local/bin/kiwi`: anything running as you could edit that
-  file and own root on the next timer tick. So the root timer needs a
-  root-owned copy. That is `/usr/local/bin/kiwi`.
-- Making the root-owned copy the *only* copy would mean a password for the
-  very first `kiwi install`, and the default install is deliberately 100%
-  user-level — no root, ever, until an app genuinely needs it.
+| | install without root | install as root | the thing that runs as root |
+|---|---|---|---|
+| **rpm/dnf, apt** | none — everything is system-wide | always | `/usr/bin/dnf`, root-owned because the distro shipped it |
+| **flatpak** | `--user` → `~/.local/share/flatpak` | `--system` → `/var/lib/flatpak` | `flatpak-system-helper`, a root daemon that polkit authorises per request |
+| **brew** | `/home/linuxbrew/.linuxbrew`, owned by *you*; brew refuses to run as root | none | nothing — a formula that needs a root service tells you to do that part yourself |
+| **kiwi** | user scope → `~/.local` | system scope → `/var/lib` + `/usr/local` | the root-owned copy of kiwi, run by its timer, or through the polkit-gated wrapper |
 
-Two copies of one file is the smallest honest implementation of both rules.
-The alternatives are a package (not ostree-friendly, and a chicken-and-egg for
-a tool whose job is installing things) or a root daemon with IPC (far more
-code listening as root than a 2000-line script run by a timer).
+So the *shape* is flatpak's: a user installation needing no root, plus an
+optional system installation guarded by polkit and a root-owned helper. What
+makes kiwi look odd is only that its user copy lives in `~/.local/bin` — because
+kiwi installs **itself**, from git, with no package. Flatpak's binary is
+root-owned because the distro installed it; kiwi's is yours because *you* did.
+And root must never execute a file you can write — anything running as you
+could edit it and own root on the next timer tick — so the system scope needs
+its own root-owned copy. That second copy *is* kiwi's `flatpak-system-helper`,
+not a duplicate for its own sake.
+
+The two coherent alternatives are the other rows. Be a package —
+`rpm-ostree install kiwi-updater` would give one root-owned `/usr/bin/kiwi` and
+no second copy — at the price of layering on an ostree system, a reboot for
+every kiwi update, and depending on the very thing this exists to avoid. Or be
+brew — never touch the system — which is exactly the minimal install above,
+and which cannot install a kill switch.
 
 The split has real costs, and kiwi carries tooling for each: the copies can
 drift (`kiwi version` shows both, `kiwi doctor` and `kiwi update` warn),

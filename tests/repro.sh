@@ -660,8 +660,18 @@ t_P20() { # an unusable list entry is reported WITH the file it sits in
     check P20 "an unusable entry warning names the list file it came from" f
 }
 
+t_P22() { # on a user-only machine a dual-scope app installs its user half and says what the root half needs
+    mkapp a halfapp "user system" 'echo "scope=$KIWI_SCOPE"'
+    ku add $GITROOT/a/halfapp.git >/dev/null
+    : > $ESC
+    local out rc; out="$(ku install halfapp 2>&1)"; rc=$?
+    f() { [[ $rc -ne 0 && -f $(urepo halfapp)/.kiwi-installed && ! -s $ESC ]] &&
+          grep -q -- '--with-system' <<<"$out" && grep -q 'no system scope yet' <<<"$out"; }
+    check P22 "user half installs, root half refused with the --with-system advice, no password asked" f
+}
+
 for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
-         P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P17 P18 P19 P20; do run $t; done
+         P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P17 P18 P19 P20 P22; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

@@ -613,11 +613,13 @@ case "$1" in
   get) k="$2|$3"; v="$(grep -F -- "$k=" "$db" | tail -1 | cut -d= -f2-)"
        if [[ -z $v ]]; then case "$3" in folder-children|apps|categories) echo "@as []";; *) echo "''";; esac
        else echo "$v"; fi ;;
-  set) k="$2|$3"; { grep -vF -- "$k=" "$db" || true; } > "$db.tmp"; echo "$k=$4" >> "$db.tmp"; mv "$db.tmp" "$db" ;;
+  set) k="$2|$3"; { grep -vF -- "$k=" "$db" || true; } > "$db.tmp"; echo "$k=$4" >> "$db.tmp"; mv "$db.tmp" "$db"
+       echo "SET $3" >> /tmp/kt-gsettings.log ;;
   reset-recursively) { grep -vF -- "$2|" "$db" || true; } > "$db.tmp"; mv "$db.tmp" "$db" ;;
 esac
 EOF
     chmod +x $STUBS/gsettings; : > /tmp/kt-gsettings.db; chmod 666 /tmp/kt-gsettings.db
+    : > /tmp/kt-gsettings.log; chmod 666 /tmp/kt-gsettings.log
     local apps=$TH/.local/share/applications; mkdir -p $apps
     touch $apps/eu.kiwinetwork.One.desktop $apps/eu.kiwinetwork.Two.desktop; chown -R $T $TH/.local
     local G=org.gnome.desktop.app-folders B=/org/gnome/desktop/app-folders/folders
@@ -636,13 +638,30 @@ EOF
     local kids mine
     kids="$($STUBS/gsettings get $G folder-children)"
     mine="$($STUBS/gsettings get "$G.folder:$B/Mine/" apps)"
-    rm -f $STUBS/gsettings
     f() { [[ $kids != *kiwi-tools* && $kids == *"'Mine'"* && $mine == *One.desktop* && $mine == *Two.desktop* ]]; }
     check P19 "a user-made Kiwi Tools folder is adopted and the duplicate removed (children=$kids)" f
+    # P21: a second run with nothing to change must write nothing — rewriting
+    # identical values gave GNOME Shell a folder to re-render on every tick
+    local before after
+    before="$(grep -c SET /tmp/kt-gsettings.log || true)"
+    KENV="DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent" ku update fold --user >/dev/null 2>&1
+    after="$(grep -c SET /tmp/kt-gsettings.log || true)"
+    rm -f $STUBS/gsettings
+    f21() { [[ ${before:-0} -gt 0 && "${after:-0}" == "${before:-0}" ]]; }
+    check P21 "a no-op folder sync writes nothing to dconf (writes: first run $before, second run +$(( ${after:-0} - ${before:-0} )))" f21
+}
+
+t_P20() { # an unusable list entry is reported WITH the file it sits in
+    mkapp a named user
+    ku add $GITROOT/a/named.git >/dev/null
+    echo "kiwi-killswitch" >> $TH/.config/kiwi-updater/apps.list      # what an old `kiwi add <name>` wrote
+    local out; out="$(ku list --no-sync 2>&1 >/dev/null)"
+    f() { grep -q "$TH/.config/kiwi-updater/apps.list" <<<"$out" && grep -q "'kiwi-killswitch'" <<<"$out"; }
+    check P20 "an unusable entry warning names the list file it came from" f
 }
 
 for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
-         P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P17 P18 P19; do run $t; done
+         P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P17 P18 P19 P20; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

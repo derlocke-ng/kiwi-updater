@@ -10,7 +10,7 @@
 #   system — listed in /etc/kiwi-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-KIWI_VERSION=1.7.0
+KIWI_VERSION=1.7.1
 
 # systemd system services start without $HOME (set -u would abort at the
 # path definitions below) — root's user-scope paths are never used anyway
@@ -284,7 +284,7 @@ app_entries_raw() {
             # a catalog — app_scopes lets a local scope= filter overrule the
             # manifest, and a catalog must not get that power
             opts="${opts:-} local=1"
-            printf '%s\t%s\n' "$url" "${opts:-}"
+            printf '%s\t%s\t%s\n' "$url" "${opts:-}" "$f"
         done < <(grep -Ev '^[[:space:]]*(#|$)' "$f" 2>/dev/null || true)
     done
     for c in "$(catalogs_dir)"/*/; do
@@ -292,7 +292,7 @@ app_entries_raw() {
         list_trusted "${c}apps.list" || continue
         while read -r url opts; do
             [[ -z ${url:-} ]] && continue
-            printf '%s\t%s\n' "$url" "${opts:-}"
+            printf '%s\t%s\t%s\n' "$url" "${opts:-}" "${c}apps.list"
         done < <(grep -Ev '^[[:space:]]*(#|$)' "${c}apps.list" 2>/dev/null || true)
     done
 }
@@ -300,8 +300,8 @@ app_entries_raw() {
 # every app we know about, deduped by repo name, regardless of scope:
 # "url<TAB>opts". A list on this machine wins over a catalog.
 app_entries() {
-    local url opts d seen=" "
-    while IFS=$'\t' read -r url opts; do
+    local url opts d seen=" " _src
+    while IFS=$'\t' read -r url opts _src; do
         [[ -z $url ]] && continue
         valid_url "$url" || continue     # reported once by check_lists
         d="$(dir_name "$url")"
@@ -316,12 +316,16 @@ app_entries() {
 # the other and `kiwi install <name>` is ambiguous. Say so once, out loud.
 check_lists() {
     local -A first_url=() reported=()
-    local url opts d u
-    while IFS=$'\t' read -r url opts; do
+    local url opts d u src
+    while IFS=$'\t' read -r url opts src; do
         [[ -z $url ]] && continue
         if ! valid_url "$url"; then
-            warn "ignoring an unusable entry: '$url'"
-            warn "  expected https://…, http://… or an absolute path"
+            # Name the file. "ignoring an unusable entry" with no location sent
+            # people hunting through four lists for a line that an old
+            # `kiwi add <name>` had written years ago.
+            warn "ignoring an unusable entry in $src: '$url'"
+            warn "  a list holds git URLs (https://…, or an absolute path), not app names."
+            warn "  delete that line, or replace it with the repo's URL: kiwi add <url>"
             continue
         fi
         d="$(dir_name "$url")"; u="$(norm_url "$url")"
@@ -1308,9 +1312,29 @@ sync_app_folder() {
         [[ -e $f ]] && ids+=("$(basename "$f")")
     done
 
+    # Write only what changes. Every update used to rewrite name, apps and
+    # translate even when identical, which gives GNOME Shell a folder to
+    # re-render for no reason on every timer tick.
+    gset() { # schema key value
+        local cur; cur="$(gsettings get "$1" "$2" 2>/dev/null || true)"
+        [[ $cur == "$3" || "${cur//\'/}" == "${3//\'/}" ]] && return 0
+        gsettings set "$1" "$2" "$3" 2>/dev/null || true
+    }
+
     local children; children="$(gsettings get "$schema" folder-children 2>/dev/null)" || return 0
-    local -a kids=()
-    while read -r k; do [[ -n $k ]] && kids+=("$k"); done < <(grep -o "'[^']*'" <<<"$children" | tr -d "'")
+    local -a kids=(); local dup=0
+    while read -r k; do
+        [[ -n $k ]] || continue
+        for id in ${kids[@]+"${kids[@]}"}; do [[ $id == "$k" ]] && { dup=1; continue 2; }; done
+        kids+=("$k")
+    done < <(grep -o "'[^']*'" <<<"$children" | tr -d "'")
+    if (( dup )); then
+        # two kiwi runs appending at the same moment (an install while the
+        # timer fires) can list an id twice, and Shell shows one folder per
+        # listing
+        children="$(printf "'%s', " "${kids[@]}")"; children="[${children%, }]"
+        gsettings set "$schema" folder-children "$children" 2>/dev/null || true
+    fi
 
     # ADOPT before creating. A folder the user made for these apps by hand has
     # an id of GNOME's choosing and whatever name they typed; building ours
@@ -1363,10 +1387,10 @@ sync_app_folder() {
     apps_str+="]"
 
     if [[ $target == kiwi-tools ]]; then
-        gsettings set "$schema.folder:$path" name 'Kiwi Tools' 2>/dev/null || return 0
-        gsettings set "$schema.folder:$path" translate false 2>/dev/null || true
+        gset "$schema.folder:$path" name "'Kiwi Tools'"
+        gset "$schema.folder:$path" translate false
     fi
-    gsettings set "$schema.folder:$path" apps "$apps_str" 2>/dev/null || true
+    gset "$schema.folder:$path" apps "$apps_str"
 
     if [[ $children != *"'$target'"* ]]; then
         if [[ $children == "@as []" || $children == "[]" ]]; then

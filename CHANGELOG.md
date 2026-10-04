@@ -3,6 +3,25 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 1.7.1 — 2026-10-04
+
+Two things found on a real machine right after 1.7.0.
+
+- **"ignoring an unusable entry" now names the file.** The warning fired on
+  every command for a line that said just `kiwi-killswitch` — written years
+  ago by a `kiwi add <name>` from before URLs were validated — and gave no
+  hint which of four list files held it. It names the file and says what a
+  list line is supposed to be.
+- **The app-folder sync writes to dconf only when something changes.** It used
+  to rewrite name, apps and translate with identical values on every update,
+  handing GNOME Shell a folder to re-render for nothing on every timer tick.
+  It also collapses a folder id listed twice, which two kiwi runs appending at
+  the same moment could produce. P20 and P21 cover both.
+
+The duplicate "Kiwi Tools" folder fixed in 1.7.0 only disappears on the next
+user-scope install or update after upgrading — the run that installs 1.7.x is
+still executing the old code.
+
 ## 1.7.0 — 2026-10-04
 
 A third full audit, this time concentrating on the bootstrap, the root

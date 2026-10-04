@@ -10,7 +10,7 @@
 #   system — listed in /etc/kiwi-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-KIWI_VERSION=1.6.1
+KIWI_VERSION=1.7.0
 
 # systemd system services start without $HOME (set -u would abort at the
 # path definitions below) — root's user-scope paths are never used anyway
@@ -60,13 +60,31 @@ root_version() {
 # A root copy from 1.2.1 or earlier cannot self-update (it has no notion of a
 # local scope filter overruling the manifest), so skew there is not something
 # the timer will clear on its own. Say which command does.
+ver_lt() { # a b -> is version a older than b
+    [[ $1 != "$2" && "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" == "$1" ]]
+}
+
+# Two different pieces of advice, because the two situations are different: a
+# root copy from before 1.3.0 genuinely cannot update itself and needs the
+# bootstrap; anything newer picks the version up from its own timer, or right
+# now through the passwordless wrapper. Sending every skew to the bootstrap
+# told people to re-run a password-gated install for nothing.
+root_skew_advice() { # root_version
+    if ver_lt "$1" 1.3.0; then
+        printf '%s\n' "  a copy from 1.2.1 or older cannot update itself. Re-run the bootstrap once:" \
+            "    curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system"
+    else
+        printf '%s\n' "  its own timer picks this up within six hours; to do it now (no password):" \
+            "    kiwi update --system kiwi-updater"
+    fi
+}
+
 note_root_skew() {
     (( QUIET )) && return 0
-    local rv; rv="$(root_version)" || return 0
+    local rv line; rv="$(root_version)" || return 0
     [[ $rv != "$KIWI_VERSION" ]] || return 0
     warn "the root-owned copy of kiwi is $rv; this one is $KIWI_VERSION."
-    warn "  a copy from 1.2.1 or older cannot update itself. Re-run the bootstrap once:"
-    warn "    curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system"
+    while IFS= read -r line; do warn "$line"; done < <(root_skew_advice "$rv")
 }
 
 # ---------- paths -----------------------------------------------------------
@@ -365,7 +383,9 @@ app_scopes() { # dir opts
     declared="$(manifest_get "$dir" SCOPES "$(manifest_get "$dir" SCOPE user)")"
     [[ $declared == both || $declared == any ]] && declared="user system"
     filter="$(entry_opt "$opts" scope "")"
-    for sc in $declared; do
+    split_words "$declared"                  # manifest data: no globbing
+    local -a decl=(${WORDS[@]+"${WORDS[@]}"})
+    for sc in ${decl[@]+"${decl[@]}"}; do
         [[ $sc == user || $sc == system ]] || continue
         [[ -n $filter && $sc != "$filter" ]] && continue
         out+=("$sc")
@@ -617,7 +637,8 @@ list_set_opt() { # file url key value
         if [[ -n ${u:-} && $u != \#* && "$(norm_url "$u")" == "$want" ]]; then
             found=1
             newopts=""
-            for kv in ${rest:-}; do
+            split_words "${rest:-}"
+            for kv in ${WORDS[@]+"${WORDS[@]}"}; do
                 [[ $kv == "$key="* ]] && continue
                 newopts+="${newopts:+ }$kv"
             done
@@ -657,9 +678,18 @@ dir_name() { # url -> repo directory name
     echo "${b%.git}"
 }
 
+# A list that came from someone else is split on whitespace and NOTHING else.
+# `for kv in $opts` also globs: a catalog line carrying `ref=*` would have been
+# replaced by the names of whatever files sat in kiwi's current directory.
+split_words() { # string -> array WORDS
+    WORDS=()
+    read -ra WORDS <<<"${1:-}"
+}
+
 entry_opt() { # opts key default   (opts: "key=val key=val")
     local kv
-    for kv in $1; do
+    split_words "${1:-}"
+    for kv in ${WORDS[@]+"${WORDS[@]}"}; do
         [[ $kv == "$2="* ]] && { echo "${kv#*=}"; return; }
     done
     echo "$3"
@@ -727,6 +757,7 @@ write_marker() { # repo_dir
     g="$(effective_gui "$1")"
     h="$(local_head "$1")"
     printf '%s\ngui=%s\n' "$h" "$g" > "$1/.kiwi-installed.tmp" &&
+        chmod 644 "$1/.kiwi-installed.tmp" &&
         mv -f "$1/.kiwi-installed.tmp" "$1/.kiwi-installed"
 }
 
@@ -953,6 +984,10 @@ sync_repo() { # scope url opts -> clones + checks out the target ref, echoes rep
     if [[ ! -d "$dir/.git" ]]; then
         mkdir -p "$(repos_dir "$scope")" || return 1
         git_net clone --quiet -- "$url" "$dir" || { warn "clone failed: $url"; return 1; }
+        # The user-side view of a system app (installed? which version? an
+        # update?) is read straight out of this clone, so it has to stay
+        # world-readable whatever umask root happens to run with.
+        [[ $scope == system ]] && chmod -R a+rX "$dir" 2>/dev/null
     elif origin_differs "$dir" "$url"; then
         # What `kiwi info` shows and what `kiwi install` acts on have to be the
         # same repo. With a stale origin kiwi fetched from the OLD url, printed
@@ -1199,8 +1234,24 @@ dispatch() { # verb extra_flag
     # and validates them against the root-owned system list, so a selection
     # picks among apps root already trusts rather than supplying anything new.
     # install/uninstall still require full authentication.
+    local extra=()
+    (( PURGE )) && extra+=(--purge)
+    (( FORCE )) && extra+=(--force)
+    [[ $GUI_CHOICE == 0 ]] && extra+=(--cli-only)
+    [[ $GUI_CHOICE == 1 ]] && extra+=(--gui)
+
+    # The wrapper carries names and nothing else — that is what makes it safe
+    # to run without a password. So it cannot carry --force or a GUI choice,
+    # and those used to be dropped on the floor for the system half: `kiwi
+    # update --force app` forced the user half and quietly did a plain update
+    # as root. With any such flag, ask for root directly instead.
     local sys_wrapper=/usr/local/libexec/kiwi-system-update
-    if [[ $verb == update && ${#sys_names[@]} -gt 0 && $EUID -ne 0 && -x $sys_wrapper ]]; then
+    if [[ $verb == update && ${#sys_names[@]} -gt 0 && $EUID -ne 0 && -x $sys_wrapper &&
+          ${#extra[@]} -gt 0 ]]; then
+        info "${extra[*]} cannot go through the passwordless wrapper — asking for root directly"
+    fi
+    if [[ $verb == update && ${#sys_names[@]} -gt 0 && $EUID -ne 0 && -x $sys_wrapper &&
+          ${#extra[@]} -eq 0 ]]; then
         # Ask for exactly the apps that were requested. The wrapper validates
         # each name against the root-owned system list and refuses anything
         # else, so updating one app no longer means updating all of them.
@@ -1224,11 +1275,6 @@ dispatch() { # verb extra_flag
             [[ -n $why ]] && info "  ${c_bold}$(app_name system "${T_URL[$i2]}")${c_off} needs root: $why"
         done
         info "escalating for system apps: ${sys_names[*]}"
-        local extra=()
-        (( PURGE )) && extra+=(--purge)
-        (( FORCE )) && extra+=(--force)
-        [[ $GUI_CHOICE == 0 ]] && extra+=(--cli-only)
-        [[ $GUI_CHOICE == 1 ]] && extra+=(--gui)
         # Capture first. root_kiwi dies when it cannot provide a root-owned
         # copy, and inside $(...) that exit leaves only the subshell — the
         # caller went on to run `pkexec "" update --system …`.
@@ -1256,36 +1302,77 @@ sync_app_folder() {
 
     local appsdir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
     local schema="org.gnome.desktop.app-folders"
-    local path="/org/gnome/desktop/app-folders/folders/kiwi-tools/"
-    local ids=() f
+    local base="/org/gnome/desktop/app-folders/folders"
+    local ids=() f k id name apps
     for f in "$appsdir"/eu.kiwinetwork.*.desktop; do
         [[ -e $f ]] && ids+=("$(basename "$f")")
     done
 
     local children; children="$(gsettings get "$schema" folder-children 2>/dev/null)" || return 0
+    local -a kids=()
+    while read -r k; do [[ -n $k ]] && kids+=("$k"); done < <(grep -o "'[^']*'" <<<"$children" | tr -d "'")
+
+    # ADOPT before creating. A folder the user made for these apps by hand has
+    # an id of GNOME's choosing and whatever name they typed; building ours
+    # next to it produced two folders called "Kiwi Tools" holding the same
+    # apps, and the second one came back after every update. Prefer a folder
+    # that already holds any of our apps, then one carrying our name, and only
+    # then our own id.
+    local target=""
+    for id in ${kids[@]+"${kids[@]}"}; do
+        apps="$(gsettings get "$schema.folder:$base/$id/" apps 2>/dev/null || true)"
+        for f in ${ids[@]+"${ids[@]}"}; do
+            [[ $apps == *"'$f'"* ]] && { target="$id"; break 2; }
+        done
+    done
+    if [[ -z $target ]]; then
+        for id in ${kids[@]+"${kids[@]}"}; do
+            name="$(gsettings get "$schema.folder:$base/$id/" name 2>/dev/null | tr -d "'" || true)"
+            [[ ${name,,} == "kiwi tools" ]] && { target="$id"; break; }
+        done
+    fi
+    [[ -z $target ]] && target="kiwi-tools"
+    local path="$base/$target/"
+
+    drop_ours() { # remove the kiwi-tools folder from the grid
+        gsettings reset-recursively "$schema.folder:$base/kiwi-tools/" 2>/dev/null || true
+        children="$(sed "s/'kiwi-tools', //; s/, 'kiwi-tools'//; s/'kiwi-tools'//" <<<"$children")"
+        gsettings set "$schema" folder-children "$children" 2>/dev/null || true
+    }
+
+    # whichever folder is the one, a second kiwi-tools next to it is the bug
+    [[ $target != kiwi-tools && $children == *"'kiwi-tools'"* ]] && drop_ours
 
     if [[ ${#ids[@]} -eq 0 ]]; then
-        # no Kiwi GUI apps left — drop the folder if we had it
-        if [[ $children == *"'kiwi-tools'"* ]]; then
-            gsettings reset-recursively "$schema.folder:$path" 2>/dev/null || true
-            gsettings set "$schema" folder-children \
-                "$(sed "s/'kiwi-tools', //; s/, 'kiwi-tools'//; s/'kiwi-tools'//" <<<"$children")" 2>/dev/null || true
-        fi
+        # no Kiwi GUI apps left: drop OUR folder if we had it. One the user
+        # made is theirs and stays.
+        [[ $target == kiwi-tools && $children == *"'kiwi-tools'"* ]] && drop_ours
         return 0
     fi
 
-    local apps="[" first=1 id
-    for id in "${ids[@]}"; do (( first )) && first=0 || apps+=", "; apps+="'$id'"; done
-    apps+="]"
-    gsettings set "$schema.folder:$path" name 'Kiwi Tools' 2>/dev/null || return 0
-    gsettings set "$schema.folder:$path" apps "$apps" 2>/dev/null || true
-    gsettings set "$schema.folder:$path" translate false 2>/dev/null || true
+    # merge: keep whatever else the folder already holds, add ours
+    local current; current="$(gsettings get "$schema.folder:$path" apps 2>/dev/null || echo "[]")"
+    local -a have=(); local seen
+    while read -r k; do [[ -n $k ]] && have+=("$k"); done < <(grep -o "'[^']*'" <<<"$current" | tr -d "'")
+    for f in ${ids[@]+"${ids[@]}"}; do
+        seen=0; for k in ${have[@]+"${have[@]}"}; do [[ $k == "$f" ]] && seen=1; done
+        (( seen )) || have+=("$f")
+    done
+    local apps_str="[" first=1
+    for k in ${have[@]+"${have[@]}"}; do (( first )) && first=0 || apps_str+=", "; apps_str+="'$k'"; done
+    apps_str+="]"
 
-    if [[ $children != *"'kiwi-tools'"* ]]; then
+    if [[ $target == kiwi-tools ]]; then
+        gsettings set "$schema.folder:$path" name 'Kiwi Tools' 2>/dev/null || return 0
+        gsettings set "$schema.folder:$path" translate false 2>/dev/null || true
+    fi
+    gsettings set "$schema.folder:$path" apps "$apps_str" 2>/dev/null || true
+
+    if [[ $children != *"'$target'"* ]]; then
         if [[ $children == "@as []" || $children == "[]" ]]; then
-            gsettings set "$schema" folder-children "['kiwi-tools']" 2>/dev/null || true
+            gsettings set "$schema" folder-children "['$target']" 2>/dev/null || true
         else
-            gsettings set "$schema" folder-children "${children%]}, 'kiwi-tools']" 2>/dev/null || true
+            gsettings set "$schema" folder-children "${children%]}, '$target']" 2>/dev/null || true
         fi
     fi
 }
@@ -1418,7 +1505,10 @@ cmd_search() { # term...
 # which of an app's declared dependencies are actually present
 deps_missing() { # "a b c" -> missing ones
     local d out=()
-    for d in $1; do command -v "$d" >/dev/null 2>&1 || out+=("$d"); done
+    split_words "${1:-}"                     # manifest data: no globbing
+    for d in ${WORDS[@]+"${WORDS[@]}"}; do
+        command -v -- "$d" >/dev/null 2>&1 || out+=("$d")
+    done
     echo "${out[*]:-}"
 }
 
@@ -1708,8 +1798,7 @@ cmd_doctor() {
             _good "root-owned copy at $ROOT_KIWI is $have"
         else
             _bad "root-owned copy at $ROOT_KIWI is $have, this one is $KIWI_VERSION.
-  A copy at 1.2.1 or older cannot update itself; re-run the bootstrap once:
-  curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system"
+$(root_skew_advice "$have")"
         fi
     else
         _good "no system scope installed (nothing runs as root)"
@@ -1767,6 +1856,23 @@ cmd_doctor() {
     done
 
     info "clones"
+    # Everything the user side knows about a system app is read out of
+    # /var/lib: installed or not, which commit, whether an update is due. A
+    # root umask of 077 makes those clones unreadable, and then every system
+    # app looks not-installed from here with nothing saying why.
+    if [[ $EUID -ne 0 && -d $SYS_REPOS ]]; then
+        if [[ ! -r $SYS_REPOS || ! -x $SYS_REPOS ]]; then
+            _bad "$SYS_REPOS is not readable by users, so system apps look not-installed from here.
+  sudo chmod 755 $SYS_DATA_DIR $SYS_REPOS"
+        else
+            for d in "$SYS_REPOS"/*/; do
+                [[ -d $d ]] || continue
+                [[ -r $d && -x $d && -r "$d/.kiwi-installed" || ! -e "$d/.kiwi-installed" ]] ||
+                    _bad "$(basename "$d") (system) is not readable by users; the user view of it is wrong.
+  sudo chmod -R a+rX $d"
+            done
+        fi
+    fi
     while IFS=$'\t' read -r url opts; do
         [[ -z $url ]] && continue
         for sc in $(real_scopes); do

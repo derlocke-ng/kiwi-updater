@@ -68,7 +68,17 @@ as_root() {
     fi
 }
 
-origin_url() { git -C "$SRC" remote get-url origin 2>/dev/null || true; }
+# -c safe.directory: the bootstrap runs this as root inside the USER's
+# checkout. Under sudo git treats a directory owned by SUDO_UID as safe; under
+# pkexec — the path `curl … | bash -s -- --with-system` takes on a desktop,
+# since stdin is a pipe — there is no SUDO_UID, git refused the repo as
+# "dubious ownership", this returned empty, and register_self printed
+# "no git origin found". The root clone was never created, so the root-owned
+# kiwi had nothing to self-update from: F4 all over again, silently, on every
+# desktop bootstrap. Reading one URL out of a config file is not executing it.
+origin_url() {
+    git -c safe.directory="$SRC" -C "$SRC" remote get-url origin 2>/dev/null || true
+}
 
 seed_list() { # file header-comment
     [[ -f $1 ]] || printf '# %s\n' "$2" > "$1"
@@ -173,20 +183,6 @@ user_install() {
     install -Dm644 "$SRC/data/bash-completion/kiwi" \
         "${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions/kiwi"
 
-    say "installing user update service"
-    install -Dm644 "$SRC/data/systemd/kiwi-updater.service" "$USER_UNIT_DIR/kiwi-updater.service"
-    install -Dm644 "$SRC/data/systemd/kiwi-updater.timer"   "$USER_UNIT_DIR/kiwi-updater.timer"
-    # The timer is optional, and this script runs under set -e. `systemctl
-    # --user` fails over ssh without lingering, in containers and under `su -`,
-    # and that aborted the install right here — after the binaries were copied
-    # but before the lists, the default catalog and self-registration existed,
-    # leaving a kiwi that could not find anything.
-    if ! { systemctl --user daemon-reload &&
-           systemctl --user enable --now kiwi-updater.timer; } 2>/dev/null; then
-        say "no systemd user session here — background updates are NOT enabled"
-        say "  enable them later with: systemctl --user enable --now kiwi-updater.timer"
-    fi
-
     mkdir -p "$USER_CONF" "$USER_DATA/repos"
     seed_list "$USER_CONF/apps.list"     "kiwi user apps — one git URL per line; options: branch=<b> ref=<tag>"
     seed_list "$USER_CONF/catalogs.list" "kiwi catalogs — git URLs of catalog repos (shared app lists)"
@@ -195,6 +191,22 @@ user_install() {
         say "registered default catalog ($DEFAULT_CATALOG)"
     }
     register_self "$USER_CONF/apps.list" "$USER_DATA/repos"
+
+    # The timer goes LAST. `enable --now` starts it, and with Persistent=true
+    # on a machine up longer than OnBootSec it fires at once — so it used to
+    # run `kiwi update --all` while this script was still writing the lists
+    # it would read. Everything it needs exists by this point.
+    say "installing user update service"
+    install -Dm644 "$SRC/data/systemd/kiwi-updater.service" "$USER_UNIT_DIR/kiwi-updater.service"
+    install -Dm644 "$SRC/data/systemd/kiwi-updater.timer"   "$USER_UNIT_DIR/kiwi-updater.timer"
+    # The timer is optional, and this script runs under set -e. `systemctl
+    # --user` fails over ssh without lingering, in containers and under `su -`,
+    # and that used to abort the install part way through.
+    if ! { systemctl --user daemon-reload &&
+           systemctl --user enable --now kiwi-updater.timer; } 2>/dev/null; then
+        say "no systemd user session here — background updates are NOT enabled"
+        say "  enable them later with: systemctl --user enable --now kiwi-updater.timer"
+    fi
 
     say "done — try: kiwi list  |  kiwi add <git-url>  |  kiwi-gui"
     # Report what is actually on the machine, not which flag this run was given.
@@ -236,17 +248,6 @@ root_install() {
     install -Dm644 "$SRC/data/bash-completion/kiwi" \
         /usr/local/share/bash-completion/completions/kiwi
 
-    say "installing system update service"
-    install -Dm644 "$SRC/data/systemd/kiwi-updater-system.service" "$SYS_UNIT_DIR/kiwi-updater-system.service"
-    install -Dm644 "$SRC/data/systemd/kiwi-updater-system.timer"   "$SYS_UNIT_DIR/kiwi-updater-system.timer"
-    # Same for the system timer: a container or an image build has no running
-    # systemd, and that must not abandon the system scope half-installed.
-    if ! { systemctl daemon-reload &&
-           systemctl enable --now kiwi-updater-system.timer; } 2>/dev/null; then
-        say "no running systemd — the system update timer is NOT enabled"
-        say "  enable it later with: systemctl enable --now kiwi-updater-system.timer"
-    fi
-
     # wheel users may run the system-update wrapper without a password
     # (/etc/polkit-1/rules.d is writable on ostree systems)
     install -Dm644 "$SRC/data/polkit/50-kiwi-updater.rules" \
@@ -259,6 +260,20 @@ root_install() {
     seed_list "$SYS_CONF/catalogs.list" "kiwi system catalogs — git URLs of catalog repos"
     list_has "$SYS_CONF/catalogs.list" "$DEFAULT_CATALOG" || echo "$DEFAULT_CATALOG" >> "$SYS_CONF/catalogs.list"
     register_self "$SYS_CONF/apps.list" "$SYS_DATA/repos"
+
+    # Timer last, same reason as the user phase: `enable --now` can fire the
+    # service immediately, and it used to start `kiwi update --all --system`
+    # before the system list or the root clone of kiwi existed.
+    say "installing system update service"
+    install -Dm644 "$SRC/data/systemd/kiwi-updater-system.service" "$SYS_UNIT_DIR/kiwi-updater-system.service"
+    install -Dm644 "$SRC/data/systemd/kiwi-updater-system.timer"   "$SYS_UNIT_DIR/kiwi-updater-system.timer"
+    # A container or an image build has no running systemd, and that must not
+    # abandon the system scope half-installed.
+    if ! { systemctl daemon-reload &&
+           systemctl enable --now kiwi-updater-system.timer; } 2>/dev/null; then
+        say "no running systemd — the system update timer is NOT enabled"
+        say "  enable it later with: systemctl enable --now kiwi-updater-system.timer"
+    fi
 }
 
 root_update() { root_install; }

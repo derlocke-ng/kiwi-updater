@@ -3,6 +3,52 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 1.7.0 — 2026-10-04
+
+A third full audit, this time concentrating on the bootstrap, the root
+wrapper boundary, the systemd units and untrusted data. Seven findings, all
+reproduced before being fixed; `tests/repro.sh` gains P16–P19 (42 checks).
+
+### Fixed
+
+- **The desktop bootstrap never registered root's self-update.** `curl … |
+  bash -s -- --with-system` runs the root phase under `pkexec` (stdin is a
+  pipe, so there is no tty for sudo). Under sudo, git treats a directory owned
+  by `SUDO_UID` as safe; under pkexec there is no `SUDO_UID`, git refused the
+  user's checkout as "dubious ownership", `origin_url` came back empty, and
+  `register_self` printed "no git origin found". The root clone was never
+  created, so the root-owned kiwi had nothing to self-update from — the F4
+  symptom again, silently, on every desktop bootstrap. The sudo path masked it
+  in every test until now. One URL is now read with `-c safe.directory`.
+- **The "Kiwi Tools" app folder appeared twice.** If you had moved the apps
+  into a folder of your own in the app grid, GNOME gave it its own id and the
+  name you typed; kiwi then built *its* folder (`kiwi-tools`) with the same
+  name and the same apps, and rebuilt it after every update. It now adopts an
+  existing folder that already holds any of the apps, then one carrying the
+  name, and only otherwise creates its own — and removes a stray `kiwi-tools`
+  next to the adopted one.
+- **Timers were enabled before the lists existed.** `enable --now` can fire a
+  `Persistent` timer immediately on a machine that has been up longer than
+  `OnBootSec`, so `kiwi update --all` could run while the installer was still
+  writing the lists it reads. Both timers are now enabled last.
+- **`--force`, `--cli-only` and `--gui` were dropped for the system half.** The
+  passwordless wrapper carries names and nothing else — that is what makes it
+  safe — so `kiwi update --force app` forced the user half and quietly did a
+  plain update as root. With any such flag kiwi now asks for root directly and
+  says why.
+- **List and manifest values were glob-expanded.** `for kv in $opts` also
+  globs, so a catalog line carrying `ref=*` was replaced by the names of
+  whatever files sat in kiwi's current directory. Values from other people
+  are now split on whitespace and nothing else.
+- The version-skew notice sent every mismatch to the password-gated bootstrap.
+  A root copy from 1.3.0 on picks a new version up from its own timer, or
+  right now with `kiwi update --system kiwi-updater` (no password); only a
+  copy older than that needs the bootstrap. The advice now depends on which.
+- The user-side view of a system app is read out of `/var/lib`, so a root
+  umask of 077 made every system app look not-installed from the user side
+  with nothing saying why. System clones and markers are made world-readable
+  on creation, and `kiwi doctor` reports ones that are not.
+
 ## 1.6.1 — 2026-10-03
 
 The pin warning added in 1.6.0 printed "not this pinv0.1.0" — a bad parameter

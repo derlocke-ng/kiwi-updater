@@ -549,8 +549,100 @@ t_P15() { # a pin value that would corrupt the list file is refused
     check P15 "a pin value with whitespace is refused before touching the list" f
 }
 
+t_P16() { # the root phase of the bootstrap must register self-update even under pkexec
+    # Under pkexec there is no SUDO_UID, so git refused the user-owned checkout
+    # as "dubious ownership", origin_url came back empty, and the root clone
+    # was never created — the root-owned kiwi had nothing to self-update from.
+    # The harness runs root with env -i, which is exactly that environment.
+    # a USER-owned git checkout (the thing under test), cloned from a
+    # root-owned bare repo (so the source itself is not what trips git)
+    local src=$TH/checkout; rm -rf $src $GITROOT/self
+    cp -r $W $src && chown -R $T $src
+    runuser -u $T -- bash -c "cd $src && git init -q && git add -A && git -c user.email=t@e -c user.name=t commit -qm x"
+    mkdir -p $GITROOT/self && git clone -q --bare $src $GITROOT/self/kiwi-updater.git
+    runuser -u $T -- git -C $src remote add origin $GITROOT/self/kiwi-updater.git
+    # GIT_CONFIG_SYSTEM=/dev/null: the harness sets safe.directory='*' globally,
+    # which would hide exactly the refusal this test is about
+    env -i HOME=/root PATH=$STUBS:/usr/sbin:/usr/bin:/bin GIT_CONFIG_SYSTEM=/dev/null \
+        bash $src/install.sh install >/dev/null 2>&1
+    f() { grep -q 'self/kiwi-updater' /etc/kiwi-updater/apps.list 2>/dev/null &&
+          [[ -f /var/lib/kiwi-updater/repos/kiwi-updater/.kiwi-installed ]]; }
+    check P16 "root bootstrap phase registers kiwi's own self-update without SUDO_UID" f
+}
+
+t_P17() { # an option value from a list must never be glob-expanded
+    mkapp a globby user
+    ku add $GITROOT/a/globby.git >/dev/null
+    sed -i 's|globby.git$|globby.git ref=*|' $TH/.config/kiwi-updater/apps.list
+    # files in kiwi's cwd that a glob would pick up
+    mkdir -p $TH/cwd && touch $TH/cwd/v1.0.0 $TH/cwd/v9.9.9
+    local out
+    out="$(cd $TH/cwd && ku info globby 2>&1)"
+    f() { grep -q 'pinned.*\*' <<<"$out" && ! grep -q 'v9.9.9' <<<"$out"; }
+    check P17 "ref=* in a list stays a literal star and is not globbed against the cwd" f
+}
+
+t_P18() { # --force cannot ride the passwordless wrapper, so it must escalate directly
+    mkapp a frc "user system"
+    mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos /usr/local/libexec
+    install -Dm755 $K /usr/local/bin/kiwi
+    printf '#!/bin/sh\necho "WRAPPER $*" >> %s\nexit 0\n' "$ESC" > /usr/local/libexec/kiwi-system-update
+    chmod +x /usr/local/libexec/kiwi-system-update
+    echo "$GITROOT/a/frc.git" > /etc/kiwi-updater/apps.list
+    ku add $GITROOT/a/frc.git >/dev/null
+    ku install frc --user >/dev/null 2>&1
+    kr install --system frc >/dev/null 2>&1
+    : > $ESC; ku update frc >/dev/null 2>&1
+    local plain; plain="$(cat $ESC)"
+    : > $ESC; ku update frc --force >/dev/null 2>&1
+    local forced; forced="$(cat $ESC)"
+    # pkexec itself is stubbed and logs its argv, so the wrapper shows up as the
+    # program pkexec was asked to run rather than by running
+    f() { grep -q 'kiwi-system-update' <<<"$plain" && ! grep -q 'kiwi-system-update' <<<"$forced" &&
+          grep -q -- '--force' <<<"$forced"; }
+    check P18 "plain update uses the wrapper; --force escalates directly and carries the flag" f
+}
+
+t_P19() { # a "Kiwi Tools" folder the user made by hand must be adopted, not duplicated
+    # gsettings stub backed by a flat file, so the app-folder logic can run
+    # without a GNOME session
+    cat > $STUBS/gsettings <<'EOF'
+#!/usr/bin/env bash
+db=/tmp/kt-gsettings.db; touch "$db"
+case "$1" in
+  get) k="$2|$3"; v="$(grep -F -- "$k=" "$db" | tail -1 | cut -d= -f2-)"
+       if [[ -z $v ]]; then case "$3" in folder-children|apps|categories) echo "@as []";; *) echo "''";; esac
+       else echo "$v"; fi ;;
+  set) k="$2|$3"; { grep -vF -- "$k=" "$db" || true; } > "$db.tmp"; echo "$k=$4" >> "$db.tmp"; mv "$db.tmp" "$db" ;;
+  reset-recursively) { grep -vF -- "$2|" "$db" || true; } > "$db.tmp"; mv "$db.tmp" "$db" ;;
+esac
+EOF
+    chmod +x $STUBS/gsettings; : > /tmp/kt-gsettings.db; chmod 666 /tmp/kt-gsettings.db
+    local apps=$TH/.local/share/applications; mkdir -p $apps
+    touch $apps/eu.kiwinetwork.One.desktop $apps/eu.kiwinetwork.Two.desktop; chown -R $T $TH/.local
+    local G=org.gnome.desktop.app-folders B=/org/gnome/desktop/app-folders/folders
+    # the user dragged One into a folder of their own and named it Kiwi Tools;
+    # an earlier kiwi then built a second folder with the same name
+    $STUBS/gsettings set $G folder-children "['Mine', 'kiwi-tools']"
+    $STUBS/gsettings set "$G.folder:$B/Mine/" name "'Kiwi Tools'"
+    $STUBS/gsettings set "$G.folder:$B/Mine/" apps "['eu.kiwinetwork.One.desktop']"
+    $STUBS/gsettings set "$G.folder:$B/kiwi-tools/" name "'Kiwi Tools'"
+    $STUBS/gsettings set "$G.folder:$B/kiwi-tools/" apps "['eu.kiwinetwork.One.desktop', 'eu.kiwinetwork.Two.desktop']"
+    # the stub replaces the db with mv; in sticky /tmp only the owner may do that
+    chown $T /tmp/kt-gsettings.db
+    mkapp a fold user
+    ku add $GITROOT/a/fold.git >/dev/null
+    KENV="DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent" ku install fold >/dev/null 2>&1
+    local kids mine
+    kids="$($STUBS/gsettings get $G folder-children)"
+    mine="$($STUBS/gsettings get "$G.folder:$B/Mine/" apps)"
+    rm -f $STUBS/gsettings
+    f() { [[ $kids != *kiwi-tools* && $kids == *"'Mine'"* && $mine == *One.desktop* && $mine == *Two.desktop* ]]; }
+    check P19 "a user-made Kiwi Tools folder is adopted and the duplicate removed (children=$kids)" f
+}
+
 for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
-         P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15; do run $t; done
+         P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P17 P18 P19; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

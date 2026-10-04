@@ -28,13 +28,26 @@ scope, one password prompt:
 curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system
 ```
 
+**Manual system scope** — the same root-owned copy and lists, but **no root
+timer, no polkit rule, no passwordless anything**. Every change to the system
+scope asks for your password, and nothing of kiwi's runs as root unattended;
+the price is that root halves update only when you ask:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system=manual
+```
+
 **Minimal** — 100 % user-level: `~/.local`, no root, no password, ever:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash
 ```
 
-Which one you need depends on the apps. Anything that is only files in your
+The two system variants are one command apart in either direction
+(`--with-system=auto` switches a manual machine back; a plain `--with-system`
+keeps whichever mode the machine already has, so a re-run never flips a
+deliberate choice), and `kiwi doctor` and `kiwi version` say which one a
+machine is in. Which one you need depends on the apps. Anything that is only files in your
 home — the CLI tools, ensconce — is complete on the minimal install. An app
 with a **root half** is not: kiwi-killswitch is a root firewall daemon plus a
 desktop part, and without the system scope `kiwi install kiwi-killswitch` puts
@@ -271,7 +284,7 @@ there yet to do it instead.
 | unit | scope | what |
 |---|---|---|
 | `kiwi-updater.timer` (user) | user | `kiwi update --all --user` every 6 h + a notification |
-| `kiwi-updater-system.timer` (opt-in) | root | `kiwi update --all --system` every 6 h, and self-updates the root copy |
+| `kiwi-updater-system.timer` (opt-in, `auto` mode only) | root | `kiwi update --all --system` every 6 h, and self-updates the root copy. `manual` mode has no root timer at all. |
 
 > **Upgrading from 1.2.1 or earlier with the system scope installed:** the root
 > copy could not update itself before 1.3.0, so it cannot pick this release up
@@ -287,7 +300,7 @@ there yet to do it instead.
 | | needs root | asks for a password |
 |---|---|---|
 | anything in the user scope | no | no |
-| **updating** a system app | yes | **no** — polkit authorises one fixed-purpose helper for active `wheel` sessions |
+| **updating** a system app | yes | **no** — polkit authorises one fixed-purpose helper for active `wheel` sessions (in `manual` mode: yes, always) |
 | **installing** a system app | yes | yes |
 | **uninstalling** a system app | yes | yes |
 

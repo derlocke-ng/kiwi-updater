@@ -670,8 +670,39 @@ t_P22() { # on a user-only machine a dual-scope app installs its user half and s
     check P22 "user half installs, root half refused with the --with-system advice, no password asked" f
 }
 
+t_P23() { # --with-system=manual: root-owned kiwi and lists, nothing that runs as root unattended
+    local src=$TH/checkout; rm -rf $src; cp -r $W $src; chown -R $T $src
+    rootphase() { env -i HOME=/root PATH=$STUBS:/usr/sbin:/usr/bin:/bin bash $src/install.sh install "$@" >/dev/null 2>&1; }
+    rootphase --with-system=manual
+    local have_kiwi=0 have_mode="" stray=0
+    [[ -x /usr/local/bin/kiwi && -f /etc/kiwi-updater/apps.list ]] && have_kiwi=1
+    have_mode="$(cat /etc/kiwi-updater/mode 2>/dev/null)"
+    for f in /usr/local/libexec/kiwi-system-update /etc/polkit-1/rules.d/50-kiwi-updater.rules \
+             /etc/systemd/system/kiwi-updater-system.timer /etc/systemd/system/kiwi-updater-system.service; do
+        [[ -e $f ]] && stray=$((stray+1))
+    done
+    local doc; doc="$(ku doctor 2>&1)"
+    # (the USER timer line always complains under the systemctl stub — only the
+    # system-timer complaint is the one manual mode must not raise)
+    f() { [[ $have_kiwi -eq 1 && $have_mode == manual && $stray -eq 0 ]] &&
+          grep -q 'manual mode' <<<"$doc" && ! grep -q 'system scope is installed but its timer' <<<"$doc"; }
+    check P23 "manual mode installs root kiwi + lists and no wrapper/polkit/timer (mode=$have_mode stray=$stray)" f
+    # P24: the modes are one command apart, in both directions
+    # plain --with-system KEEPS the recorded mode (a re-run must never flip a
+    # deliberate manual choice back to passwordless); =auto is the switch
+    rootphase --with-system=auto       # back to auto: the three appear
+    local up=0; for f in /usr/local/libexec/kiwi-system-update /etc/polkit-1/rules.d/50-kiwi-updater.rules \
+                         /etc/systemd/system/kiwi-updater-system.timer; do [[ -e $f ]] && up=$((up+1)); done
+    local m1; m1="$(cat /etc/kiwi-updater/mode)"
+    rootphase --with-system=manual     # and vanish again
+    local down=0; for f in /usr/local/libexec/kiwi-system-update /etc/polkit-1/rules.d/50-kiwi-updater.rules \
+                           /etc/systemd/system/kiwi-updater-system.timer; do [[ -e $f ]] && down=$((down+1)); done
+    f24() { [[ $up -eq 3 && $m1 == auto && $down -eq 0 && "$(cat /etc/kiwi-updater/mode)" == manual ]]; }
+    check P24 "switching auto<->manual adds and removes wrapper, polkit rule and timer (auto=$up/3, manual again=$down/3)" f24
+}
+
 for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
-         P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P17 P18 P19 P20 P22; do run $t; done
+         P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P17 P18 P19 P20 P22 P23; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

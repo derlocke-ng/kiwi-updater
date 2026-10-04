@@ -10,7 +10,7 @@
 #   system — listed in /etc/kiwi-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-KIWI_VERSION=1.7.2
+KIWI_VERSION=1.8.0
 
 # systemd system services start without $HOME (set -u would abort at the
 # path definitions below) — root's user-scope paths are never used anyway
@@ -46,6 +46,11 @@ checkout is missing. Set it up with:
     echo "$ROOT_KIWI"
 }
 
+# How the system scope was set up (see install.sh): "auto" has a root timer
+# and the passwordless wrapper, "manual" has neither — every system change
+# asks for a password and nothing of kiwi's runs as root unattended.
+system_mode() { cat /etc/kiwi-updater/mode 2>/dev/null || echo auto; }
+
 # The root copy is a separate file updated by its own timer, so the two can
 # drift. Read the version out of it rather than executing it — this runs on
 # ordinary commands and there is no reason to start a second process, let
@@ -73,6 +78,9 @@ root_skew_advice() { # root_version
     if ver_lt "$1" 1.3.0; then
         printf '%s\n' "  a copy from 1.2.1 or older cannot update itself. Re-run the bootstrap once:" \
             "    curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system"
+    elif [[ $(system_mode) == manual ]]; then
+        printf '%s\n' "  the system scope is in manual mode, so nothing updates it unasked. To do it (password):" \
+            "    kiwi update --system kiwi-updater"
     else
         printf '%s\n' "  its own timer picks this up within six hours; to do it now (no password):" \
             "    kiwi update --system kiwi-updater"
@@ -1213,6 +1221,7 @@ dispatch() { # verb extra_flag
                 warn "  the user half installs now; the root half cannot until the system scope exists."
                 warn "  set it up once (one password prompt), then install again:"
                 warn "    curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system"
+                warn "  or, if nothing of kiwi's should ever run as root unattended, --with-system=manual"
                 rc_pre=1; continue
             fi
             warn "$(app_name system "${T_URL[$i]}") needs the system scope, but no root-owned list names it."
@@ -1829,7 +1838,7 @@ cmd_doctor() {
     _good "this copy is $KIWI_VERSION ($0)"
     if have="$(root_version)"; then
         if [[ $have == "$KIWI_VERSION" ]]; then
-            _good "root-owned copy at $ROOT_KIWI is $have"
+            _good "root-owned copy at $ROOT_KIWI is $have ($(system_mode) mode)"
         else
             _bad "root-owned copy at $ROOT_KIWI is $have, this one is $KIWI_VERSION.
 $(root_skew_advice "$have")"
@@ -1937,7 +1946,15 @@ $(root_skew_advice "$have")"
             fi
         fi
         if [[ -x $ROOT_KIWI ]]; then
-            if [[ "$(systemctl is-enabled kiwi-updater-system.timer 2>/dev/null || true)" == enabled ]]; then
+            if [[ $(system_mode) == manual ]]; then
+                # no timer by design; a running one would be the surprise
+                if [[ "$(systemctl is-enabled kiwi-updater-system.timer 2>/dev/null || true)" == enabled ]]; then
+                    _bad "the system scope is in manual mode but its timer is enabled — one of the two is wrong.
+  sudo systemctl disable --now kiwi-updater-system.timer   (or re-run the bootstrap with --with-system)"
+                else
+                    _good "system scope in manual mode: no root timer, system halves update when you ask (password)"
+                fi
+            elif [[ "$(systemctl is-enabled kiwi-updater-system.timer 2>/dev/null || true)" == enabled ]]; then
                 _good "system timer is enabled"
             else
                 _bad "the system scope is installed but its timer is not enabled.
@@ -2211,7 +2228,7 @@ case "$CMD" in
     # system scope — and broke anything scripted as `kiwi version && …`.
     version)     echo "kiwi $KIWI_VERSION"
                  if root_v="$(root_version)"; then
-                     echo "root-owned copy at $ROOT_KIWI: $root_v"
+                     echo "root-owned copy at $ROOT_KIWI: $root_v ($(system_mode) mode)"
                  fi ;;
     ""|help)     usage ;;
     *)           die "unknown command: $CMD (see 'kiwi help')" ;;

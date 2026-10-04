@@ -6,6 +6,11 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system
 #
+# The same without a root timer or any passwordless action — every system
+# change asks for your password:
+#
+#   curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system=manual
+#
 # Minimal, 100% user-level, no root ever (complete for user-only apps):
 #
 #   curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash

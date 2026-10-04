@@ -24,11 +24,21 @@ ACTION="${1:-install}"
 PURGE=0
 WITH_SYSTEM=0
 CLI_ONLY=0
+# How the system scope behaves, recorded in /etc/kiwi-updater/mode:
+#   auto    root timer + passwordless wrapper for active wheel sessions
+#   manual  root-owned kiwi and lists only — no timer, no polkit rule, no
+#           wrapper. Every change to the system scope asks for a password, and
+#           nothing runs as root unattended. The price is that system halves
+#           update only when you ask.
+# Empty means "keep what the machine has" (auto on a fresh install).
+SYSTEM_MODE=""
 for arg in "${@:2}"; do
     case "$arg" in
-        --purge)       PURGE=1 ;;
-        --with-system) WITH_SYSTEM=1 ;;
-        --cli-only)    CLI_ONLY=1 ;;
+        --purge)              PURGE=1 ;;
+        --with-system)        WITH_SYSTEM=1 ;;
+        --with-system=auto)   WITH_SYSTEM=1; SYSTEM_MODE=auto ;;
+        --with-system=manual) WITH_SYSTEM=1; SYSTEM_MODE=manual ;;
+        --cli-only)           CLI_ONLY=1 ;;
         *) echo "unknown option: $arg" >&2; exit 1 ;;
     esac
 done
@@ -215,7 +225,8 @@ user_install() {
     # on a machine where the system scope had been installed as root.
     if (( ! WITH_SYSTEM )) && ! system_present; then
         say "system scope not set up: apps with a root half (kiwi-killswitch) cannot install"
-        say "  that half until it is. Add it any time with:  get-kiwi.sh --with-system"
+        say "  that half until it is. Add it any time:  get-kiwi.sh --with-system"
+        say "  (or --with-system=manual: no root timer, every system change asks for a password)"
     fi
 }
 
@@ -241,30 +252,46 @@ user_uninstall() {
 
 # ---------------- system phase (opt-in, runs as root) --------------------------
 root_install() {
-    say "installing root-owned kiwi to $SYS_BIN (used by the system timer)"
+    local mode="${SYSTEM_MODE:-$(cat "$SYS_CONF/mode" 2>/dev/null || echo auto)}"
+    say "installing root-owned kiwi to $SYS_BIN ($mode mode)"
     install -Dm755 "$SRC/bin/kiwi" "$SYS_BIN/kiwi"
-    # fixed-purpose wrapper for passwordless GUI/CLI system updates
-    install -Dm755 "$SRC/data/kiwi-system-update" /usr/local/libexec/kiwi-system-update
     # /usr is immutable on ostree; /usr/local is the writable one
     install -Dm644 "$SRC/data/bash-completion/kiwi" \
         /usr/local/share/bash-completion/completions/kiwi
 
+    mkdir -p "$SYS_CONF" "$SYS_DATA/repos"
+    chmod 755 "$SYS_DATA" "$SYS_DATA/repos"
+    printf '%s\n' "$mode" > "$SYS_CONF/mode"; chmod 644 "$SYS_CONF/mode"
+    seed_list "$SYS_CONF/apps.list"     "kiwi system apps — installed as root; options: branch=<b> ref=<tag>"
+    seed_list "$SYS_CONF/catalogs.list" "kiwi system catalogs — git URLs of catalog repos"
+    list_has "$SYS_CONF/catalogs.list" "$DEFAULT_CATALOG" || echo "$DEFAULT_CATALOG" >> "$SYS_CONF/catalogs.list"
+    register_self "$SYS_CONF/apps.list" "$SYS_DATA/repos"
+
+    if [[ $mode == manual ]]; then
+        # Nothing of kiwi's runs as root unless an admin types a password:
+        # no wrapper, no polkit rule, no timer. Remove them if a previous auto
+        # install left them, so switching modes is one command.
+        systemctl disable --now kiwi-updater-system.timer 2>/dev/null || true
+        rm -f /usr/local/libexec/kiwi-system-update \
+              /etc/polkit-1/rules.d/50-kiwi-updater.rules \
+              "$SYS_UNIT_DIR/kiwi-updater-system.service" "$SYS_UNIT_DIR/kiwi-updater-system.timer"
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl reload polkit 2>/dev/null || true
+        say "manual mode: system halves update when you ask, with a password — no root timer"
+        return 0
+    fi
+
+    # fixed-purpose wrapper for passwordless GUI/CLI system updates
+    install -Dm755 "$SRC/data/kiwi-system-update" /usr/local/libexec/kiwi-system-update
     # wheel users may run the system-update wrapper without a password
     # (/etc/polkit-1/rules.d is writable on ostree systems)
     install -Dm644 "$SRC/data/polkit/50-kiwi-updater.rules" \
         /etc/polkit-1/rules.d/50-kiwi-updater.rules
     systemctl reload polkit 2>/dev/null || systemctl restart polkit 2>/dev/null || true
 
-    mkdir -p "$SYS_CONF" "$SYS_DATA/repos"
-    chmod 755 "$SYS_DATA" "$SYS_DATA/repos"
-    seed_list "$SYS_CONF/apps.list"     "kiwi system apps — installed as root; options: branch=<b> ref=<tag>"
-    seed_list "$SYS_CONF/catalogs.list" "kiwi system catalogs — git URLs of catalog repos"
-    list_has "$SYS_CONF/catalogs.list" "$DEFAULT_CATALOG" || echo "$DEFAULT_CATALOG" >> "$SYS_CONF/catalogs.list"
-    register_self "$SYS_CONF/apps.list" "$SYS_DATA/repos"
-
-    # Timer last, same reason as the user phase: `enable --now` can fire the
-    # service immediately, and it used to start `kiwi update --all --system`
-    # before the system list or the root clone of kiwi existed.
+    # Timer last: `enable --now` can fire the service immediately, and it used
+    # to start `kiwi update --all --system` before the system list or the root
+    # clone of kiwi existed.
     say "installing system update service"
     install -Dm644 "$SRC/data/systemd/kiwi-updater-system.service" "$SYS_UNIT_DIR/kiwi-updater-system.service"
     install -Dm644 "$SRC/data/systemd/kiwi-updater-system.timer"   "$SYS_UNIT_DIR/kiwi-updater-system.timer"
@@ -306,7 +333,7 @@ root_uninstall() {
 
 # ---------------- dispatch ------------------------------------------------------
 case "$ACTION" in install|update|uninstall) ;; *)
-    echo "usage: $0 install|update|uninstall [--purge] [--with-system] [--cli-only]" >&2; exit 1 ;;
+    echo "usage: $0 install|update|uninstall [--purge] [--with-system[=auto|manual]] [--cli-only]" >&2; exit 1 ;;
 esac
 
 if [[ $EUID -eq 0 ]]; then
@@ -318,7 +345,7 @@ elif (( WITH_SYSTEM )) && [[ $ACTION == install ]]; then
     # root-owned copy exists yet that could do it instead. Password-gated, and
     # documented as the exception in the README.
     say "setting up the system scope (root)"
-    as_root bash "$SELF" install
+    as_root bash "$SELF" install ${SYSTEM_MODE:+--with-system=$SYSTEM_MODE}
 else
     "user_$ACTION"
     # Update and uninstall of the system half go through the root-owned copy —

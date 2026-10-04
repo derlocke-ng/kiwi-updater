@@ -3,6 +3,43 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 1.8.0 — 2026-10-05
+
+### Added — a system scope without the auto-updater
+
+`--with-system=manual`. The same root-owned copy of kiwi and the same root
+lists, but **no root timer, no polkit rule and no passwordless wrapper**.
+Every change to the system scope asks for a password and nothing of kiwi's
+runs as root unattended; the price is that root halves update only when you
+ask. For anyone who wants system apps but not a root timer.
+
+- `install.sh install --with-system=manual`, or `=auto` (the default on a
+  fresh install). The mode is recorded in `/etc/kiwi-updater/mode`, so root's
+  own self-update keeps it and a plain `--with-system` re-run never flips a
+  deliberate choice; the two modes are one explicit command apart in either
+  direction, and switching to manual removes the wrapper, rule and timer that
+  auto had installed.
+- Everything that already fell back to "ask for root" when the wrapper is
+  missing — `kiwi update` of a system app, kiwi's own system half, the GUI's
+  Update button via a polkit dialog — is exactly how manual mode works, so
+  there is no second code path to go wrong.
+- `kiwi doctor` and `kiwi version` say which mode a machine is in, and doctor
+  no longer reports a missing system timer as a problem when it is missing on
+  purpose — but does report a timer that is *running* in manual mode.
+- The version-skew advice and the "no system scope yet" message name the
+  manual variant too.
+
+One thing cannot be removed in any mode: the root-owned copy itself. Root
+has to execute *something*, and the only alternatives are a user-writable
+file (the exact thing the split exists to prevent) or nothing at all (brew's
+answer, which cannot install a kill switch). Without timer and rule that copy
+is inert until an admin types a password.
+
+The README presents the three tiers — auto (recommended on a desktop),
+manual, minimal — and what each can and cannot install.
+
+P23 and P24 cover install, doctor, and switching in both directions.
+
 ## 1.7.2 — 2026-10-04
 
 Documentation, and one message.

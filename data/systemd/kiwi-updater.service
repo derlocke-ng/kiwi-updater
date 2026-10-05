@@ -1,13 +1,19 @@
 [Unit]
-Description=Kiwi Updater — auto-update user apps
-# No After=network-online.target here: that is a system target and means
-# nothing in the user manager, so it never did anything. Being offline is
-# handled where it actually matters — an update that cannot reach a remote says
-# so and leaves the recorded version alone, and the timer is Persistent.
+Description=Kiwi Updater — update your apps, including the root halves
+# No After=network-online.target: a system target means nothing in the user
+# manager. Being offline is handled where it matters — an update that cannot
+# reach a remote says so and leaves the recorded version alone — and the timer
+# is Persistent.
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/kiwi update --all --user --quiet --notify
+# Both scopes. System halves go through the passwordless wrapper (polkit grants
+# it to wheel users, user services included); kiwi's own root copy is just
+# another system half. There is no root timer.
+ExecStart=%h/.local/bin/kiwi update --all --quiet --notify
+# Never prompt from here: without the wrapper (manual mode) the system halves
+# are left for the next interactive update rather than a dialog at 3am.
+Environment=KIWI_UNATTENDED=1
 # A stuck run must not hold the scope lock indefinitely.
 TimeoutStartSec=900
 Nice=10

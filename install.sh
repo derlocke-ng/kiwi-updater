@@ -8,9 +8,11 @@
 #   user timer        -> ~/.config/systemd/user   (auto-updates user apps + kiwi)
 #
 # --with-system additionally sets up the OPTIONAL system scope (root once):
-#   root-owned kiwi   -> /usr/local/bin/kiwi   (used by the root timer only —
-#                        the root service never executes user-writable files)
-#   system timer      -> /etc/systemd/system   (auto-updates system apps + itself)
+#   root-owned kiwi   -> /usr/local/bin/kiwi   (root never executes a file the
+#                        user can write; this copy does the system-scope work)
+#   update wrapper    -> /usr/local/libexec + a polkit rule: wheel users' updates
+#                        reach the system halves without a password. The USER
+#                        timer drives both scopes; there is no root timer.
 #   config / repos    -> /etc/kiwi-updater, /var/lib/kiwi-updater
 #
 # When executed as root (e.g. by kiwi's system update service) only the
@@ -267,41 +269,31 @@ root_install() {
     list_has "$SYS_CONF/catalogs.list" "$DEFAULT_CATALOG" || echo "$DEFAULT_CATALOG" >> "$SYS_CONF/catalogs.list"
     register_self "$SYS_CONF/apps.list" "$SYS_DATA/repos"
 
+    # kiwi <= 1.8 ran a root timer. System halves are updated from the USER
+    # timer through the wrapper now, so remove it wherever it is still around.
+    systemctl disable --now kiwi-updater-system.timer 2>/dev/null || true
+    rm -f "$SYS_UNIT_DIR/kiwi-updater-system.service" "$SYS_UNIT_DIR/kiwi-updater-system.timer"
+    systemctl daemon-reload 2>/dev/null || true
+
     if [[ $mode == manual ]]; then
-        # Nothing of kiwi's runs as root unless an admin types a password:
-        # no wrapper, no polkit rule, no timer. Remove them if a previous auto
-        # install left them, so switching modes is one command.
-        systemctl disable --now kiwi-updater-system.timer 2>/dev/null || true
-        rm -f /usr/local/libexec/kiwi-system-update \
-              /etc/polkit-1/rules.d/50-kiwi-updater.rules \
-              "$SYS_UNIT_DIR/kiwi-updater-system.service" "$SYS_UNIT_DIR/kiwi-updater-system.timer"
-        systemctl daemon-reload 2>/dev/null || true
+        # Nothing of kiwi's runs as root unless an admin types a password: no
+        # wrapper, no polkit rule. Remove them if a previous auto install left
+        # them, so switching modes is one command.
+        rm -f /usr/local/libexec/kiwi-system-update /etc/polkit-1/rules.d/50-kiwi-updater.rules
         systemctl reload polkit 2>/dev/null || true
-        say "manual mode: system halves update when you ask, with a password — no root timer"
+        say "manual mode: every system change asks for a password; the timer leaves system halves for your next 'kiwi update'"
         return 0
     fi
 
-    # fixed-purpose wrapper for passwordless GUI/CLI system updates
+    # The fixed-purpose wrapper plus the polkit rule that lets active and
+    # background wheel sessions run it without a password. That is the whole
+    # auto-update path for system halves. (/etc/polkit-1/rules.d is writable
+    # on ostree systems.)
     install -Dm755 "$SRC/data/kiwi-system-update" /usr/local/libexec/kiwi-system-update
-    # wheel users may run the system-update wrapper without a password
-    # (/etc/polkit-1/rules.d is writable on ostree systems)
     install -Dm644 "$SRC/data/polkit/50-kiwi-updater.rules" \
         /etc/polkit-1/rules.d/50-kiwi-updater.rules
     systemctl reload polkit 2>/dev/null || systemctl restart polkit 2>/dev/null || true
-
-    # Timer last: `enable --now` can fire the service immediately, and it used
-    # to start `kiwi update --all --system` before the system list or the root
-    # clone of kiwi existed.
-    say "installing system update service"
-    install -Dm644 "$SRC/data/systemd/kiwi-updater-system.service" "$SYS_UNIT_DIR/kiwi-updater-system.service"
-    install -Dm644 "$SRC/data/systemd/kiwi-updater-system.timer"   "$SYS_UNIT_DIR/kiwi-updater-system.timer"
-    # A container or an image build has no running systemd, and that must not
-    # abandon the system scope half-installed.
-    if ! { systemctl daemon-reload &&
-           systemctl enable --now kiwi-updater-system.timer; } 2>/dev/null; then
-        say "no running systemd — the system update timer is NOT enabled"
-        say "  enable it later with: systemctl enable --now kiwi-updater-system.timer"
-    fi
+    say "system halves update from your own timer, without a password"
 }
 
 root_update() { root_install; }

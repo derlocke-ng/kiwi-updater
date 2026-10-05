@@ -20,6 +20,9 @@
 // both so the rule fires on ostree and on normal Fedora. subject.local is
 // deliberately NOT required: VM and remote desktop sessions may report
 // non-local, and active + wheel is the intended audience.
+// Verified: polkit grants this to a wheel user's systemd --user service as well
+// (subject.active holds for it on Fedora/Bluefin), which is what lets the USER
+// update timer reach the system halves. There is no root timer.
 polkit.addRule(function(action, subject) {
     if (!(subject.isInGroup("wheel") && subject.active))
         return;

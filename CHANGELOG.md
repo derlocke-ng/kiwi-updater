@@ -3,6 +3,43 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 2.0.0 — 2026-10-05
+
+Simpler, by removing things. The goal restated: a userspace app manager that
+installs root parts with a password, auto-updates them securely from
+userspace, and can run password-only if you prefer.
+
+### Removed — the root timer
+
+System halves are now updated by **your** timer: `kiwi update --all` updates
+user halves directly and system halves through the passwordless wrapper —
+which polkit grants to wheel users from a user service too, verified on
+Bluefin — and kiwi's own root-owned copy is just another system half. That
+removes the root timer, its units, the whole class of "the root copy never
+updated itself / drifted / showed a stuck update" bugs that came from two
+updaters, and most of what `manual` mode had to switch off. Existing installs
+lose the old root timer on their next self-update; `kiwi doctor` flags one
+that is still enabled.
+
+### Changed — installing a root part asks for one password and nothing else
+
+- `kiwi install kiwi-killswitch` on a machine without the system scope sets it
+  up on the spot (one password) and installs. It no longer refuses.
+- If root does not know the app's URL yet, the authenticated install hands it
+  over (`--from`) and root records it in its list — an admin typing a password
+  for "install this repo as root" is exactly the decision that list exists to
+  record. No more "register it for root first". Passwordless updates still
+  touch only what the root list names.
+- `--with-system=manual` now means one thing: no polkit rule. Every system
+  change asks for a password — sudo in a terminal, a dialog in the GUI — and
+  the timer leaves system halves for your next interactive update instead of
+  prompting at 3am (`KIWI_UNATTENDED=1` in the unit; never prompt from there).
+
+### Why 2.0
+
+The user unit's `ExecStart` changed (`--all` without `--user`), the root units
+are gone, and the install refusal that scripts might have relied on is gone.
+
 ## 1.8.0 — 2026-10-05
 
 ### Added — a system scope without the auto-updater

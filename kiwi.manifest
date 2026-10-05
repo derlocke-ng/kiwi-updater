@@ -1,7 +1,7 @@
 # kiwi.manifest — app metadata for the kiwi updater (this file *is* the convention)
 NAME=kiwi-updater
 DESCRIPTION=Install and update open-source apps from git catalogs (CLI + GTK4 GUI)
-VERSION=1.8.0
+VERSION=2.0.0
 COMPONENTS=cli gui
 CATEGORY=System
 TAGS=updater installer catalog apps

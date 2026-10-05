@@ -21,20 +21,11 @@ send a pull request to.
 
 ## Install
 
-**Recommended on a desktop** — the user scope plus the root-owned system
-scope, one password prompt:
+**Recommended** — the user scope plus the root-owned system scope, one
+password prompt:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system
-```
-
-**Manual system scope** — the same root-owned copy and lists, but **no root
-timer, no polkit rule, no passwordless anything**. Every change to the system
-scope asks for your password, and nothing of kiwi's runs as root unattended;
-the price is that root halves update only when you ask:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system=manual
 ```
 
 **Minimal** — 100 % user-level: `~/.local`, no root, no password, ever:
@@ -43,17 +34,13 @@ curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-k
 curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash
 ```
 
-The two system variants are one command apart in either direction
-(`--with-system=auto` switches a manual machine back; a plain `--with-system`
-keeps whichever mode the machine already has, so a re-run never flips a
-deliberate choice), and `kiwi doctor` and `kiwi version` say which one a
-machine is in. Which one you need depends on the apps. Anything that is only files in your
-home — the CLI tools, ensconce — is complete on the minimal install. An app
-with a **root half** is not: kiwi-killswitch is a root firewall daemon plus a
-desktop part, and without the system scope `kiwi install kiwi-killswitch` puts
-in the desktop part, refuses the daemon, and tells you why. It is also the
-system scope's own timer that keeps a root half updated afterwards. Adding the
-scope later is the same `--with-system` command; nothing gets reinstalled.
+Anything that is only files in your home — the CLI tools, ensconce — is
+complete on the minimal install. An app with a **root half** (kiwi-killswitch:
+a root firewall daemon plus a desktop part) needs the system scope; if it is
+not there yet, `kiwi install kiwi-killswitch` sets it up on the spot with one
+password. Prefer to type a password for *every* system change instead of
+granting passwordless updates? `--with-system=manual` installs the same thing
+without the polkit rule; one command switches either way.
 
 Then register a catalog:
 
@@ -252,7 +239,7 @@ shape stops looking strange.
 | **rpm/dnf, apt** | none — everything is system-wide | always | `/usr/bin/dnf`, root-owned because the distro shipped it |
 | **flatpak** | `--user` → `~/.local/share/flatpak` | `--system` → `/var/lib/flatpak` | `flatpak-system-helper`, a root daemon that polkit authorises per request |
 | **brew** | `/home/linuxbrew/.linuxbrew`, owned by *you*; brew refuses to run as root | none | nothing — a formula that needs a root service tells you to do that part yourself |
-| **kiwi** | user scope → `~/.local` | system scope → `/var/lib` + `/usr/local` | the root-owned copy of kiwi, run by its timer, or through the polkit-gated wrapper |
+| **kiwi** | user scope → `~/.local` | system scope → `/var/lib` + `/usr/local` | the root-owned copy of kiwi, reached only through the polkit-gated wrapper or sudo |
 
 So the *shape* is flatpak's: a user installation needing no root, plus an
 optional system installation guarded by polkit and a root-owned helper. What
@@ -272,7 +259,8 @@ brew — never touch the system — which is exactly the minimal install above,
 and which cannot install a kill switch.
 
 The split has real costs, and kiwi carries tooling for each: the copies can
-drift (`kiwi version` shows both, `kiwi doctor` and `kiwi update` warn),
+drift (`kiwi version` shows both, `kiwi doctor` warns, and your timer updates
+the root copy like any other system half),
 kiwi manages itself in both scopes at once (each scope follows its own list
 entry, so a pin on one half never silently holds or blocks the other), and
 the one bootstrap exception — `install --with-system` running a user-writable
@@ -281,26 +269,19 @@ there yet to do it instead.
 
 ## Background updates
 
-| unit | scope | what |
-|---|---|---|
-| `kiwi-updater.timer` (user) | user | `kiwi update --all --user` every 6 h + a notification |
-| `kiwi-updater-system.timer` (opt-in, `auto` mode only) | root | `kiwi update --all --system` every 6 h, and self-updates the root copy. `manual` mode has no root timer at all. |
-
-> **Upgrading from 1.2.1 or earlier with the system scope installed:** the root
-> copy could not update itself before 1.3.0, so it cannot pick this release up
-> on its own. Re-run the bootstrap once:
-> ```bash
-> curl -fsSL .../get-kiwi.sh | bash -s -- --with-system
-> ```
-> `kiwi version` shows both copies, and `kiwi update` warns while they differ.
-> Installs without the system scope need nothing.
+One timer, yours: `kiwi-updater.timer` runs `kiwi update --all` every six
+hours as you. User halves it updates directly; system halves — kiwi's own
+root-owned copy included — go through the passwordless helper. There is no
+root timer: nothing of kiwi's runs as root except on behalf of your update.
+In `manual` mode the timer leaves system halves for your next interactive
+`kiwi update`, where you type the password.
 
 ### Root, and when you are asked for a password
 
 | | needs root | asks for a password |
 |---|---|---|
 | anything in the user scope | no | no |
-| **updating** a system app | yes | **no** — polkit authorises one fixed-purpose helper for active `wheel` sessions (in `manual` mode: yes, always) |
+| **updating** a system app | yes | **no** — your own update timer does it through one fixed-purpose helper that polkit grants to `wheel` users (with `--with-system=manual`: yes, every time) |
 | **installing** a system app | yes | yes |
 | **uninstalling** a system app | yes | yes |
 

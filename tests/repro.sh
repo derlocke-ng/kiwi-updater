@@ -257,8 +257,12 @@ t_F16() { # do not ask for a password and then say "unknown app"
     install -Dm755 $K /usr/local/bin/kiwi
     : > $ESC
     ku install rootsvc >/dev/null 2>&1
-    f() { ! grep -q 'install --system' $ESC; }
-    check F16 "no escalation for a system app that root cannot resolve" f
+    # 2.0: an install is always authenticated, so instead of refusing, the URL
+    # the user was shown goes along (--from) and root records it. What must
+    # NOT happen is an escalation by name alone, which is the "password, then
+    # unknown app" the finding was about.
+    f() { grep -q -- "install --system.*--from $GITROOT/a/rootsvc.git" $ESC; }
+    check F16 "a system app root cannot resolve is handed over by URL, not by name alone" f
 }
 
 t_F17() { # installing without a systemd user session must still finish
@@ -662,12 +666,18 @@ t_P20() { # an unusable list entry is reported WITH the file it sits in
 
 t_P22() { # on a user-only machine a dual-scope app installs its user half and says what the root half needs
     mkapp a halfapp "user system" 'echo "scope=$KIWI_SCOPE"'
+    # the bootstrap runs from kiwi's own checkout in the user's repos dir,
+    # which a real install always has and the harness has to provide
+    mkdir -p $TH/.local/share/kiwi-updater/repos && cp -r $W $TH/.local/share/kiwi-updater/repos/kiwi-updater
+    chown -R $T $TH/.local
     ku add $GITROOT/a/halfapp.git >/dev/null
     : > $ESC
     local out rc; out="$(ku install halfapp 2>&1)"; rc=$?
-    f() { [[ $rc -ne 0 && -f $(urepo halfapp)/.kiwi-installed && ! -s $ESC ]] &&
-          grep -q -- '--with-system' <<<"$out" && grep -q 'no system scope yet' <<<"$out"; }
-    check P22 "user half installs, root half refused with the --with-system advice, no password asked" f
+    # 2.0: the system scope is set up on the spot (one password prompt; the
+    # harness's pkexec stub refuses it, so the root half is left, rc != 0).
+    f() { [[ $rc -ne 0 && -f $(urepo halfapp)/.kiwi-installed ]] &&
+          grep -q 'install.sh install --with-system' $ESC && grep -q 'root half' <<<"$out"; }
+    check P22 "user half installs; the system scope bootstrap is offered with one password" f
 }
 
 t_P23() { # --with-system=manual: root-owned kiwi and lists, nothing that runs as root unattended
@@ -681,28 +691,55 @@ t_P23() { # --with-system=manual: root-owned kiwi and lists, nothing that runs a
              /etc/systemd/system/kiwi-updater-system.timer /etc/systemd/system/kiwi-updater-system.service; do
         [[ -e $f ]] && stray=$((stray+1))
     done
+    # an old root timer (kiwi <= 1.8) must be cleaned up by any mode
+    mkdir -p /etc/systemd/system; touch /etc/systemd/system/kiwi-updater-system.timer
+    rootphase --with-system=manual
+    [[ -e /etc/systemd/system/kiwi-updater-system.timer ]] && stray=$((stray+10))
     local doc; doc="$(ku doctor 2>&1)"
     # (the USER timer line always complains under the systemctl stub — only the
     # system-timer complaint is the one manual mode must not raise)
     f() { [[ $have_kiwi -eq 1 && $have_mode == manual && $stray -eq 0 ]] &&
-          grep -q 'manual mode' <<<"$doc" && ! grep -q 'system scope is installed but its timer' <<<"$doc"; }
-    check P23 "manual mode installs root kiwi + lists and no wrapper/polkit/timer (mode=$have_mode stray=$stray)" f
+          grep -q 'manual mode' <<<"$doc" && ! grep -q 'wrapper is missing' <<<"$doc"; }
+    check P23 "manual mode installs root kiwi + lists and no wrapper/polkit; an old root timer is removed (mode=$have_mode stray=$stray)" f
     # P24: the modes are one command apart, in both directions
     # plain --with-system KEEPS the recorded mode (a re-run must never flip a
     # deliberate manual choice back to passwordless); =auto is the switch
-    rootphase --with-system=auto       # back to auto: the three appear
-    local up=0; for f in /usr/local/libexec/kiwi-system-update /etc/polkit-1/rules.d/50-kiwi-updater.rules \
-                         /etc/systemd/system/kiwi-updater-system.timer; do [[ -e $f ]] && up=$((up+1)); done
+    rootphase --with-system=auto       # back to auto: wrapper + rule appear, still no timer
+    local up=0; for f in /usr/local/libexec/kiwi-system-update /etc/polkit-1/rules.d/50-kiwi-updater.rules; do
+        [[ -e $f ]] && up=$((up+1)); done
+    [[ -e /etc/systemd/system/kiwi-updater-system.timer ]] && up=$((up+10))
     local m1; m1="$(cat /etc/kiwi-updater/mode)"
     rootphase --with-system=manual     # and vanish again
-    local down=0; for f in /usr/local/libexec/kiwi-system-update /etc/polkit-1/rules.d/50-kiwi-updater.rules \
-                           /etc/systemd/system/kiwi-updater-system.timer; do [[ -e $f ]] && down=$((down+1)); done
-    f24() { [[ $up -eq 3 && $m1 == auto && $down -eq 0 && "$(cat /etc/kiwi-updater/mode)" == manual ]]; }
-    check P24 "switching auto<->manual adds and removes wrapper, polkit rule and timer (auto=$up/3, manual again=$down/3)" f24
+    local down=0; for f in /usr/local/libexec/kiwi-system-update /etc/polkit-1/rules.d/50-kiwi-updater.rules; do
+        [[ -e $f ]] && down=$((down+1)); done
+    f24() { [[ $up -eq 2 && $m1 == auto && $down -eq 0 && "$(cat /etc/kiwi-updater/mode)" == manual ]]; }
+    check P24 "switching auto<->manual adds and removes wrapper + polkit rule, never a root timer (auto=$up/2, manual again=$down/2)" f24
+}
+
+t_P25() { # the USER timer updates system halves through the wrapper; unattended it never prompts
+    mkapp a both "user system"
+    mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos /usr/local/libexec
+    install -Dm755 $K /usr/local/bin/kiwi
+    printf '#!/bin/sh\necho "WRAPPER $*" >> %s\nexit 0\n' "$ESC" > /usr/local/libexec/kiwi-system-update
+    chmod +x /usr/local/libexec/kiwi-system-update
+    echo "$GITROOT/a/both.git" > /etc/kiwi-updater/apps.list
+    ku add $GITROOT/a/both.git >/dev/null
+    ku install both --user >/dev/null 2>&1; kr install --system both >/dev/null 2>&1
+    release a both v1.1.0
+    : > $ESC
+    KENV="KIWI_UNATTENDED=1" ku update --all >/dev/null 2>&1; local rc1=$?
+    local via; via="$(cat $ESC)"
+    f() { [[ $rc1 -eq 0 ]] && grep -q 'kiwi-system-update' <<<"$via" && grep -q both <<<"$via"; }
+    check P25 "unattended 'update --all' reaches the system half through the wrapper (rc=$rc1)" f
+    # P26: manual mode (no wrapper): unattended must skip, not prompt, not fail
+    rm -f /usr/local/libexec/kiwi-system-update; : > $ESC
+    KENV="KIWI_UNATTENDED=1" ku update --all >/dev/null 2>&1; local rc2=$?
+    f26() { [[ $rc2 -eq 0 && ! -s $ESC ]]; }
+    check P26 "unattended without the wrapper: system half skipped, nothing escalated, exit 0 (rc=$rc2)" f26
 }
 
 for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
-         P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P17 P18 P19 P20 P22 P23; do run $t; done
+         P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P17 P18 P19 P20 P22 P23 P25; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

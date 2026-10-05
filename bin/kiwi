@@ -10,7 +10,7 @@
 #   system — listed in /etc/kiwi-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-KIWI_VERSION=1.8.0
+KIWI_VERSION=2.0.0
 
 # systemd system services start without $HOME (set -u would abort at the
 # path definitions below) — root's user-scope paths are never used anyway
@@ -37,9 +37,10 @@ checkout is missing. Set it up with:
     # >&2, all of it: this function's stdout IS the program path the caller
     # runs. Three info lines on stdout meant the caller executed
     # `sudo ":: This needs a root-owned copy…"` with the path tacked on the end.
-    info "This needs a root-owned copy of kiwi: root must never execute a file" >&2
-    info "you can write, or anything running as you could edit it and become" >&2
-    info "root on the next update. Installing it now — one password prompt." >&2
+    info "This app has a root half, so this machine needs the system scope: a" >&2
+    info "root-owned copy of kiwi (root must never execute a file you can write)" >&2
+    info "and the helper that lets your updates reach it. Setting it up now —" >&2
+    info "one password prompt." >&2
     as_root bash "$repo/install.sh" install --with-system >&2 9>&- ||
         die "could not set up the system scope"
     [[ -x $ROOT_KIWI ]] || die "the system scope did not install ($ROOT_KIWI is still missing)"
@@ -79,10 +80,10 @@ root_skew_advice() { # root_version
         printf '%s\n' "  a copy from 1.2.1 or older cannot update itself. Re-run the bootstrap once:" \
             "    curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system"
     elif [[ $(system_mode) == manual ]]; then
-        printf '%s\n' "  the system scope is in manual mode, so nothing updates it unasked. To do it (password):" \
+        printf '%s\n' "  manual mode, so nothing updates it unasked. To do it (asks for your password):" \
             "    kiwi update --system kiwi-updater"
     else
-        printf '%s\n' "  its own timer picks this up within six hours; to do it now (no password):" \
+        printf '%s\n' "  your update timer does this on its next run; to do it now (no password):" \
             "    kiwi update --system kiwi-updater"
     fi
 }
@@ -1195,7 +1196,7 @@ dry_run_plan() { # verb
 }
 
 dispatch() { # verb extra_flag
-    local verb="$1" i had_user=0 sys_names=() rc_pre=0
+    local verb="$1" i had_user=0 sys_names=() rc_pre=0 from_urls=()
     for i in "${!T_URL[@]}"; do
         [[ ${T_SCOPE[$i]} == user ]] && had_user=1
         [[ ${T_SCOPE[$i]} == system && $EUID -ne 0 ]] || continue
@@ -1212,24 +1213,14 @@ dispatch() { # verb extra_flag
         # resolves it again from root-owned lists only, so for an app that only
         # a user-level catalog lists, the user authenticated and root answered
         # "unknown app". Root refusing is right — asking first was the bug.
+        # Root knows only its own lists. For an install — always authenticated
+        # — pass the URL the user was shown along, and root records it (see the
+        # install case in main). The old behaviour refused here and sent people
+        # to `kiwi catalog add --system` first; and when no system scope existed
+        # at all it refused too, where root_kiwi below sets one up with one
+        # password. Both were the opposite of "install root parts with ease".
         if [[ $verb == install ]] && ! root_knows "${T_URL[$i]}"; then
-            if [[ ! -x $ROOT_KIWI ]]; then
-                # The common case is simpler than "no root-owned list names it":
-                # there is no system scope on this machine at all. Say that, and
-                # say what the user half on its own is worth.
-                warn "$(app_name system "${T_URL[$i]}") has a root half, and this machine has no system scope yet."
-                warn "  the user half installs now; the root half cannot until the system scope exists."
-                warn "  set it up once (one password prompt), then install again:"
-                warn "    curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system"
-                warn "  or, if nothing of kiwi's should ever run as root unattended, --with-system=manual"
-                rc_pre=1; continue
-            fi
-            warn "$(app_name system "${T_URL[$i]}") needs the system scope, but no root-owned list names it."
-            warn "  root installs only what a root-owned list names, so your password"
-            warn "  could not have helped here. Register it for root first, with one of:"
-            warn "    kiwi catalog add --system <catalog-url>"
-            warn "    kiwi add --system ${T_URL[$i]}"
-            rc_pre=1; continue
+            from_urls+=("${T_URL[$i]}")
         fi
         sys_names+=("$(app_name system "${T_URL[$i]}")")
     done
@@ -1287,6 +1278,14 @@ dispatch() { # verb extra_flag
         fi
     fi
 
+    if [[ ${#sys_names[@]} -gt 0 && ${KIWI_UNATTENDED:-0} == 1 ]]; then
+        # The background timer: never prompt, never hang on a dialog nobody is
+        # there to answer. Without the passwordless wrapper (manual mode, or it
+        # failed) the system halves simply wait for the next interactive update.
+        log "${c_dim}system half of ${sys_names[*]} needs a password — left for your next 'kiwi update'${c_off}"
+        sys_names=()
+    fi
+
     if [[ ${#sys_names[@]} -gt 0 ]]; then
         # Say what root is for before asking for it. "Needs your password" with
         # no reason is how people learn to type it without reading.
@@ -1302,6 +1301,7 @@ dispatch() { # verb extra_flag
         # copy, and inside $(...) that exit leaves only the subshell — the
         # caller went on to run `pkexec "" update --system …`.
         local rk; rk="$(root_kiwi)" || return 1
+        local u; for u in ${from_urls[@]+"${from_urls[@]}"}; do extra+=(--from "$u"); done
         as_root "$rk" "$verb" --system "${sys_names[@]}" "${extra[@]+"${extra[@]}"}" 9>&- || rc=1
     fi
 
@@ -1946,19 +1946,27 @@ $(root_skew_advice "$have")"
             fi
         fi
         if [[ -x $ROOT_KIWI ]]; then
+            # System halves are updated from the USER timer through the
+            # passwordless wrapper; there is no root timer any more. The
+            # wrapper is world-executable, so its presence can be checked from
+            # here (the polkit rule itself lives in a root-only directory).
+            local wrap=/usr/local/libexec/kiwi-system-update
             if [[ $(system_mode) == manual ]]; then
-                # no timer by design; a running one would be the surprise
-                if [[ "$(systemctl is-enabled kiwi-updater-system.timer 2>/dev/null || true)" == enabled ]]; then
-                    _bad "the system scope is in manual mode but its timer is enabled — one of the two is wrong.
-  sudo systemctl disable --now kiwi-updater-system.timer   (or re-run the bootstrap with --with-system)"
+                if [[ -x $wrap ]]; then
+                    _bad "manual mode, but the passwordless wrapper is still installed.
+  re-run:  install.sh install --with-system=manual"
                 else
-                    _good "system scope in manual mode: no root timer, system halves update when you ask (password)"
+                    _good "manual mode: every system change asks for a password; the timer leaves system halves for your next 'kiwi update'"
                 fi
-            elif [[ "$(systemctl is-enabled kiwi-updater-system.timer 2>/dev/null || true)" == enabled ]]; then
-                _good "system timer is enabled"
+            elif [[ -x $wrap ]]; then
+                _good "system halves update from your timer through the passwordless wrapper"
             else
-                _bad "the system scope is installed but its timer is not enabled.
-  sudo systemctl enable --now kiwi-updater-system.timer"
+                _bad "the system scope is installed but the update wrapper is missing.
+  re-run the bootstrap:  get-kiwi.sh --with-system"
+            fi
+            if [[ "$(systemctl is-enabled kiwi-updater-system.timer 2>/dev/null || true)" == enabled ]]; then
+                _bad "the old root timer from kiwi <= 1.8 is still enabled; the next self-update removes it, or:
+  sudo systemctl disable --now kiwi-updater-system.timer"
             fi
         fi
     fi
@@ -2153,6 +2161,7 @@ PURGE=0
 PORCELAIN=0
 DRY_RUN=0
 GUI_CHOICE=""      # ""=auto/keep, 0=cli-only, 1=with-gui (install/update)
+FROM_URLS=()       # install --from <url>: root records the URL it is installing
 ARGS=()
 CMD=""
 
@@ -2178,6 +2187,7 @@ while [[ $# -gt 0 ]]; do
         --cli-only|--no-gui) GUI_CHOICE=0 ;;
         --gui|--with-gui)    GUI_CHOICE=1 ;;
         --version)  [[ -z $CMD ]] || die "unknown option: $1"; CMD=version ;;
+        --from)     [[ -n ${2:-} ]] || die "--from needs a git url"; FROM_URLS+=("$2"); shift ;;
         -h|--help)  [[ -z $CMD ]] || die "unknown option: $1"; CMD=help ;;
         # read by a subcommand rather than here
         --all|--check|--no-sync|--installer) ARGS+=("$1") ;;
@@ -2214,6 +2224,20 @@ case "$CMD" in
     # still means "everything already installed", which is a safe default.
     install)     [[ ${#ARGS[@]} -gt 0 ]] ||
                      die "usage: kiwi install <app>... | --all   (--all installs every listed app)"
+                 # Root resolves names against its OWN lists. An install is
+                 # always authenticated, so when the user side hands over the
+                 # URL it showed the user (--from), root records it first: an
+                 # admin typing a password for "install this repo as root" is
+                 # exactly the decision the root list exists to record.
+                 # Passwordless updates later still touch only what it names.
+                 if [[ $EUID -eq 0 && ${#FROM_URLS[@]} -gt 0 ]]; then
+                     mkdir -p "$(dirname "$SYS_LIST")"; touch "$SYS_LIST"
+                     for from_url in "${FROM_URLS[@]}"; do
+                         valid_url "$from_url" || die "not a usable git url: '$from_url'"
+                         list_has "$SYS_LIST" "$from_url" ||
+                             { echo "$from_url" >> "$SYS_LIST"; info "registered $from_url for root"; }
+                     done
+                 fi
                  sync_catalogs; collect_targets "${ARGS[@]}"; dispatch install ;;
     update)      sync_catalogs; collect_targets "${ARGS[@]:---all}"; dispatch update ;;
     uninstall)   [[ ${#ARGS[@]} -gt 0 ]] || die "usage: kiwi uninstall <name...>"

@@ -81,6 +81,9 @@ CATEGORY_ICON = {
 COMPONENT_ICON = (
     ("gnome-extension", ["extension-symbolic", "application-x-addon",
                          "extension", "preferences-desktop-theme"]),
+    # a plugin for another app (kiwi-fox's provider modules)
+    ("module",          ["application-x-addon-symbolic", "application-x-addon",
+                         "extension-symbolic", "extension"]),
     ("daemon",          ["emblem-system-symbolic", "applications-system", "system-run"]),
     ("service",         ["emblem-system-symbolic", "applications-system", "system-run"]),
     ("gui",             ["application-x-executable-symbolic", "application-x-executable"]),
@@ -844,17 +847,28 @@ class DetailDialog(Adw.Dialog):
         deps = info.get("depends", "").split()
         if deps:
             missing = set(info.get("depends_missing", "").split())
-            g = Adw.PreferencesGroup(
-                title="Needs",
-                description=("Something is missing — the installer may fail"
-                             if missing else "All present on this machine"))
+            # kiwi apps an install brings in first (kiwi-fox for its plugins)
+            # are not missing: saying so warned that a plugin's installer
+            # "may fail" over the very app kiwi was about to install for it
+            installs = set(info.get("depends_installs", "").split())
+            if missing:
+                desc = "Something is missing — the installer may fail"
+            elif installs:
+                desc = "Installing this also installs %s" % ", ".join(sorted(installs))
+            else:
+                desc = "All present on this machine"
+            g = Adw.PreferencesGroup(title="Needs", description=esc(desc))
             for d in deps:
                 r = Adw.ActionRow(title=esc(d))
-                ok = d not in missing
-                img = Gtk.Image(icon_name=ui_icon("object-select-symbolic", "object-select", "emblem-ok") if ok
-                                else ui_icon("dialog-warning-symbolic", "dialog-warning"))
-                img.add_css_class("kiwi-dep-ok" if ok else "kiwi-dep-bad")
-                r.add_suffix(img)
+                if d in installs:
+                    r.set_subtitle("a kiwi app — installed first, with this one")
+                    r.add_suffix(pill("INSTALLED WITH IT", "upd"))
+                else:
+                    ok = d not in missing
+                    img = Gtk.Image(icon_name=ui_icon("object-select-symbolic", "object-select", "emblem-ok") if ok
+                                    else ui_icon("dialog-warning-symbolic", "dialog-warning"))
+                    img.add_css_class("kiwi-dep-ok" if ok else "kiwi-dep-bad")
+                    r.add_suffix(img)
                 g.add(r)
             self.box.append(g)
 

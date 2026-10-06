@@ -10,7 +10,7 @@
 #   system — listed in /etc/kiwi-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-KIWI_VERSION=2.0.0
+KIWI_VERSION=2.1.0
 
 # systemd system services start without $HOME (set -u would abort at the
 # path definitions below) — root's user-scope paths are never used anyway
@@ -276,7 +276,14 @@ sync_catalogs() {
 # where we clone purely to READ a manifest (never to execute a system install)
 meta_dir() { [[ $EUID -eq 0 ]] && echo "$SYS_REPOS" || echo "$USER_REPOS"; }
 
-# every entry we know about, in precedence order and NOT deduped
+# every entry we know about, in precedence order and NOT deduped:
+# "source<TAB>url<TAB>opts", source being the list file it came from.
+#
+# opts goes LAST because it may be empty, and in `IFS=$'\t' read` a tab is IFS
+# whitespace: two tabs in a row collapse into one separator. With opts in the
+# middle, a catalog entry without options read back as opts=<the catalog's
+# path> and source="" — so from 1.7.1 every catalog app carried its catalog's
+# file name as its "options", and anything keyed on the source saw nothing.
 app_entries_raw() {
     local f url opts c lists=("$USER_LIST" "$SYS_LIST")
     # as root there is no user scope: never resolve an app name from a list the
@@ -293,7 +300,7 @@ app_entries_raw() {
             # a catalog — app_scopes lets a local scope= filter overrule the
             # manifest, and a catalog must not get that power
             opts="${opts:-} local=1"
-            printf '%s\t%s\t%s\n' "$url" "${opts:-}" "$f"
+            printf '%s\t%s\t%s\n' "$f" "$url" "${opts:-}"
         done < <(grep -Ev '^[[:space:]]*(#|$)' "$f" 2>/dev/null || true)
     done
     for c in "$(catalogs_dir)"/*/; do
@@ -301,7 +308,7 @@ app_entries_raw() {
         list_trusted "${c}apps.list" || continue
         while read -r url opts; do
             [[ -z ${url:-} ]] && continue
-            printf '%s\t%s\t%s\n' "$url" "${opts:-}" "${c}apps.list"
+            printf '%s\t%s\t%s\n' "${c}apps.list" "$url" "${opts:-}"
         done < <(grep -Ev '^[[:space:]]*(#|$)' "${c}apps.list" 2>/dev/null || true)
     done
 }
@@ -310,7 +317,7 @@ app_entries_raw() {
 # "url<TAB>opts". A list on this machine wins over a catalog.
 app_entries() {
     local url opts d seen=" " _src
-    while IFS=$'\t' read -r url opts _src; do
+    while IFS=$'\t' read -r _src url opts; do
         [[ -z $url ]] && continue
         valid_url "$url" || continue     # reported once by check_lists
         d="$(dir_name "$url")"
@@ -326,7 +333,7 @@ app_entries() {
 check_lists() {
     local -A first_url=() reported=()
     local url opts d u src
-    while IFS=$'\t' read -r url opts src; do
+    while IFS=$'\t' read -r src url opts; do
         [[ -z $url ]] && continue
         if ! valid_url "$url"; then
             # Name the file. "ignoring an unusable entry" with no location sent
@@ -942,6 +949,30 @@ effective_gui() { # repo_dir
     gui_available
 }
 
+# The PATH an installer of <scope> runs with — and the one its DEPENDS are
+# checked against, so kiwi never warns about a tool the installer will find,
+# nor keeps quiet about one it will not.
+#
+# It cannot simply be inherited, because the routes into an installer differ.
+# pkexec — the passwordless updates, and the GUI asking for root — gives root
+# /usr/sbin:/usr/bin:/sbin:/bin:/root/bin, with no /usr/local/bin; Fedora's
+# sudo secure_path does include it; and a systemd --user manager has
+# ~/.local/bin only when the desktop session imported it, which a headless or
+# lingering one does not. So an installer that called the tool it had just
+# installed by name worked from a terminal and failed on the passwordless
+# route: kiwi-killswitch 0.2.0 waited ten seconds and reported "the daemon is
+# not answering" while the daemon was up the whole time.
+installer_path() { # scope
+    local prefix; prefix="$(prefix_for "$1")"
+    if [[ $1 == system ]]; then
+        # fixed rather than inherited: root runs what this names, not whatever
+        # a caller's PATH happened to point at
+        echo "$prefix/bin:$prefix/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
+    else
+        echo "$prefix/bin:${PATH:-/usr/bin:/bin}"
+    fi
+}
+
 run_installer() { # scope repo_dir action [purge]
     local scope="$1" dir="$2" action="$3" purge="${4:-0}"
     local inst; inst="$(manifest_get "$dir" INSTALLER install.sh)"
@@ -958,6 +989,7 @@ run_installer() { # scope repo_dir action [purge]
     local args=("$action")
     [[ $action == uninstall ]] && (( purge )) && args+=(--purge)
     info "running $inst ${args[*]} ($scope scope, $([[ $gui == 1 ]] && echo with-gui || echo cli-only))"
+    local prefix; prefix="$(prefix_for "$scope")"
     # kiwi's own no-credentials policy is in the environment now, so it would
     # otherwise be inherited by the app's installer and break one that
     # legitimately clones something of its own.
@@ -967,9 +999,10 @@ run_installer() { # scope repo_dir action [purge]
           KIWI_SCOPE="$scope" \
           KIWI_ACTION="$action" \
           KIWI_APP_DIR="$dir" \
-          KIWI_PREFIX="$(prefix_for "$scope")" \
+          KIWI_PREFIX="$prefix" \
           KIWI_GUI="$gui" \
           KIWI_PURGE="$purge" \
+          PATH="$(installer_path "$scope")" \
           bash "./$inst" "${args[@]}" 9>&- )
 }
 
@@ -1041,9 +1074,11 @@ install_one() { # scope url opts
     deps="$(manifest_get "$dir" DEPENDS "")"
     if [[ -n $deps ]]; then
         # A dependency that is itself a kiwi app (a provider module needs
-        # kiwi-fox) is installed first; what comes back is the plain system
-        # binaries that are still missing, which we can only warn about.
-        miss="$(ensure_deps "$scope" "$url" "$deps")"
+        # kiwi-fox) is installed first, in this process; what is left in
+        # DEPS_MISSING is commands no kiwi app provides, which we can only
+        # warn about.
+        ensure_deps "$scope" "$url" "$deps"
+        miss="${DEPS_MISSING[*]:-}"
         [[ -n $miss ]] && warn "$(app_name "$scope" "$url") needs these, and they are not here: $miss
   its installer will probably fail. Install them first if it does."
     fi
@@ -1167,7 +1202,7 @@ collect_targets() { # all|names...
 # before the lock and before any escalation, so asking "what would this do?"
 # never blocks another run and never asks for a password.
 dry_run_plan() { # verb
-    local verb="$1" i sc url opts dir mdir inst pin target tsha tref
+    local verb="$1" i sc url opts dir mdir inst pin target tsha tref dl
     row() { (( QUIET )) || printf '    %-10s %s\n' "$1" "$2"; }
     info "dry run — nothing below is actually done"
     for i in "${!T_URL[@]}"; do
@@ -1193,9 +1228,22 @@ dry_run_plan() { # verb
         fi
         row installer "$dir/$inst"
         row prefix "$(prefix_for "$sc")"
+        if [[ $verb == install ]]; then
+            plan_deps "$sc" "$url" "$(manifest_get "$mdir" DEPENDS "")"
+            for dl in ${DEP_APPS[@]+"${DEP_APPS[@]}"}; do
+                row first "installs $(dir_name "${dl%%$'\t'*}"), a kiwi app this depends on"
+            done
+            for dl in ${DEP_ELSEWHERE[@]+"${DEP_ELSEWHERE[@]}"}; do
+                row needs "$dl, in another scope — install it first: kiwi install $dl"
+            done
+            if [[ ${#DEPS_MISSING[@]} -gt 0 ]]; then row missing "${DEPS_MISSING[*]}"; fi
+        fi
         [[ $verb == uninstall ]] && row purge "$([[ ${PURGE:-0} == 1 ]] && echo yes || echo no)"
         [[ $sc == system && $EUID -ne 0 ]] && row note "needs root — would escalate"
     done
+    # explicitly: the loop's status is its last [[ ]], false for any user-scope
+    # target, and under set -e that made `install --dry-run` exit 1
+    return 0
 }
 
 dispatch() { # verb extra_flag
@@ -1548,60 +1596,118 @@ cmd_search() { # term...
     (( hits )) || { log "nothing matched '$term'"; return 1; }
 }
 
-# which of an app's declared dependencies are actually present
-deps_missing() { # "a b c" -> missing ones
-    local d out=()
+# which of an app's declared dependencies are actually present — looked up in
+# the PATH that scope's installer will get, not kiwi's own. kiwi-fox's plugins
+# declare DEPENDS=kiwi-fox, a command kiwi-fox installs into ~/.local/bin; from
+# a user manager without the desktop's environment, kiwi's own PATH reported it
+# missing on every update while the installer would have found it.
+deps_missing() { # "a b c" [scope] -> missing ones
+    local scope="${2:-}" d out=()
+    if [[ -z $scope ]]; then
+        if [[ $EUID -eq 0 ]]; then scope=system; else scope=user; fi
+    fi
     split_words "${1:-}"                     # manifest data: no globbing
-    for d in ${WORDS[@]+"${WORDS[@]}"}; do
-        command -v -- "$d" >/dev/null 2>&1 || out+=("$d")
-    done
-    echo "${out[*]:-}"
+    (   PATH="$(installer_path "$scope")"; hash -r
+        for d in ${WORDS[@]+"${WORDS[@]}"}; do
+            command -v -- "$d" >/dev/null 2>&1 || out+=("$d")
+        done
+        echo "${out[*]:-}" )
 }
 
-# Install the kiwi-app dependencies of an app before the app itself, and echo the
-# ones that are NOT kiwi apps and are still missing (system binaries such as
-# podman or git) so the caller can warn about those as before.
+# ---------------------------------------------------------------------------
+# App-level dependencies. A DEPENDS word is normally a command (podman, git)
+# that kiwi only checks for. When it is not found and names a kiwi app, that
+# app is installed first: `kiwi install kiwi-plugin-tor` brings kiwi-fox.
 #
-# A DEPENDS word is treated as a kiwi app only when it resolves to a repo in a
-# registered catalog or list (e.g. a provider module depending on kiwi-fox); a
-# word that resolves to nothing is a plain binary and is left to command -v, so
-# this never tries to "install" podman. KIWI_DEP_STACK breaks dependency cycles.
-ensure_deps() { # scope url "a b c" -> echoes still-missing non-app deps
-    local scope="$1" url="$2" deps="$3"
-    local d line dep_url dep_opts dep_dir dep_scopes sc s have miss=()
-    split_words "$deps"                      # manifest data: no globbing
-    for d in ${WORDS[@]+"${WORDS[@]}"}; do
-        command -v -- "$d" >/dev/null 2>&1 && continue
-        # Not a kiwi app we can resolve? Then it is a system binary: leave it to
-        # the caller's missing-deps warning, exactly as before.
-        line="$(resolve "$d" 2>/dev/null)" || { miss+=("$d"); continue; }
-        IFS=$'\t' read -r dep_url dep_opts <<<"$line"
-        have=0
-        for s in $(real_scopes); do
-            is_installed "$s" "$dep_url" && { have=1; break; }
-        done
-        (( have )) && continue
-        if [[ " ${KIWI_DEP_STACK:-} " == *" $dep_url "* ]]; then
-            warn "dependency cycle involving $(dir_name "$dep_url"); not installing it again"
+# Three limits, each the fix for a way this went wrong when it first shipped:
+#   - it installs in THIS process, never inside $(…), where the dependency's
+#     whole output was captured into the "missing" list and came back as a
+#     warning that the app it had just installed was "not here";
+#   - only in the dependent's own scope — anything else ran a system install
+#     unprivileged, or a user install as root into /root. For those kiwi says
+#     which command to run instead;
+#   - only from a list that also names the dependent (its own catalog) or a
+#     list on this machine. Resolved against every registered catalog, a word
+#     like secret-tool installed whatever repo of that name ANY catalog listed:
+#     code nobody chose, behind a name any hostile catalog could claim.
+# ---------------------------------------------------------------------------
+
+# every list file naming <url>: the catalogs it comes from, any local list
+entry_sources() { # url
+    local u o src want; want="$(norm_url "$1")"
+    while IFS=$'\t' read -r src u o; do
+        [[ -n $u && "$(norm_url "$u")" == "$want" ]] && printf '%s\n' "$src"
+    done < <(app_entries_raw)
+}
+
+# the kiwi app a DEPENDS word names, looked up only where that is allowed
+# (see above): "url<TAB>opts", or nothing
+dep_app() { # word dependent_url
+    local word="$1" homes u o src
+    homes="$(entry_sources "$2")"
+    [[ -n $homes ]] || return 1
+    while IFS=$'\t' read -r src u o; do
+        [[ -n $u && "$(dir_name "$u")" == "$word" ]] || continue
+        if [[ "$(entry_opt "$o" local 0)" != 1 ]] && ! grep -qxF -- "$src" <<<"$homes"; then
             continue
         fi
-        info "$(dir_name "$url") needs $(dir_name "$dep_url") — installing it first"
-        dep_dir="$(sync_meta "$dep_url" "$dep_opts")" || {
-            warn "cannot reach $dep_url to install it as a dependency"
-            miss+=("$d"); continue
-        }
-        dep_scopes="$(effective_scopes "$dep_dir" "$dep_opts" "$dep_url")"
-        # Prefer the dependent's own scope when the dependency supports it, else
-        # the dependency's first declared scope. Avoids a cross-scope escalation
-        # the user did not ask for.
-        if [[ " $dep_scopes " == *" $scope "* ]]; then sc="$scope"; else sc="${dep_scopes%% *}"; fi
-        [[ -n $sc ]] || { miss+=("$d"); continue; }
-        if ! KIWI_DEP_STACK="${KIWI_DEP_STACK:-} $dep_url" install_one "$sc" "$dep_url" "$dep_opts"; then
-            warn "dependency $(dir_name "$dep_url") did not install"
-            miss+=("$d")
+        valid_url "$u" || continue
+        printf '%s\t%s\n' "$u" "$o"; return 0
+    done < <(app_entries_raw)
+    return 1
+}
+
+# What an install would do about an app's DEPENDS, without doing it. The one
+# answer that install, --dry-run and info all report. Sets
+#   DEP_APPS       "url<TAB>opts" of kiwi apps to install first, in this scope
+#   DEP_ELSEWHERE  kiwi apps it needs that install in another scope
+#   DEPS_MISSING   commands that are missing and that no kiwi app provides
+plan_deps() { # scope url "a b c"
+    local scope="$1" url="$2" d line u o dd
+    DEP_APPS=(); DEP_ELSEWHERE=(); DEPS_MISSING=()
+    split_words "$(deps_missing "$3" "$scope")"     # looked up in the installer's PATH
+    local -a need=(${WORDS[@]+"${WORDS[@]}"})
+    for d in ${need[@]+"${need[@]}"}; do
+        if ! line="$(dep_app "$d" "$url")"; then
+            DEPS_MISSING+=("$d"); continue
+        fi
+        IFS=$'\t' read -r u o <<<"$line"
+        is_installed "$scope" "$u" && continue
+        if ! dd="$(sync_meta "$u" "$o")"; then
+            warn "cannot reach $u, which $(dir_name "$url") needs"
+            DEPS_MISSING+=("$d"); continue
+        fi
+        if [[ " $(effective_scopes "$dd" "$o" "$u") " == *" $scope "* ]]; then
+            DEP_APPS+=("$line")
+        else
+            DEP_ELSEWHERE+=("$(dir_name "$u")")
         fi
     done
-    echo "${miss[*]:-}"
+}
+
+# Install the kiwi apps <url> depends on, before <url> itself. Leaves the
+# commands still missing in DEPS_MISSING for the caller's warning.
+ensure_deps() { # scope url "a b c"
+    local scope="$1" url="$2" line u o n
+    plan_deps "$scope" "$url" "$3"
+    # copies: the installs below recurse into plan_deps and reset the globals
+    local -a apps=(${DEP_APPS[@]+"${DEP_APPS[@]}"}) other=(${DEP_ELSEWHERE[@]+"${DEP_ELSEWHERE[@]}"})
+    local -a missing=(${DEPS_MISSING[@]+"${DEPS_MISSING[@]}"})
+    for n in ${other[@]+"${other[@]}"}; do
+        warn "$(dir_name "$url") needs $n, which installs in a different scope."
+        warn "  install it first:  kiwi install $n"
+    done
+    for line in ${apps[@]+"${apps[@]}"}; do
+        IFS=$'\t' read -r u o <<<"$line"
+        if [[ " ${KIWI_DEP_STACK:-} " == *" $(norm_url "$u") "* ]]; then
+            warn "dependency cycle through $(dir_name "$u"); not following it again"
+            continue
+        fi
+        info "$(dir_name "$url") needs $(dir_name "$u") — installing that first"
+        KIWI_DEP_STACK="${KIWI_DEP_STACK:-} $(norm_url "$url")" install_one "$scope" "$u" "$o" ||
+            warn "$(dir_name "$u") did not install, so $(dir_name "$url") may not work"
+    done
+    DEPS_MISSING=(${missing[@]+"${missing[@]}"})
 }
 
 cmd_info() { # [--porcelain] [--installer] name
@@ -1653,7 +1759,14 @@ cmd_info() { # [--porcelain] [--installer] name
         printf 'tags=%s\n'        "$(manifest_get "$dir" TAGS "")"
         printf 'author=%s\n'      "$(manifest_get "$dir" AUTHOR "")"
         printf 'depends=%s\n'     "$deps"
-        printf 'depends_missing=%s\n' "$(deps_missing "$deps")"
+        # the same answer an install acts on: kiwi apps it would install
+        # first are not "missing"; apps in another scope and plain commands are
+        local iscope=user; [[ $EUID -eq 0 ]] && iscope=system
+        local dl inst_first=()
+        plan_deps "$iscope" "$url" "$deps"
+        for dl in ${DEP_APPS[@]+"${DEP_APPS[@]}"}; do inst_first+=("$(dir_name "${dl%%$'\t'*}")"); done
+        printf 'depends_missing=%s\n' "$(echo ${DEPS_MISSING[@]+"${DEPS_MISSING[@]}"} ${DEP_ELSEWHERE[@]+"${DEP_ELSEWHERE[@]}"})"
+        printf 'depends_installs=%s\n' "${inst_first[*]:-}"
         printf 'icon=%s\n'        "$(manifest_get "$dir" ICON "")"
         printf 'screenshots=%s\n' "$(manifest_get "$dir" SCREENSHOTS "")"
         printf 'about=%s\n'       "$(manifest_get "$dir" ABOUT README.md)"
@@ -1685,7 +1798,12 @@ cmd_info() { # [--porcelain] [--installer] name
     local ideps imiss; ideps="$(manifest_get "$dir" DEPENDS "")"
     if [[ -n $ideps ]]; then
         printf '  %-12s %s\n' depends "$ideps"
-        imiss="$(deps_missing "$ideps")"
+        local iscope=user dl first=()
+        [[ $EUID -eq 0 ]] && iscope=system
+        plan_deps "$iscope" "$url" "$ideps"
+        for dl in ${DEP_APPS[@]+"${DEP_APPS[@]}"}; do first+=("$(dir_name "${dl%%$'\t'*}")"); done
+        [[ ${#first[@]} -gt 0 ]] && printf '  %-12s %s\n' "installs" "${first[*]} first, when you install this"
+        imiss="$(echo ${DEPS_MISSING[@]+"${DEPS_MISSING[@]}"} ${DEP_ELSEWHERE[@]+"${DEP_ELSEWHERE[@]}"})"
         [[ -n $imiss ]] && printf '  %-12s %s%s%s\n' missing "$c_ylw" "$imiss" "$c_off"
     fi
     local hp lic; hp="$(manifest_get "$dir" HOMEPAGE "")"; lic="$(manifest_get "$dir" LICENSE "")"
@@ -2211,6 +2329,7 @@ PORCELAIN=0
 DRY_RUN=0
 GUI_CHOICE=""      # ""=auto/keep, 0=cli-only, 1=with-gui (install/update)
 FROM_URLS=()       # install --from <url>: root records the URL it is installing
+DEP_APPS=(); DEP_ELSEWHERE=(); DEPS_MISSING=()   # plan_deps results
 ARGS=()
 CMD=""
 

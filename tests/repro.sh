@@ -386,10 +386,12 @@ t_P3() { # info --installer prints the script before anything runs
 t_P4() { # --dry-run must describe the work and do none of it
     mkapp a dry user 'touch /tmp/kt-dry-ran'
     ku add $GITROOT/a/dry.git >/dev/null
-    local out; out="$(ku install dry --dry-run 2>&1)"
-    f() { [[ ! -e /tmp/kt-dry-ran && ! -f $(urepo dry)/.kiwi-installed ]] &&
+    local out rc; out="$(ku install dry --dry-run 2>&1)"; rc=$?
+    # and exits 0: the plan's last [[ ]] was false for any user-scope target,
+    # so under set -e a dry run of a user app "failed"
+    f() { [[ $rc -eq 0 && ! -e /tmp/kt-dry-ran && ! -f $(urepo dry)/.kiwi-installed ]] &&
           grep -q 'install.sh' <<<"$out" && grep -q 'v1.0.0' <<<"$out"; }
-    check P4 "install --dry-run names the installer and ref, and runs nothing" f
+    check P4 "install --dry-run names the installer and ref, runs nothing, exits 0 (rc=$rc)" f
 }
 
 t_P5() { # doctor has to actually spot a stale lock and a bad list file
@@ -738,8 +740,156 @@ t_P25() { # the USER timer updates system halves through the wrapper; unattended
     check P26 "unattended without the wrapper: system half skipped, nothing escalated, exit 0 (rc=$rc2)" f26
 }
 
+t_P27() { # an installer can call the tool it just installed by NAME, on every route to it
+    # The routes hand it different PATHs: pkexec gives root
+    # /usr/sbin:/usr/bin:/sbin:/bin:/root/bin (no /usr/local/bin), and a user
+    # manager without the desktop's environment has no ~/.local/bin. kr and ku
+    # in this harness have exactly those gaps; the third route is the real
+    # wrapper, run in pkexec's exact environment.
+    local body='mkdir -p "$KIWI_PREFIX/bin"
+printf "#!/bin/sh\necho probe-ok\n" > "$KIWI_PREFIX/bin/pathprobe-$KIWI_SCOPE"
+chmod +x "$KIWI_PREFIX/bin/pathprobe-$KIWI_SCOPE"
+pathprobe-$KIWI_SCOPE'
+    mkapp a pathprobe "user system" "$body"
+    mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
+    echo "$GITROOT/a/pathprobe.git" > /etc/kiwi-updater/apps.list
+    ku add $GITROOT/a/pathprobe.git >/dev/null
+    ku install pathprobe --user >/dev/null 2>&1; local ru=$?
+    kr install --system pathprobe >/dev/null 2>&1; local rs=$?
+    install -Dm755 $K /usr/local/bin/kiwi
+    install -Dm755 $W/data/kiwi-system-update /usr/local/libexec/kiwi-system-update
+    release a pathprobe v1.1.0
+    env -i HOME=/root USER=root PATH=/usr/sbin:/usr/bin:/sbin:/bin:/root/bin \
+        bash /usr/local/libexec/kiwi-system-update pathprobe >/dev/null 2>&1
+    local want got
+    want="$(git -C /tmp/kt-work-a-pathprobe rev-parse 'v1.1.0^{commit}')"
+    got="$(head -1 /var/lib/kiwi-updater/repos/pathprobe/.kiwi-installed 2>/dev/null)"
+    rm -f /usr/local/bin/pathprobe-system
+    f() { [[ $ru -eq 0 && $rs -eq 0 && $got == "$want" ]]; }
+    check P27 "installer finds its fresh tool by name: user=$ru root=$rs wrapper-update=$([[ $got == "$want" ]] && echo ok || echo FAILED)" f
+}
+
+t_P28() { # DEPENDS is checked with the PATH the installer will get, not kiwi's own
+    # kiwi-fox's plugins declare DEPENDS=kiwi-fox — a command kiwi-fox installs
+    # into ~/.local/bin. In miniature: provider installs the tool, consumer
+    # depends on it, and kiwi's own PATH (here, like a headless user manager)
+    # has no ~/.local/bin.
+    mkapp a provider user 'mkdir -p "$KIWI_PREFIX/bin"; printf "#!/bin/sh\n" > "$KIWI_PREFIX/bin/provtool"; chmod +x "$KIWI_PREFIX/bin/provtool"'
+    mkapp a consumer user 'echo consumer-ran'
+    ( cd /tmp/kt-work-a-consumer && printf 'DEPENDS=provtool\n' >> kiwi.manifest &&
+      git commit -qam deps && git tag -a v1.0.1 -m x && git push -q origin HEAD --tags )
+    ku add $GITROOT/a/provider.git >/dev/null; ku add $GITROOT/a/consumer.git >/dev/null
+    ku install provider >/dev/null 2>&1
+    local out; out="$(ku install consumer 2>&1)"
+    f() { [[ -x $TH/.local/bin/provtool ]] && ! grep -q 'not here: provtool' <<<"$out"; }
+    check P28 "a DEPENDS command another app put in ~/.local/bin is not reported missing" f
+}
+
+t_P29() { # `kiwi update kiwi-updater` typed in a terminal escalates ONCE
+    # kiwi-updater's own install.sh, run by kiwi as the user-half installer,
+    # also updated the system half whenever stdin was a terminal — and then
+    # kiwi's dispatch did it again: two root updates, and in manual mode two
+    # password prompts. It needs a tty to happen, so the timer never showed it.
+    local w=/tmp/kt-work-self; rm -rf $w; mkdir -p $w $GITROOT/d
+    cp -r $W/. $w/
+    ( cd $w && git init -q && git add -A && git commit -qm one && git tag -a v0.0.1 -m v0.0.1 &&
+      git commit -q --allow-empty -m two && git tag -a v0.0.2 -m v0.0.2 &&
+      git clone -q --bare . $GITROOT/d/kiwi-updater.git )
+    chown -R $T $GITROOT/d
+    mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
+    echo "$GITROOT/d/kiwi-updater.git" > /etc/kiwi-updater/apps.list
+    ku add $GITROOT/d/kiwi-updater.git >/dev/null
+    local u r=/var/lib/kiwi-updater/repos/kiwi-updater; u="$(urepo kiwi-updater)"
+    runuser -u $T -- git clone -q $GITROOT/d/kiwi-updater.git $u
+    runuser -u $T -- git -C $u -c advice.detachedHead=false checkout -q v0.0.1
+    runuser -u $T -- bash -c "git -C $u rev-parse HEAD > $u/.kiwi-installed"
+    git clone -q $GITROOT/d/kiwi-updater.git $r
+    git -C $r -c advice.detachedHead=false checkout -q v0.0.1
+    git -C $r rev-parse HEAD > $r/.kiwi-installed
+    install -Dm755 $K /usr/local/bin/kiwi        # the system scope exists
+    : > $ESC
+    # a real pty: the duplicate only happens when stdin is a terminal
+    python3 -c 'import pty, sys; pty.spawn(sys.argv[1:])' \
+        runuser -u $T -- env -i HOME=$TH USER=$T PATH=$STUBS:/usr/bin:/bin KIWI_LOCK_WAIT=3 \
+        bash $K update kiwi-updater </dev/null >/dev/null 2>&1
+    local n; n="$(grep -c 'kiwi-updater' $ESC || true)"
+    f() { [[ ${n:-0} -eq 1 ]]; }
+    check P29 "from a terminal the system half of kiwi-updater is escalated once, not twice (escalations: ${n:-0})" f
+}
+
+t_P30() { # installing an app installs the kiwi app it DEPENDS on first — visibly, no false warning
+    # The dependency's whole installation used to run inside miss="$(…)", so its
+    # output vanished into the "missing" list and came back as a warning that
+    # it was "not here" — even after it had installed fine.
+    mkapp a hostapp user 'mkdir -p "$KIWI_PREFIX/bin"; printf "#!/bin/sh\n" > "$KIWI_PREFIX/bin/hostapp"; chmod +x "$KIWI_PREFIX/bin/hostapp"; echo HOST-INSTALLER-RAN'
+    mkapp a plugapp user 'echo PLUG-INSTALLER-RAN'
+    ( cd /tmp/kt-work-a-plugapp && printf 'DEPENDS=hostapp\n' >> kiwi.manifest &&
+      git commit -qam dep && git tag -a v1.0.1 -m x && git push -q origin HEAD --tags )
+    mkcat c cat1 $GITROOT/a/hostapp.git $GITROOT/a/plugapp.git
+    ku catalog add $GITROOT/c/cat1.git >/dev/null 2>&1
+    local dry; dry="$(ku install plugapp --dry-run 2>&1)"     # says so before doing it
+    local out rc; out="$(ku install plugapp 2>&1)"; rc=$?
+    f() { [[ $rc -eq 0 && -f $(urepo hostapp)/.kiwi-installed && -f $(urepo plugapp)/.kiwi-installed ]] &&
+          grep -q 'installs hostapp' <<<"$dry" &&
+          grep -q 'HOST-INSTALLER-RAN' <<<"$out" && ! grep -q 'not here' <<<"$out"; }
+    check P30 "a plugin's host app: announced by --dry-run, installed first, visibly, no false 'not here'" f
+}
+
+t_P31() { # a dependency is only auto-installed in the dependent's own scope
+    # A user app needing a system-only app ran install_one for the system scope
+    # as the USER; as root, a user-only dependency went into /root/.local.
+    mkapp a sysdep system 'echo SYSDEP-RAN'
+    mkapp a userapp user 'echo USERAPP-RAN'
+    ( cd /tmp/kt-work-a-userapp && printf 'DEPENDS=sysdep\n' >> kiwi.manifest &&
+      git commit -qam dep && git tag -a v1.0.1 -m x && git push -q origin HEAD --tags )
+    mkcat c cat1 $GITROOT/a/sysdep.git $GITROOT/a/userapp.git
+    ku catalog add $GITROOT/c/cat1.git >/dev/null 2>&1
+    mkdir -p /var/lib/kiwi-updater; : > $ESC
+    local out; out="$(ku install userapp 2>&1)"
+    f() { [[ -f $(urepo userapp)/.kiwi-installed && ! -s $ESC ]] &&
+          grep -q 'kiwi install sysdep' <<<"$out" && ! grep -qi 'did not install\|permission denied' <<<"$out"; }
+    check P31 "a user app's system-only dependency is not attempted unprivileged; it says 'kiwi install sysdep'" f
+}
+
+t_P32() { # a DEPENDS word is resolved only where the app came from, or in a list on this machine
+    # Dependency confusion: catalog A's app says DEPENDS=helper, catalog B lists a
+    # repo called helper. Installing B's repo runs code nobody chose — and a
+    # hostile catalog could claim any common command name that way.
+    mkapp a needer user 'echo NEEDER-RAN'
+    ( cd /tmp/kt-work-a-needer && printf 'DEPENDS=helper\n' >> kiwi.manifest &&
+      git commit -qam dep && git tag -a v1.0.1 -m x && git push -q origin HEAD --tags )
+    mkapp b helper user 'touch /tmp/kt-confused'
+    mkcat c catA $GITROOT/a/needer.git
+    mkcat d catB $GITROOT/b/helper.git
+    ku catalog add $GITROOT/c/catA.git >/dev/null 2>&1
+    ku catalog add $GITROOT/d/catB.git >/dev/null 2>&1
+    ku install needer >/dev/null 2>&1
+    local confused=no; [[ -e /tmp/kt-confused ]] && confused=yes
+    # ...but a repo the user added to their OWN list is their choice: allowed
+    ku add $GITROOT/b/helper.git >/dev/null 2>&1
+    ku install needer >/dev/null 2>&1
+    local chosen=no; [[ -f $(urepo helper)/.kiwi-installed ]] && chosen=yes
+    f() { [[ -f $(urepo needer)/.kiwi-installed && $confused == no && $chosen == yes ]]; }
+    check P32 "no dependency pulled from another catalog (pulled=$confused); one in your own list is (installed=$chosen)" f
+}
+
+
+t_P33() { # a catalog entry reads back as (source, url, options) — no field shift
+    # app_entries_raw printed url<TAB>opts<TAB>source. For a catalog entry with
+    # no options the two tabs collapse when read (a tab is IFS whitespace), so
+    # the catalog's path became the app's "options" and its source read empty:
+    # visible as a warning naming no file for a bad catalog line, and fatal to
+    # anything keyed on the source, such as finding an app's dependencies.
+    mkcat c badcat "kiwi-killswitch"
+    ku catalog add $GITROOT/c/badcat.git >/dev/null 2>&1
+    local out; out="$(ku list --no-sync 2>&1 >/dev/null)"
+    f() { grep -q "catalogs/badcat/apps.list: 'kiwi-killswitch'" <<<"$out"; }
+    check P33 "an unusable catalog line is reported with its catalog's file, not an empty one" f
+}
+
 for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
-         P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P17 P18 P19 P20 P22 P23 P25; do run $t; done
+         P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P17 P18 P19 P20 P22 P23 P25 \
+         P27 P28 P29 P30 P31 P32 P33; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

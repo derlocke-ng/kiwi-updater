@@ -20,7 +20,9 @@
 # COMPONENTS   what this app actually installs, space separated. Free-form;
 #              list what is really there rather than squeezing it into a
 #              category. Recognised for icons and headless handling:
-#                 cli  gui  daemon  service  gnome-extension  config
+#                 cli  gui  daemon  service  gnome-extension  config  module
+#              (module: a plugin for another app, installed into that app's
+#              data — kiwi-fox's provider modules, for example)
 #              Anything containing "gui" is skipped on a machine with no GTK
 #              stack, or with --cli-only.
 #
@@ -53,6 +55,9 @@
 # ---- requirements ---------------------------------------------------------
 # DEPENDS      space separated commands your installer needs. kiwi checks each
 #              with `command -v` and shows what is missing before installing.
+#              A word that names a kiwi app in YOUR catalog (or a list on the
+#              user's machine) is installed first, in the same scope — a plugin
+#              says DEPENDS=kiwi-fox and gets kiwi-fox with it.
 #
 # INSTALLER    installer script relative to repo root (default: install.sh)
 

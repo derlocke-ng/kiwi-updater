@@ -3,6 +3,83 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 2.1.0 — 2026-10-06
+
+### Added — kiwi apps as dependencies
+
+A `DEPENDS` word that names a kiwi app is installed first: kiwi-fox's provider
+plugins say `DEPENDS=kiwi-fox podman`, so `kiwi install kiwi-plugin-tor` brings
+kiwi-fox along. This arrived as PR #1 from a cloud session and was merged
+untagged; it was reviewed before release, and as merged it
+
+- ran the dependency's installation inside `miss="$(…)"`, so its output
+  vanished into the "missing" list: every *successful* dependency install
+  ended in a warning that the app was "not here", followed by its own log;
+- installed a dependency in whatever scope it declared, so a user app needing
+  a system-only app ran a system install unprivileged, and root installed
+  user-only dependencies into `/root/.local`;
+- resolved the word against **every** registered catalog — dependency
+  confusion: if one catalog's app needs `secret-tool` and the binary is not
+  there, another catalog listing a repo called `secret-tool` got its installer
+  run, without anyone having chosen that app;
+- and installed the first app of a dependency cycle twice.
+
+As released it installs in-process, only in the dependent's own scope (and
+otherwise names the `kiwi install` command to run), only from a list that also
+names the dependent or from a list on this machine, and keys the cycle check
+on the dependent. One planning step answers for `install`, `--dry-run`,
+`kiwi info` and the GUI (`depends_installs=` in the porcelain), so an app kiwi
+is about to install is no longer shown as "missing — the installer may fail".
+
+### Fixed
+
+- **An installer could not call the tool it had just installed — on the
+  passwordless route.** pkexec gives root `/usr/sbin:/usr/bin:/sbin:/bin:/root/bin`
+  (compiled into polkit), which has no `/usr/local/bin`; Fedora's sudo
+  `secure_path` does have it. So kiwi-killswitch 0.2.0's installer worked from
+  a terminal and, on a passwordless update, waited ten seconds and reported
+  "the daemon is not answering" while the daemon was up the whole time. Every
+  installer now runs with its own prefix first on `PATH` — `~/.local/bin` for
+  the user scope, a fixed `/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:
+  /sbin:/bin` for the system scope — and the wrapper sets the same for itself.
+  Fixing only the wrapper would have left the GUI's pkexec installs and
+  user-scope installers under a headless session uncovered.
+- **`DEPENDS` is checked in that same `PATH`**, not kiwi's own, which in a
+  user manager without the desktop's environment reported `kiwi-fox` missing
+  for every plugin.
+- **`kiwi update kiwi-updater` from a terminal updated the root half twice.**
+  kiwi-updater's own `install.sh`, run by kiwi as the user-half installer, also
+  handled the system half whenever stdin was a terminal, and then kiwi's
+  dispatch did it again — two root updates, and in manual mode two password
+  prompts. Under kiwi the script now leaves the system half to kiwi.
+- **`kiwi install <user app> --dry-run` exited 1** (since 1.3.0): the plan's
+  last test was false for any user-scope target, and `set -e` took it as a
+  failure. P4 had checked the output but never the exit code.
+- **The scripts are executable in git again.** Something reset them to 0644 on
+  a development machine before 1.7.0 and a `git add -A` recorded it, so
+  1.7.0–2.0.0 shipped `bin/kiwi`, `install.sh`, `get-kiwi.sh`, `gui/kiwi-gui`,
+  `templates/install.sh` and the tests non-executable: `./install.sh` from a
+  fresh clone said "Permission denied". kiwi's own paths never noticed — they
+  run everything through `bash` or reinstall with `install -m755` — so the
+  release gate (`tests/check-version.sh`, also in CI) now checks the modes.
+- **Since 1.7.1 every catalog app carried its catalog's file path as its
+  "options".** The internal entry list was `url⇥opts⇥source`; for an entry
+  without options the two tabs collapse when read (a tab is IFS whitespace),
+  so the source landed in `opts` and read back empty. Harmless only by luck —
+  a path contains no `key=` — but the 1.7.1 warning for a bad catalog line
+  named no file, and anything keyed on the source saw nothing. The empty-able
+  field is last now.
+- Stale 2.0.0 wording: install.sh still described auto mode as a "root timer",
+  manual mode as "no root timer", and the wrapper's no-names path as "what the
+  background timer wants".
+
+### Also
+
+- README and the installer template document `PATH` and app dependencies; the
+  GUI has an icon for `COMPONENTS=module` and the manifest template lists it.
+- `tests/repro.sh` gains P27–P33, each failing on the code it fixes; P4 now
+  checks the exit code.
+
 ## 2.0.0 — 2026-10-05
 
 Simpler, by removing things. The goal restated: a userspace app manager that

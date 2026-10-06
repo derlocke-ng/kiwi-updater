@@ -135,6 +135,7 @@ the comment became part of the value and the app was treated as having a GUI.
 | `KIWI_ACTION` | `install` \| `update` \| `uninstall` |
 | `KIWI_GUI` | `0` on a headless machine, or with `--cli-only` |
 | `KIWI_PURGE` | `1` when the user asked for `--purge` (uninstall only) |
+| `PATH` | begins with `$KIWI_PREFIX/bin`, so your installer can call what it just installed by name, whichever way it was reached — a terminal, the GUI, or the passwordless update. For the system scope it is fixed (`/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin`), not inherited |
 
 On a purging uninstall your script is also called as `./install.sh uninstall
 --purge`, so you can branch on either. Without `--purge`, leave the user's
@@ -143,6 +144,28 @@ configuration where it is.
 A dual-scope installer branches on `KIWI_SCOPE` and does only that half each
 time. `COMPONENTS` containing `gui` is what makes `kiwi` skip desktop parts
 where there is no GTK stack.
+
+### Depending on another app
+
+`DEPENDS` lists commands your installer needs — `DEPENDS=podman git`. kiwi
+checks each one with `command -v` (in the `PATH` your installer will get) and
+says what is missing before it runs anything. When a missing word is the name
+of a **kiwi app**, kiwi installs that app first: kiwi-fox's provider plugins
+say `DEPENDS=kiwi-fox podman`, so `kiwi install kiwi-plugin-tor` brings
+kiwi-fox along. `kiwi install … --dry-run`, `kiwi info` and the GUI all show
+which apps an install would bring.
+
+Only where it is safe to:
+
+- **from your own catalog, or a list on this machine.** A dependency is looked
+  up only in a list that also names your app, or in one the user keeps
+  locally. Otherwise one catalog could claim a common name another catalog's
+  app depends on, and get its installer run without anyone choosing it.
+- **in the same scope.** A user-scope app never pulls in a system install by
+  itself (that needs a password the user did not expect to give), and root
+  never installs a user app. kiwi names the `kiwi install` command instead.
+- **at install time.** An update does not add a dependency that a new version
+  started declaring; nothing removes a dependency when its last user goes.
 
 Release by tagging: `git tag v1.3.0 && git push --tags`.
 
@@ -296,7 +319,7 @@ them as a **selection**: every name must look like a name (never an option) and
 must already appear in the root-owned `/etc/kiwi-updater/apps.list` or a
 catalog registered for root, and anything else is refused — so the worst a
 caller can ask for is an update of an app the administrator already trusts.
-With no names it updates everything, which is what the background timer wants.
+With no names it updates every one of them.
 
 The rule requires an **active** session in `wheel`, not a local one: VM and
 remote desktop sessions can report as non-local.

@@ -10,6 +10,9 @@
 #   KIWI_GUI      0 on a headless machine or with --cli-only
 #   KIWI_PURGE    1 when the user asked for --purge (uninstall only); your
 #                 script is also called as `./install.sh uninstall --purge`
+#   PATH          begins with $KIWI_PREFIX/bin, so you can call what you just
+#                 installed by name — even on the passwordless route, where
+#                 pkexec's own PATH has no /usr/local/bin
 #
 # If your manifest says SCOPES=user system, this script is invoked TWICE — once
 # with KIWI_SCOPE=user (as the user) and once with KIWI_SCOPE=system (as root).

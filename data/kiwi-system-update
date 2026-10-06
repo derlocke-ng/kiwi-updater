@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 # kiwi-system-update — the one root entry point for system-app updates.
 #
-# The polkit rule authorises pkexec of THIS exact path for local wheel users,
+# The polkit rule authorises pkexec of THIS exact path for active wheel sessions,
 # so it must never become a way to run arbitrary things as root.
 #
 # It accepts app names, but treats them as a SELECTION rather than as input:
 # every name is checked against the root-owned system list before use, and
 # anything not already listed there is refused. The worst a caller can do is
 # update an app the administrator has already chosen to trust. With no names
-# it updates everything, which is the behaviour the background timer wants.
+# it updates every one of them, which grants nothing that naming them all does
+# not.
 set -euo pipefail
+
+# pkexec gives us /usr/sbin:/usr/bin:/sbin:/bin:/root/bin, with no
+# /usr/local/bin. kiwi sets each installer's PATH itself (installer_path);
+# this is for kiwi and for anything else the system scope put in /usr/local.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 KIWI=/usr/local/bin/kiwi
 SYS_LIST=/etc/kiwi-updater/apps.list

@@ -8,7 +8,7 @@
 // already appear in the root-owned system list, and the wrapper then calls
 // `kiwi update --system --quiet -- <names>`. The worst a caller can ask for is
 // an update of an app the administrator has already chosen to trust; with no
-// names it updates all of them, which is what the background timer wants.
+// names it updates all of them.
 //
 // Passwordless is safe only because that program is root-owned and not
 // user-writable, and because what reaches root is a validated selection from a

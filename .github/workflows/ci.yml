@@ -13,7 +13,7 @@ jobs:
             templates/install.sh tests/*.sh
       - name: the GUI has to at least parse
         run: python3 -m py_compile gui/kiwi-gui
-      - name: version agrees in all three places
+      - name: release gate — version agrees, scripts executable in git
         run: bash tests/check-version.sh
 
   repro:

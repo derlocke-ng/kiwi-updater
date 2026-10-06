@@ -27,11 +27,11 @@ PURGE=0
 WITH_SYSTEM=0
 CLI_ONLY=0
 # How the system scope behaves, recorded in /etc/kiwi-updater/mode:
-#   auto    root timer + passwordless wrapper for active wheel sessions
-#   manual  root-owned kiwi and lists only — no timer, no polkit rule, no
-#           wrapper. Every change to the system scope asks for a password, and
-#           nothing runs as root unattended. The price is that system halves
-#           update only when you ask.
+#   auto    your own timer updates the system halves too, without a password,
+#           through the wrapper the polkit rule grants to active wheel sessions
+#   manual  root-owned kiwi and lists only — no wrapper, no polkit rule. Every
+#           change to the system scope asks for a password, and your timer
+#           leaves system halves for your next interactive `kiwi update`.
 # Empty means "keep what the machine has" (auto on a fresh install).
 SYSTEM_MODE=""
 for arg in "${@:2}"; do
@@ -228,7 +228,7 @@ user_install() {
     if (( ! WITH_SYSTEM )) && ! system_present; then
         say "system scope not set up: apps with a root half (kiwi-killswitch) cannot install"
         say "  that half until it is. Add it any time:  get-kiwi.sh --with-system"
-        say "  (or --with-system=manual: no root timer, every system change asks for a password)"
+        say "  (or --with-system=manual: no passwordless updates; every system change asks for a password)"
     fi
 }
 
@@ -341,11 +341,12 @@ elif (( WITH_SYSTEM )) && [[ $ACTION == install ]]; then
 else
     "user_$ACTION"
     # Update and uninstall of the system half go through the root-owned copy —
-    # never this file. Asked for explicitly with --with-system, or implied
-    # interactively when the system scope is already there. A background
-    # self-update must never block on a password prompt, and the root copy
-    # updates itself from its own timer anyway.
-    if [[ $ACTION != install ]] &&
+    # never this file. Only when a person runs this script directly, though:
+    # under kiwi (KIWI_SCOPE is set) kiwi-updater is a dual-scope app like any
+    # other and kiwi handles its system half itself. Doing it here as well ran
+    # the root update twice for every `kiwi update kiwi-updater` typed in a
+    # terminal — and in manual mode asked for the password twice.
+    if [[ -z ${KIWI_SCOPE:-} && $ACTION != install ]] &&
        { (( WITH_SYSTEM )) || { [[ -t 0 ]] && system_present; }; }; then
         say "handling the system scope (root)"
         "system_$ACTION" || true

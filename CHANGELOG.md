@@ -3,6 +3,19 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 2.1.1 — 2026-10-06
+
+One fix, seen on the first real update to 2.1.0.
+
+- **Every self-update ended with a false version-skew warning.**
+  `kiwi update kiwi-updater` replaces both copies of kiwi in one run, but the
+  process doing it is still the *old* version in memory. It compared the fresh
+  root-owned copy with itself and finished with "the root-owned copy of kiwi
+  is 2.1.0; this one is 2.0.0 — to do it now: kiwi update --system
+  kiwi-updater", advising you to redo what it had just done. The comparison now
+  reads this copy's version from the file on disk. P34 reproduces it exactly:
+  the old code in memory, the new file at `$0`.
+
 ## 2.1.0 — 2026-10-06
 
 ### Added — kiwi apps as dependencies

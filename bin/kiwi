@@ -10,7 +10,7 @@
 #   system — listed in /etc/kiwi-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-KIWI_VERSION=2.1.0
+KIWI_VERSION=2.1.1
 
 # systemd system services start without $HOME (set -u would abort at the
 # path definitions below) — root's user-scope paths are never used anyway
@@ -90,9 +90,16 @@ root_skew_advice() { # root_version
 
 note_root_skew() {
     (( QUIET )) && return 0
-    local rv line; rv="$(root_version)" || return 0
-    [[ $rv != "$KIWI_VERSION" ]] || return 0
-    warn "the root-owned copy of kiwi is $rv; this one is $KIWI_VERSION."
+    local rv here line; rv="$(root_version)" || return 0
+    # This copy as it is ON DISK, not the version this process started as.
+    # `kiwi update kiwi-updater` replaces both copies in one run, and the
+    # process doing it is still the old version in memory: it compared the
+    # fresh root copy against itself and ended every self-update with "the
+    # root-owned copy is 2.1.0; this one is 2.0.0 — update it now".
+    here="$(sed -n 's/^KIWI_VERSION=//p' "$0" 2>/dev/null | head -1)"
+    here="${here:-$KIWI_VERSION}"
+    [[ $rv != "$here" ]] || return 0
+    warn "the root-owned copy of kiwi is $rv; this one is $here."
     while IFS= read -r line; do warn "$line"; done < <(root_skew_advice "$rv")
 }
 

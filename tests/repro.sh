@@ -887,9 +887,25 @@ t_P33() { # a catalog entry reads back as (source, url, options) — no field sh
     check P33 "an unusable catalog line is reported with its catalog's file, not an empty one" f
 }
 
+t_P34() { # a self-update that replaced both copies does not report the fresh root copy as skew
+    # The process running `kiwi update kiwi-updater` is still the OLD version in
+    # memory after both copies on disk were replaced. It compared the new root
+    # copy with its own KIWI_VERSION and warned "this one is <old> — update it
+    # now". Reproduced exactly: old code in memory (bash -c), new file at $0.
+    install -Dm755 $K /usr/local/bin/kiwi
+    install -Dm755 $K $TH/.local/bin/kiwi; chown -R $T $TH/.local
+    local old; old="$(sed 's/^KIWI_VERSION=.*/KIWI_VERSION=0.0.1/' $K)"
+    mkapp a skewapp user
+    ku add $GITROOT/a/skewapp.git >/dev/null; ku install skewapp >/dev/null 2>&1
+    local out; out="$(runuser -u $T -- env -i HOME=$TH USER=$T PATH=$STUBS:/usr/bin:/bin KIWI_LOCK_WAIT=3 \
+        bash -c "$old" $TH/.local/bin/kiwi update skewapp </dev/null 2>&1)"
+    f() { ! grep -q 'root-owned copy of kiwi is' <<<"$out" && grep -q 'skewapp' <<<"$out"; }
+    check P34 "no false version-skew warning from the old process that just updated both copies" f
+}
+
 for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
          P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P17 P18 P19 P20 P22 P23 P25 \
-         P27 P28 P29 P30 P31 P32 P33; do run $t; done
+         P27 P28 P29 P30 P31 P32 P33 P34; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

@@ -1040,7 +1040,10 @@ install_one() { # scope url opts
     local deps miss
     deps="$(manifest_get "$dir" DEPENDS "")"
     if [[ -n $deps ]]; then
-        miss="$(deps_missing "$deps")"
+        # A dependency that is itself a kiwi app (a provider module needs
+        # kiwi-fox) is installed first; what comes back is the plain system
+        # binaries that are still missing, which we can only warn about.
+        miss="$(ensure_deps "$scope" "$url" "$deps")"
         [[ -n $miss ]] && warn "$(app_name "$scope" "$url") needs these, and they are not here: $miss
   its installer will probably fail. Install them first if it does."
     fi
@@ -1553,6 +1556,52 @@ deps_missing() { # "a b c" -> missing ones
         command -v -- "$d" >/dev/null 2>&1 || out+=("$d")
     done
     echo "${out[*]:-}"
+}
+
+# Install the kiwi-app dependencies of an app before the app itself, and echo the
+# ones that are NOT kiwi apps and are still missing (system binaries such as
+# podman or git) so the caller can warn about those as before.
+#
+# A DEPENDS word is treated as a kiwi app only when it resolves to a repo in a
+# registered catalog or list (e.g. a provider module depending on kiwi-fox); a
+# word that resolves to nothing is a plain binary and is left to command -v, so
+# this never tries to "install" podman. KIWI_DEP_STACK breaks dependency cycles.
+ensure_deps() { # scope url "a b c" -> echoes still-missing non-app deps
+    local scope="$1" url="$2" deps="$3"
+    local d line dep_url dep_opts dep_dir dep_scopes sc s have miss=()
+    split_words "$deps"                      # manifest data: no globbing
+    for d in ${WORDS[@]+"${WORDS[@]}"}; do
+        command -v -- "$d" >/dev/null 2>&1 && continue
+        # Not a kiwi app we can resolve? Then it is a system binary: leave it to
+        # the caller's missing-deps warning, exactly as before.
+        line="$(resolve "$d" 2>/dev/null)" || { miss+=("$d"); continue; }
+        IFS=$'\t' read -r dep_url dep_opts <<<"$line"
+        have=0
+        for s in $(real_scopes); do
+            is_installed "$s" "$dep_url" && { have=1; break; }
+        done
+        (( have )) && continue
+        if [[ " ${KIWI_DEP_STACK:-} " == *" $dep_url "* ]]; then
+            warn "dependency cycle involving $(dir_name "$dep_url"); not installing it again"
+            continue
+        fi
+        info "$(dir_name "$url") needs $(dir_name "$dep_url") — installing it first"
+        dep_dir="$(sync_meta "$dep_url" "$dep_opts")" || {
+            warn "cannot reach $dep_url to install it as a dependency"
+            miss+=("$d"); continue
+        }
+        dep_scopes="$(effective_scopes "$dep_dir" "$dep_opts" "$dep_url")"
+        # Prefer the dependent's own scope when the dependency supports it, else
+        # the dependency's first declared scope. Avoids a cross-scope escalation
+        # the user did not ask for.
+        if [[ " $dep_scopes " == *" $scope "* ]]; then sc="$scope"; else sc="${dep_scopes%% *}"; fi
+        [[ -n $sc ]] || { miss+=("$d"); continue; }
+        if ! KIWI_DEP_STACK="${KIWI_DEP_STACK:-} $dep_url" install_one "$sc" "$dep_url" "$dep_opts"; then
+            warn "dependency $(dir_name "$dep_url") did not install"
+            miss+=("$d")
+        fi
+    done
+    echo "${miss[*]:-}"
 }
 
 cmd_info() { # [--porcelain] [--installer] name

@@ -483,7 +483,8 @@ t_P10() { # the porcelain must tell the GUI which scopes are actually installed
     inst="$(cut -f13 <<<"$line")"
     ku pin dualp v1.0.0 >/dev/null 2>&1
     pinf="$(ku list --porcelain --no-sync 2>/dev/null | grep '^dualp' | cut -f14)"
-    f() { [[ $nf -eq 14 && $inst == user && $pinf == v1.0.0 ]]; }
+    # at least 14: the porcelain is append-only, later fields may follow (P35)
+    f() { [[ $nf -ge 14 && $inst == user && $pinf == v1.0.0 ]]; }
     check P10 "porcelain carries installed scopes and the pin (fields=$nf installed='$inst' pinned='$pinf')" f
 }
 
@@ -903,9 +904,27 @@ t_P34() { # a self-update that replaced both copies does not report the fresh ro
     check P34 "no false version-skew warning from the old process that just updated both copies" f
 }
 
+t_P35() { # an app's own icon reaches the GUI: list --porcelain field 15 is its ICON=
+    # Each app ships its icon and names it in its manifest; the GUI draws that
+    # file from the clone (field 11). Appended, so no earlier field moves, and an
+    # app without an icon still prints all 15 fields with the last one empty.
+    mkapp a iconapp user
+    ( cd /tmp/kt-work-a-iconapp && mkdir -p data &&
+      printf '<svg xmlns="http://www.w3.org/2000/svg"/>\n' > data/iconapp.svg &&
+      echo 'ICON=data/iconapp.svg' >> kiwi.manifest && git add -A )
+    release a iconapp v1.1.0
+    mkapp a plainapp user
+    ku add $GITROOT/a/iconapp.git >/dev/null; ku add $GITROOT/a/plainapp.git >/dev/null
+    local out; out="$(ku list --porcelain 2>/dev/null)"     # syncs: the manifests come from the clones
+    f() { awk -F'\t' '$1=="iconapp"  && NF==15 && $15=="data/iconapp.svg" && $11!="" {a=1}
+                      $1=="plainapp" && NF==15 && $15==""                            {b=1}
+                      END {exit !(a && b)}' <<<"$out"; }
+    check P35 "list --porcelain appends the app's ICON as field 15 (empty when it has none)" f
+}
+
 for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
          P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P17 P18 P19 P20 P22 P23 P25 \
-         P27 P28 P29 P30 P31 P32 P33 P34; do run $t; done
+         P27 P28 P29 P30 P31 P32 P33 P34 P35; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

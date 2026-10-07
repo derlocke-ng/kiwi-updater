@@ -14,6 +14,7 @@ import os
 import re
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import threading
@@ -321,11 +322,11 @@ def pill(text, kind, tip=None):
     return lbl
 
 
-# Which halves of an app are in. Only for apps that use the system scope: a
-# lone USER pill on every row would be noise, and for a user-only app the
-# status pill already says everything. For a dual-scope app this is the thing
-# you could not otherwise see anywhere in the GUI — and it is what makes
-# "partly installed" mean something specific.
+# Where an app lives: one pill per scope it uses — filled when it is installed
+# there (green USER, yellow ROOT), dimmed when it is not. Every app, the same
+# rule. It used to be shown only for apps with a root half, on the theory that
+# a USER pill on every row was noise; the effect was that installed user apps
+# (kiwi-fox, the CLI tools) said nothing at all about where they were installed.
 SCOPE_PILL = (
     ("user",   "USER", "ok",   "in your home directory (~/.local)"),
     ("system", "ROOT", "root", "outside your home directory, installed as root"),
@@ -333,8 +334,6 @@ SCOPE_PILL = (
 
 
 def scope_pills(app):
-    if not app.needs_root:
-        return []
     inst = set(app.installed_list)
     out = []
     for scope, label, kind, where in SCOPE_PILL:
@@ -364,12 +363,56 @@ def tint_for(app):
     return "c%d" % (sum(ord(c) for c in cat) % TINTS if cat else 0)
 
 
-def tile(app, big=False):
-    """A tinted rounded tile with the icon centred inside it.
+# An app's own icon is a file from its clone, named by its manifest (ICON=).
+# These come from every registered catalog and are drawn for apps nobody has
+# installed yet, so on top of repo_path's containment: a regular file of a type
+# apps actually ship, small on disk — and a PNG small once decoded too, since a
+# few KB of PNG can declare 30000x30000 pixels, which GTK would allocate in full.
+ICON_TYPES = (".svg", ".png")
+ICON_MAX_BYTES = 1024 * 1024
+ICON_MAX_PX = 1024
 
-    The image needs to expand and centre itself: a plain Gtk.Box lays its child
-    out at the start, so the icon sits in the corner of the tile and reads as a
-    broken glyph rather than an icon."""
+
+def app_icon_file(app):
+    p = repo_path(app["repo_dir"], app["icon"])
+    if not p or not p.lower().endswith(ICON_TYPES) or not os.path.isfile(p):
+        return None
+    try:
+        if os.path.getsize(p) > ICON_MAX_BYTES:
+            return None
+        if p.lower().endswith(".png"):
+            with open(p, "rb") as f:
+                head = f.read(24)
+            if head[:8] != b"\x89PNG\r\n\x1a\n" or head[12:16] != b"IHDR":
+                return None
+            w, h = struct.unpack(">II", head[16:24])
+            if not (0 < w <= ICON_MAX_PX and 0 < h <= ICON_MAX_PX):
+                return None
+        return p
+    except OSError:
+        return None
+
+
+def tile(app, big=False):
+    """The app's own icon when it ships one; otherwise a tinted rounded tile
+    with a themed glyph centred inside it.
+
+    Each app owns its icon (ICON= in its manifest, the file in its repo); kiwi
+    only shows it. Through a FileIcon, so GTK's icon loader renders the SVG at
+    the requested size instead of scaling a 128 px bitmap down — crisp at the
+    46 px of a list row."""
+    own = app_icon_file(app)
+    if own:
+        img = Gtk.Image.new_from_gicon(Gio.FileIcon.new(Gio.File.new_for_path(own)))
+        img.set_pixel_size(96 if big else 46)
+        img.set_halign(Gtk.Align.START)
+        img.set_valign(Gtk.Align.CENTER)
+        img.set_hexpand(False)
+        return img
+
+    # The image needs to expand and centre itself: a plain Gtk.Box lays its
+    # child out at the start, so the icon sits in the corner of the tile and
+    # reads as a broken glyph rather than an icon.
     img = Gtk.Image(icon_name=icon_for(app), pixel_size=48 if big else 26)
     img.set_halign(Gtk.Align.CENTER)
     img.set_valign(Gtk.Align.CENTER)
@@ -412,7 +455,11 @@ class App(GObject.Object):
 
     @property
     def is_installed(self):
-        return self["status"] in ("installed", "partial", "update-available")
+        # From the installed scopes, not the status: "unreachable" is only ever
+        # set for an installed app, and reading it as "not installed" offered
+        # Install (which cannot reach the repo either) and hid Uninstall.
+        return bool(self.installed_list) or \
+            self["status"] in ("installed", "partial", "update-available", "unreachable")
 
     def haystack(self):
         return " ".join((self["name"], self["desc"], self["tags"],
@@ -757,15 +804,6 @@ class DetailDialog(Adw.Dialog):
     def _populate(self, info):
         self.box.remove(self._placeholder)
         rd = info.get("repo_dir", "")
-
-        icon = repo_path(rd, info.get("icon", ""))
-        if icon:
-            pic = Gtk.Image.new_from_file(icon)
-            pic.set_pixel_size(96)
-            parent = self.big_icon.get_parent()
-            parent.insert_child_after(pic, None)
-            parent.remove(self.big_icon)
-            self.big_icon = pic
 
         shots = [repo_path(rd, p) for p in info.get("screenshots", "").split()]
         shots = [p for p in shots if p]
@@ -1349,7 +1387,7 @@ class Window(Adw.ApplicationWindow):
             btn.set_label("Complete")
             btn.add_css_class("suggested-action")
             btn.connect("clicked", lambda *_: self.run_action("install", [app["name"]]))
-        elif st in ("not-installed", "unreachable"):
+        elif not app.is_installed:
             btn.set_label("Install")
             btn.connect("clicked", lambda *_: self.run_action("install", [app["name"]]))
         else:
@@ -1520,7 +1558,8 @@ class Window(Adw.ApplicationWindow):
                      repo_dir=p[10] if len(p) > 10 else "",
                      root_reason=p[11] if len(p) > 11 else "",
                      installed_scopes=p[12] if len(p) > 12 else "",
-                     pinned=p[13] if len(p) > 13 else "")
+                     pinned=p[13] if len(p) > 13 else "",
+                     icon=p[14] if len(p) > 14 else "")
             if d["status"] == "update-available":
                 updates += 1
             if d["category"]:

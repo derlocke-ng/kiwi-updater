@@ -10,7 +10,7 @@
 #   system — listed in /etc/kiwi-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-KIWI_VERSION=2.1.1
+KIWI_VERSION=2.2.0
 
 # systemd system services start without $HOME (set -u would abort at the
 # path definitions below) — root's user-scope paths are never used anyway
@@ -1132,8 +1132,10 @@ update_one() { # scope url opts   (appends to global UPDATED array)
         return 1
     }
     write_marker "$dir"
-    info "${c_grn}$name updated${c_off} to $(manifest_get "$dir" VERSION "?")"
-    UPDATED+=("$name")
+    local ver; ver="$(manifest_get "$dir" VERSION "?")"
+    info "${c_grn}$name updated${c_off} to $ver"
+    # with the version, so a notification says which release it was about
+    UPDATED+=("$name $ver")
 }
 
 uninstall_one() { # scope url purge
@@ -1553,12 +1555,15 @@ cmd_list() {
         if (( porcelain )); then
             # porcelain carries the real values; truncation is for humans only.
             # APPEND new fields only — the GUI indexes by position.
-            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            # 15: the app's own icon (manifest ICON=, repo-relative) — each app
+            # ships its own; the GUI draws it from the clone at field 11
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
                 "$name" "$scs" "$comp_full" "$status" "$ver" "$url" "$desc" "${tref:-}" \
                 "$(manifest_get "$dir" CATEGORY "")" \
                 "$(manifest_get "$dir" TAGS "")" "$dir" \
                 "$(manifest_get "$dir" ROOT_REASON "")" \
-                "$inst_scs" "$pin_ref"
+                "$inst_scs" "$pin_ref" \
+                "$(manifest_get "$dir" ICON "")"
         else
             local col=""
             [[ $status == update-available ]] && col="$c_ylw"

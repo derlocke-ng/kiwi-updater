@@ -167,6 +167,20 @@ Only where it is safe to:
 - **at install time.** An update does not add a dependency that a new version
   started declaring; nothing removes a dependency when its last user goes.
 
+### Your icon
+
+Your app owns its icon: ship it in your repo and name it in the manifest,
+`ICON=data/my-tool.svg` (SVG or PNG, repo-relative, at most 1 MiB). The kiwi
+GUI draws it in the list, on the cards and in the detail view, straight from
+the clone — nothing is fetched. An app without one gets a themed icon for its
+category.
+
+kiwi network apps take theirs from
+[kiwi-icons](https://github.com/derlocke-ng/kiwi-icons): copy
+`svg/classic/<app-id>.svg` into your repo and point `ICON=` at it. If the app
+installs a desktop entry, install the same file as its icon, so the app menu
+and kiwi show the same picture — kiwi-updater does exactly that.
+
 Release by tagging: `git tag v1.3.0 && git push --tags`.
 
 A tag counts as a release only if it matches `^v?[0-9]+(\.[0-9]+){0,3}$` —

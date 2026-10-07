@@ -3,6 +3,48 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 2.2.0 — 2026-10-06
+
+### Added — every app shows its own icon
+
+Each app owns its icon: the file lives in the app's repo and its manifest
+names it (`ICON=data/my-tool.svg`). The GUI now draws it in the list, on the
+cards and in the detail view — before, only the detail view used it, and
+only after `kiwi info` had loaded; rows and cards always showed a themed glyph.
+SVGs go through GTK's icon loader, so they are drawn at the size they are
+shown at instead of being scaled down from a bitmap. Only `.svg` and `.png`
+files up to 1 MiB inside the app's clone are used: catalogs other people
+publish feed this list, for apps nobody has installed yet. Apps without an
+icon keep the themed one for their category.
+
+- `kiwi list --porcelain` appends field 15, the manifest's `ICON` (empty when
+  there is none). Fields are append-only, so nothing that reads the earlier 14
+  changes.
+- kiwi-updater's own icon now comes from
+  [kiwi-icons](https://github.com/derlocke-ng/kiwi-icons) and is named by
+  `ICON=`; the desktop entry and the GUI show the same file. The README and the
+  manifest template describe how an app ships its icon — kiwi network apps copy
+  theirs from kiwi-icons `svg/classic/<app-id>.svg`.
+
+### Fixed
+
+- **Installed user apps did not say where they were installed.** The scope
+  pills (green USER, yellow ROOT; dimmed where an app is not installed) were
+  shown only for apps with a root half, on the theory that a USER pill on every
+  row was noise — so kiwi-fox and the CLI tools showed nothing at all. Every
+  app now gets one pill per scope it uses.
+- **An installed app whose repo could not be reached looked uninstalled.** The
+  GUI offered *Install* for it (which cannot reach the repo either), hid
+  *Uninstall* in its detail view and left it out of the Installed filter —
+  offline, that was every app. Whether an app is installed now comes from its
+  installed scopes, not from its status.
+- **"Apps updated" notifications name the version** ("kiwi-cli-tools-desktop
+  1.0.1"). With the name alone, the same release announced on two machines, or
+  a banner GNOME kept up while nobody was at the screen, read like an update
+  that ran twice.
+
+P35 checks the new porcelain field; P10 no longer pins the field count to 14.
+
 ## 2.1.1 — 2026-10-06
 
 One fix, seen on the first real update to 2.1.0.

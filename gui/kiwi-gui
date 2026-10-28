@@ -135,8 +135,6 @@ CSS = b"""
 .kiwi-tile.c4 { background: alpha(@red_3,.20);           color: @red_2; }
 .kiwi-tile.c5 { background: alpha(@blue_3,.22);          color: @blue_2; }
 
-.kiwi-log { background: @card_bg_color; border-top: 1px solid alpha(@window_fg_color,.10); }
-.kiwi-log text { background: transparent; }
 .kiwi-hero { border-radius: 16px; padding: 18px 20px;
              background: alpha(@accent_bg_color,.13);
              border: 1px solid alpha(@accent_bg_color,.22); }
@@ -428,6 +426,40 @@ def tile(app, big=False):
     box.set_valign(Gtk.Align.CENTER)
     box.set_hexpand(False)
     return box
+
+
+class Card(Gtk.Widget):
+    """Holds one grid card and reports its minimum width as its natural width.
+
+    A homogeneous FlowBox decides how many children fit on a line from their
+    NATURAL width, and a card's natural width is whatever its widest line of
+    text or pills wants — so a long description, or USER ROOT INSTALLED in the
+    footer, made the grid one card per line at any window size. With the
+    minimum reported as natural the grid puts as many cards across as the
+    window has room for (2, 3, 4 …) and the cells stretch to share the width.
+
+    A wrapper rather than a Gtk.Box subclass: a Box measures through its layout
+    manager, so an overridden do_measure on it is never called."""
+    __gtype_name__ = "KiwiCard"
+
+    def __init__(self, inner):
+        super().__init__()
+        inner.set_parent(self)
+
+    def do_measure(self, orientation, for_size):
+        mn, nat, mb, nb = self.get_first_child().measure(orientation, for_size)
+        if orientation == Gtk.Orientation.HORIZONTAL:
+            nat = mn
+        return mn, nat, mb, nb
+
+    def do_size_allocate(self, width, height, baseline):
+        self.get_first_child().allocate(width, height, baseline, None)
+
+    def do_dispose(self):
+        child = self.get_first_child()
+        if child is not None:
+            child.unparent()
+        Gtk.Widget.do_dispose(self)
 
 
 class App(GObject.Object):
@@ -1146,9 +1178,8 @@ class Window(Adw.ApplicationWindow):
                                   lambda *_: CatalogDialog(self).present(self))
         header.pack_start(self.btn_catalogs)
 
-        self.btn_log = Gtk.ToggleButton(icon_name=ui_icon("view-list-bullet-symbolic", "utilities-terminal-symbolic",
-                                                          "utilities-terminal"),
-                                        tooltip_text="Show activity")
+        self.btn_log = Gtk.ToggleButton(icon_name=ui_icon("utilities-terminal-symbolic", "utilities-terminal"),
+                                        tooltip_text="Show output")
         header.pack_end(self.btn_log)
         self.btn_doctor = Gtk.Button(
             icon_name=ui_icon("emblem-ok-symbolic", "dialog-information-symbolic",
@@ -1264,22 +1295,12 @@ class Window(Adw.ApplicationWindow):
         empty.set_child(empty_btn)
         self.stack.add_named(empty, "none")
 
-        # What kiwi is doing, as a readable activity pane rather than a raw
-        # terminal: steps (kiwi's ":: " lines) in bold, warnings and errors in
-        # their colours, the command itself small and dim. It opens while
-        # something runs and folds away again when that went well.
+        # kiwi's output as it is, in a terminal-style pane. A styled "activity"
+        # version with bold steps and coloured warnings was tried in 2.3.0 and
+        # taken out again the same day: the plain terminal reads better.
         self.logbuf = Gtk.TextBuffer()
-        self.logbuf.create_tag("cmd", family="monospace", scale=0.85,
-                               foreground_rgba=Gdk.RGBA(0.5, 0.5, 0.5, 1))
-        self.logbuf.create_tag("step", weight=Pango.Weight.BOLD)
-        self.logbuf.create_tag("warn", foreground="#c64600")
-        self.logbuf.create_tag("err", foreground="#c01c28", weight=Pango.Weight.BOLD)
-        self.logbuf.create_tag("plain", scale=0.95)
         self.logview = Gtk.TextView(buffer=self.logbuf, editable=False,
-                                    cursor_visible=False, wrap_mode=Gtk.WrapMode.WORD_CHAR,
-                                    top_margin=10, bottom_margin=10,
-                                    left_margin=18, right_margin=18, pixels_below_lines=3)
-        self.logview.add_css_class("kiwi-log")
+                                    monospace=True, top_margin=6, left_margin=6)
         logscroll = Gtk.ScrolledWindow(child=self.logview)
         logscroll.set_size_request(-1, 190)
         self.logrev = Gtk.Revealer(child=logscroll,
@@ -1419,13 +1440,12 @@ class Window(Adw.ApplicationWindow):
     # from the content, but every card has the same structure — icon line, two
     # lines of description, footer — so they line up without a hard-coded height
     # and without leaving dead space in the short ones.
-    CARD_WIDTH = 290
+    CARD_WIDTH = 280
 
     def _make_card(self, app):
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
                        width_request=self.CARD_WIDTH)
         card.add_css_class("kiwi-card")
-        card.app = app
 
         head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         head.append(tile(app))
@@ -1448,13 +1468,21 @@ class Window(Adw.ApplicationWindow):
         foot.append(badges)
         foot.append(self._action_button(app, compact=True))
         card.append(foot)
-        return card
+        outer = Card(card)
+        outer.app = app
+        return outer
 
     @staticmethod
     def _text(text, css=None, wrap=False, lines=-1):
+        # Ellipsizing only lowers a label's MINIMUM width; its natural width is
+        # still the whole text, and a homogeneous FlowBox sizes every cell to
+        # the widest natural child — so one long description made the grid one
+        # card per line, however wide the window. Capping the natural width
+        # keeps a card near CARD_WIDTH and lets the grid fit as many across as
+        # the window allows.
         lbl = Gtk.Label(label=text or "", xalign=0.0,
                         halign=Gtk.Align.START, hexpand=True,
-                        ellipsize=Pango.EllipsizeMode.END)
+                        ellipsize=Pango.EllipsizeMode.END, max_width_chars=22)
         if wrap:
             lbl.set_wrap(True)
             lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
@@ -1465,8 +1493,11 @@ class Window(Adw.ApplicationWindow):
 
     @staticmethod
     def _badges(app):
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
-                      halign=Gtk.Align.START, valign=Gtk.Align.CENTER)
+        # wraps, so three pills do not dictate the card's minimum width
+        box = Adw.WrapBox(child_spacing=6, line_spacing=4, halign=Gtk.Align.START,
+                          valign=Gtk.Align.CENTER) if hasattr(Adw, "WrapBox") else \
+            Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
+                    halign=Gtk.Align.START, valign=Gtk.Align.CENTER)
         for p in scope_pills(app):
             box.append(p)
         label, kind = STATUS.get(app["status"], ("", "dim"))
@@ -1749,9 +1780,7 @@ class Window(Adw.ApplicationWindow):
     def after_action(self, rc, verb):
         self.set_busy(False, "")
         self.toast("%s finished" % verb.capitalize() if rc == 0
-                   else "%s failed — see the activity pane" % verb.capitalize())
-        if rc == 0:
-            GLib.timeout_add(1500, lambda: self.btn_log.set_active(False) or False)
+                   else "%s failed — see the output" % verb.capitalize())
         self.refresh()
         return False
 
@@ -1775,20 +1804,8 @@ class Window(Adw.ApplicationWindow):
             return False
         return True
 
-    ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-
     def append_log(self, text):
-        for line in self.ANSI.sub("", text).splitlines(True):
-            tag = "plain"
-            if line.startswith("$ "):
-                tag = "cmd"
-            elif line.startswith(":: "):
-                tag, line = "step", line[3:]
-            elif line.startswith("warning:"):
-                tag = "warn"
-            elif line.startswith("error:"):
-                tag = "err"
-            self.logbuf.insert_with_tags_by_name(self.logbuf.get_end_iter(), line, tag)
+        self.logbuf.insert(self.logbuf.get_end_iter(), text)
         mark = self.logbuf.create_mark(None, self.logbuf.get_end_iter(), False)
         self.logview.scroll_mark_onscreen(mark)
         self.logbuf.delete_mark(mark)

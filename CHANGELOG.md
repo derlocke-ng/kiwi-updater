@@ -3,6 +3,19 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 2.3.1 — 2026-10-28
+
+- **The grid is a grid again.** It showed one card per line at any window
+  size: a homogeneous FlowBox fits children by their *natural* width, and a
+  card's natural width was whatever its longest description or its row of
+  pills wanted. Each card now reports its minimum as its natural width (a thin
+  wrapper widget — a Box's own `do_measure` is never called, it measures
+  through its layout manager), the footer pills wrap, and labels cap their
+  width. Measured: 2 cards across at 700 px, 3 at 1000, 4 at 1700, cells
+  stretching to share the width.
+- **The output pane is a terminal again.** 2.3.0's styled "activity" pane
+  was worse to read than the plain monospace output; reverted.
+
 ## 2.3.0 — 2026-10-28
 
 ### GUI

@@ -10,7 +10,7 @@
 #   system — listed in /etc/kiwi-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-KIWI_VERSION=2.2.1
+KIWI_VERSION=2.3.0
 
 # systemd system services start without $HOME (set -u would abort at the
 # path definitions below) — root's user-scope paths are never used anyway
@@ -51,6 +51,14 @@ checkout is missing. Set it up with:
 # and the passwordless wrapper, "manual" has neither — every system change
 # asks for a password and nothing of kiwi's runs as root unattended.
 system_mode() { cat /etc/kiwi-updater/mode 2>/dev/null || echo auto; }
+# what the mode means, for people: "auto mode" read like a leftover
+mode_label() {
+    if [[ $(system_mode) == manual ]]; then
+        echo "manual mode: system halves ask for your password"
+    else
+        echo "system halves update without a password"
+    fi
+}
 
 # The root copy is a separate file updated by its own timer, so the two can
 # drift. Read the version out of it rather than executing it — this runs on
@@ -2040,7 +2048,7 @@ cmd_doctor() {
     _good "this copy is $KIWI_VERSION ($0)"
     if have="$(root_version)"; then
         if [[ $have == "$KIWI_VERSION" ]]; then
-            _good "root-owned copy at $ROOT_KIWI is $have ($(system_mode) mode)"
+            _good "root-owned copy at $ROOT_KIWI is $have ($(mode_label))"
         else
             _bad "root-owned copy at $ROOT_KIWI is $have, this one is $KIWI_VERSION.
 $(root_skew_advice "$have")"
@@ -2056,9 +2064,11 @@ $(root_skew_advice "$have")"
         if [[ ! -f $lock ]]; then _good "$sc: no lock file"; continue; fi
         who="$(head -1 "$lock" 2>/dev/null || true)"
         host="${who%% *}"; pid="${who#*pid=}"; pid="${pid%% *}"; pid="${pid//[!0-9]/}"
-        if [[ ! -w $lock ]]; then
-            _note "$sc: $lock is not writable by this user, cannot test it"
-        elif ( exec 8<>"$lock" && flock -n 8 ) 2>/dev/null; then
+        # flock works on a read-only descriptor, so root's lock can be tested
+        # from a user account as long as the file can be read (it is 644).
+        if [[ ! -r $lock ]]; then
+            _note "$sc: $lock is not readable by this user, cannot test it"
+        elif ( exec 8<"$lock" && flock -n 8 ) 2>/dev/null; then
             _good "$sc: free"
         elif [[ $host == "$me" && -n $pid ]] && ! kill -0 "$pid" 2>/dev/null; then
             _bad "$sc: lock held but pid $pid is gone — stale. Remove $lock"
@@ -2459,7 +2469,7 @@ case "$CMD" in
     # system scope — and broke anything scripted as `kiwi version && …`.
     version)     echo "kiwi $KIWI_VERSION"
                  if root_v="$(root_version)"; then
-                     echo "root-owned copy at $ROOT_KIWI: $root_v ($(system_mode) mode)"
+                     echo "root-owned copy at $ROOT_KIWI: $root_v ($(mode_label))"
                  fi ;;
     ""|help)     usage ;;
     *)           die "unknown command: $CMD (see 'kiwi help')" ;;

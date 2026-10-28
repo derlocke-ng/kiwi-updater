@@ -3,6 +3,41 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 2.3.0 — 2026-10-28
+
+### GUI
+
+- **Uninstall asks about the app's data**, the way Flatpak does: a checkbox
+  "Also delete its data and settings" in the confirmation, which passes
+  `--purge` to the app's uninstaller. Off by default — reinstalling later picks
+  up where you left off.
+- **The output pane reads as activity, not a terminal.** kiwi's steps in bold,
+  warnings and errors in colour, the command small and dim, on the window's own
+  background instead of a black monospace box. It opens while something runs
+  and folds away again when that went well; after a failure it stays open.
+
+### Install
+
+- **The one-line install is the recommended one.** `get-kiwi.sh | bash` now
+  sets up the user scope *and* the root-owned system scope (one password);
+  `--minimal` gives the user-only install that used to be the default.
+  `install.sh` run from a clone keeps its user-only default, so nothing run
+  by hand or by the tests asks for a password unless told to.
+- README: the Kiwi Network catalog has been preregistered by the install
+  since 1.x, but the README still told you to add it; the "root timer" from
+  before 2.0.0 was still mentioned; porcelain field 15 was missing.
+
+### CLI
+
+- **`kiwi doctor` tests root's lock from a user account.** It said "not
+  writable by this user, cannot test it"; `flock` works on a read-only
+  descriptor, and the lock file is readable, so it now reports `system: free`
+  (or who holds it) like the user lock.
+- **"(auto mode)" is gone from `kiwi version` and `kiwi doctor`.** The mode is
+  still there (`--with-system=manual` exists), but the label read like a
+  leftover. It now says what it means: "system halves update without a
+  password", or "manual mode: system halves ask for your password".
+
 ## 2.2.1 — 2026-10-28
 
 Two small fixes from an outside review.

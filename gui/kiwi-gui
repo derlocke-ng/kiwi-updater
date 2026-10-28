@@ -135,6 +135,8 @@ CSS = b"""
 .kiwi-tile.c4 { background: alpha(@red_3,.20);           color: @red_2; }
 .kiwi-tile.c5 { background: alpha(@blue_3,.22);          color: @blue_2; }
 
+.kiwi-log { background: @card_bg_color; border-top: 1px solid alpha(@window_fg_color,.10); }
+.kiwi-log text { background: transparent; }
 .kiwi-hero { border-radius: 16px; padding: 18px 20px;
              background: alpha(@accent_bg_color,.13);
              border: 1px solid alpha(@accent_bg_color,.22); }
@@ -1144,8 +1146,9 @@ class Window(Adw.ApplicationWindow):
                                   lambda *_: CatalogDialog(self).present(self))
         header.pack_start(self.btn_catalogs)
 
-        self.btn_log = Gtk.ToggleButton(icon_name=ui_icon("utilities-terminal-symbolic", "utilities-terminal"),
-                                        tooltip_text="Show output")
+        self.btn_log = Gtk.ToggleButton(icon_name=ui_icon("view-list-bullet-symbolic", "utilities-terminal-symbolic",
+                                                          "utilities-terminal"),
+                                        tooltip_text="Show activity")
         header.pack_end(self.btn_log)
         self.btn_doctor = Gtk.Button(
             icon_name=ui_icon("emblem-ok-symbolic", "dialog-information-symbolic",
@@ -1261,9 +1264,22 @@ class Window(Adw.ApplicationWindow):
         empty.set_child(empty_btn)
         self.stack.add_named(empty, "none")
 
+        # What kiwi is doing, as a readable activity pane rather than a raw
+        # terminal: steps (kiwi's ":: " lines) in bold, warnings and errors in
+        # their colours, the command itself small and dim. It opens while
+        # something runs and folds away again when that went well.
         self.logbuf = Gtk.TextBuffer()
+        self.logbuf.create_tag("cmd", family="monospace", scale=0.85,
+                               foreground_rgba=Gdk.RGBA(0.5, 0.5, 0.5, 1))
+        self.logbuf.create_tag("step", weight=Pango.Weight.BOLD)
+        self.logbuf.create_tag("warn", foreground="#c64600")
+        self.logbuf.create_tag("err", foreground="#c01c28", weight=Pango.Weight.BOLD)
+        self.logbuf.create_tag("plain", scale=0.95)
         self.logview = Gtk.TextView(buffer=self.logbuf, editable=False,
-                                    monospace=True, top_margin=6, left_margin=6)
+                                    cursor_visible=False, wrap_mode=Gtk.WrapMode.WORD_CHAR,
+                                    top_margin=10, bottom_margin=10,
+                                    left_margin=18, right_margin=18, pixels_below_lines=3)
+        self.logview.add_css_class("kiwi-log")
         logscroll = Gtk.ScrolledWindow(child=self.logview)
         logscroll.set_size_request(-1, 190)
         self.logrev = Gtk.Revealer(child=logscroll,
@@ -1646,18 +1662,25 @@ class Window(Adw.ApplicationWindow):
         dlg = Adw.AlertDialog(
             heading="Uninstall %s?" % (esc(names[0]) if len(names) == 1
                                        else "%d apps" % len(names)),
-            body="Its own uninstaller removes its files. Configuration is "
-                 "kept, so reinstalling later picks up where you left off.")
+            body="Its own uninstaller removes its files.")
+        # Like Flatpak's uninstall: the data stays unless you say otherwise,
+        # and the choice is made here, where you can see what you are removing.
+        purge = Gtk.CheckButton(label="Also delete its data and settings",
+                                halign=Gtk.Align.CENTER)
+        purge.set_tooltip_text("What the app keeps in your home directory. "
+                               "Left alone, reinstalling later picks up where you left off.")
+        dlg.set_extra_child(purge)
         dlg.add_response("cancel", "Cancel")
         dlg.add_response("remove", "Uninstall")
         dlg.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
         dlg.set_default_response("cancel")
         dlg.set_close_response("cancel")
         dlg.connect("response", lambda _d, r: r == "remove"
-                    and self.run_action("uninstall", names, confirmed=True))
+                    and self.run_action("uninstall", names, confirmed=True,
+                                        purge=purge.get_active()))
         dlg.present(self)
 
-    def run_action(self, verb, names, confirmed=False):
+    def run_action(self, verb, names, confirmed=False, purge=False):
         if self.busy or not names:
             return
         if verb == "uninstall" and not confirmed:
@@ -1671,7 +1694,7 @@ class Window(Adw.ApplicationWindow):
                 self._confirm_root(verb, names, root_apps)
                 return
         self.set_busy(True, "%s %d app(s)…" % (verb.capitalize(), len(names)))
-        self._spawn([self.kiwi, verb] + list(names),
+        self._spawn([self.kiwi, verb] + (["--purge"] if purge else []) + list(names),
                     lambda rc: self.after_action(rc, verb))
 
     def run_catalog(self, args, dialog):
@@ -1726,7 +1749,9 @@ class Window(Adw.ApplicationWindow):
     def after_action(self, rc, verb):
         self.set_busy(False, "")
         self.toast("%s finished" % verb.capitalize() if rc == 0
-                   else "%s failed — see the output" % verb.capitalize())
+                   else "%s failed — see the activity pane" % verb.capitalize())
+        if rc == 0:
+            GLib.timeout_add(1500, lambda: self.btn_log.set_active(False) or False)
         self.refresh()
         return False
 
@@ -1750,8 +1775,20 @@ class Window(Adw.ApplicationWindow):
             return False
         return True
 
+    ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
     def append_log(self, text):
-        self.logbuf.insert(self.logbuf.get_end_iter(), text)
+        for line in self.ANSI.sub("", text).splitlines(True):
+            tag = "plain"
+            if line.startswith("$ "):
+                tag = "cmd"
+            elif line.startswith(":: "):
+                tag, line = "step", line[3:]
+            elif line.startswith("warning:"):
+                tag = "warn"
+            elif line.startswith("error:"):
+                tag = "err"
+            self.logbuf.insert_with_tags_by_name(self.logbuf.get_end_iter(), line, tag)
         mark = self.logbuf.create_mark(None, self.logbuf.get_end_iter(), False)
         self.logview.scroll_mark_onscreen(mark)
         self.logbuf.delete_mark(mark)

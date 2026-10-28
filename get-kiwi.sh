@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # kiwi-updater bootstrap — install with one line.
 #
-# Recommended on a desktop: the user scope plus the root-owned system scope
-# (one password prompt). Apps with a root half — kiwi-killswitch — need it:
+# Recommended, and what you get with no options: the user scope plus the
+# root-owned system scope, one password prompt. Apps with a root half —
+# kiwi-killswitch — need it:
 #
-#   curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system
+#   curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash
 #
-# The same without a root timer or any passwordless action — every system
-# change asks for your password:
+# The same without any passwordless action — every system change asks for
+# your password:
 #
 #   curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system=manual
 #
 # Minimal, 100% user-level, no root ever (complete for user-only apps):
 #
-#   curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --minimal
 #
 # Clones straight into kiwi's own repo cache (so self-update just works),
 # checks out the latest release tag, and runs the normal installer.
@@ -54,7 +55,20 @@ main() {
         git -C "$DIR" -c advice.detachedHead=false checkout --quiet --force "$tag"
     fi
 
-    exec bash "$DIR/install.sh" install "$@"
+    # The recommended install is the default here, so the one line people copy
+    # stays short. install.sh itself keeps the user scope as its default: a
+    # script run from a clone, or by the tests, must not ask for a password
+    # unless told to. --minimal is this bootstrap's way of saying "user only".
+    local args=() a want_system=1
+    for a in "$@"; do
+        case "$a" in
+            --minimal|--user-only) want_system=0 ;;
+            --with-system|--with-system=*) want_system=0; args+=("$a") ;;
+            *) args+=("$a") ;;
+        esac
+    done
+    (( want_system )) && args=(--with-system "${args[@]}")
+    exec bash "$DIR/install.sh" install "${args[@]}"
 }
 
 main "$@"

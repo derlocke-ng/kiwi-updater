@@ -16,8 +16,10 @@ send a pull request to.
 - **releases are git tags** — apps follow their latest *version* tag, meaning
   one shaped like `v1.2.3`. Pre-releases and scratch tags are never picked up
   by accident; untagged repos follow HEAD
-- **catalogs** — add as many as you like, managed through ordinary git
-- **systemd timers** — background updates for user apps and, opt-in, system apps
+- **catalogs** — the Kiwi Network catalog comes registered; add as many more
+  as you like, managed through ordinary git
+- **one timer, yours** — background updates for everything you installed; the
+  root halves through a small polkit-gated helper, without a password
 
 ## Install
 
@@ -25,13 +27,13 @@ send a pull request to.
 password prompt:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system
+curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash
 ```
 
 **Minimal** — 100 % user-level: `~/.local`, no root, no password, ever:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash
+curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --minimal
 ```
 
 Anything that is only files in your home — the CLI tools, ensconce, syncman — is
@@ -42,11 +44,12 @@ password. Prefer to type a password for *every* system change instead of
 granting passwordless updates? `--with-system=manual` installs the same thing
 without the polkit rule; one command switches either way.
 
-Then register a catalog:
+The [Kiwi Network catalog](https://github.com/derlocke-ng/kiwi-catalog) is
+registered by the install, so you can go straight to:
 
 ```bash
-kiwi catalog add https://github.com/derlocke-ng/kiwi-catalog.git
 kiwi list
+kiwi-gui
 ```
 
 ## Use
@@ -201,6 +204,9 @@ HOMEPAGE=https://github.com/derlocke-ng/kiwi-catalog
 MAINTAINER=derlocke-ng
 ```
 
+The Kiwi Network catalog is registered by the install; any other is one
+command away:
+
 ```bash
 kiwi catalog add https://github.com/you/your-catalog.git
 kiwi catalog list
@@ -259,7 +265,7 @@ change.
 | piece | location | why |
 |---|---|---|
 | `kiwi`, `kiwi-gui`, user apps | `~/.local` | no root, survives an ostree rebase |
-| root-owned `kiwi` copy (opt-in) | `/usr/local/bin` (= writable `/var/usrlocal`) | the **root** update timer must never execute a *user-writable* file, or any process running as you could edit it and become root on the next tick |
+| root-owned `kiwi` copy | `/usr/local/bin` (= writable `/var/usrlocal`) | what runs as root must never be a *user-writable* file, or any process running as you could edit it and become root on the next update |
 | system app repos / config | `/var/lib`, `/etc` | writable on ostree, root-owned |
 
 The immutable `/usr` is never touched. If you never install a system app,
@@ -322,10 +328,10 @@ In `manual` mode the timer leaves system halves for your next interactive
 | **installing** a system app | yes | yes |
 | **uninstalling** a system app | yes | yes |
 
-A plain `kiwi install` never touches root: the default install is entirely
-`~/.local`, and the system scope only exists if you set it up with
-`--with-system`. Only an app that declares `SCOPES=… system` needs it, and
-`kiwi info <app>` tells you why before you are asked.
+A plain `kiwi install` never touches root unless the app declares
+`SCOPES=… system`, and `kiwi info <app>` tells you why before you are asked.
+A `--minimal` install has no system scope at all; the first such app sets it
+up on the spot, with one password.
 
 Passwordless system *updates* go through `/usr/local/libexec/kiwi-system-update`,
 which the polkit rule authorises by exact path. It takes app names but treats
@@ -362,7 +368,7 @@ remote desktop sessions can report as non-local.
   run either.
 - `kiwi list --porcelain` fields are positional and only ever appended to, so
   anything parsing it keeps working. Field 13 is the scopes an app is installed
-  in, 14 is its pin.
+  in, 14 its pin, 15 its icon.
 
 ## License
 

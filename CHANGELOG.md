@@ -3,6 +3,26 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 2.2.1 — 2026-10-28
+
+Two small fixes from an outside review.
+
+- **Root no longer follows a local path that a catalog names.** `valid_url`
+  accepted `/path` and `file://` from any source, so a trusted catalog listing
+  a local directory would have had root clone it and run its installer on the
+  next passwordless update — code that whoever can write that directory
+  controls, which the admin never named. From a catalog, root now follows a
+  local path only if root owns it and nobody else can write it (the test the
+  lists already get); a path in `/etc/kiwi-updater/apps.list` was put there by
+  the admin and is taken as it is. Users are unaffected. P36.
+- **`install.sh uninstall` finished halfway without a systemd user session.**
+  `systemctl --user daemon-reload` ran unguarded under `set -e`, so over ssh or
+  in a container the uninstall stopped there with every binary still in place.
+  P37.
+- **As root, `kiwi catalog add|remove` without `--system` wrote to
+  `/root/.config`, which root never reads.** Found by P36's first draft, which
+  passed for that reason. Root now writes the system file either way.
+
 ## 2.2.0 — 2026-10-06
 
 ### Added — every app shows its own icon

@@ -167,6 +167,7 @@ t_F7() { # 'kiwi install' with no arguments must not install the whole catalog
 t_F8() { # F8 + F9 share a setup: a system app from a catalog, seen by the user
     mkapp a rootsvc system
     mkcat c cat1 $GITROOT/a/rootsvc.git
+    chown -R root:root $GITROOT/a      # a catalog's local path: root follows it only if root owns it (P36)
     mkdir -p /etc/kiwi-updater; echo $GITROOT/c/cat1.git > /etc/kiwi-updater/catalogs.list
     ku catalog add $GITROOT/c/cat1.git >/dev/null 2>&1
     ku list >/dev/null 2>&1
@@ -922,9 +923,38 @@ t_P35() { # an app's own icon reaches the GUI: list --porcelain field 15 is its 
     check P35 "list --porcelain appends the app's ICON as field 15 (empty when it has none)" f
 }
 
+t_P36() { # root follows a local path a catalog names only if root owns it
+    # valid_url accepted /path and file:// from any source. A trusted catalog
+    # that lists a user-writable directory would have had root clone and run
+    # whatever its owner put there, on the next passwordless update.
+    mkapp a localapp "system"                      # $GITROOT/a is owned by the test user
+    mkcat c rootcat $GITROOT/a/localapp.git
+    kr catalog add --system $GITROOT/c/rootcat.git >/dev/null 2>&1
+    local userowned rootowned vialist
+    userowned="$(kr list --porcelain 2>/dev/null | cut -f1)"
+    chown -R root:root $GITROOT/a
+    rootowned="$(kr list --porcelain 2>/dev/null | cut -f1)"
+    chown -R $T $GITROOT/a
+    mkdir -p /etc/kiwi-updater; echo "$GITROOT/a/localapp.git" > /etc/kiwi-updater/apps.list
+    vialist="$(kr list --porcelain 2>/dev/null | cut -f1)"
+    f() { ! grep -qx localapp <<<"$userowned" && grep -qx localapp <<<"$rootowned" && grep -qx localapp <<<"$vialist"; }
+    check P36 "as root, a catalog's local path counts only when root owns it; the system list's always" f
+}
+
+t_P37() { # uninstalling without a systemd user session must still remove the files
+    # `systemctl --user daemon-reload` ran unguarded under set -e, so over ssh
+    # or in a container the uninstall stopped there with every binary in place.
+    runuser -u $T -- env -i HOME=$TH PATH=$STUBS:/usr/bin:/bin bash $W/install.sh install --cli-only </dev/null >/dev/null 2>&1
+    stub_systemctl 1
+    runuser -u $T -- env -i HOME=$TH PATH=$STUBS:/usr/bin:/bin bash $W/install.sh uninstall </dev/null >/dev/null 2>&1
+    stub_systemctl 0
+    f() { [[ ! -e $TH/.local/bin/kiwi ]]; }
+    check P37 "install.sh uninstall completes when 'systemctl --user' is unavailable" f
+}
+
 for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
          P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P17 P18 P19 P20 P22 P23 P25 \
-         P27 P28 P29 P30 P31 P32 P33 P34 P35; do run $t; done
+         P27 P28 P29 P30 P31 P32 P33 P34 P35 P36 P37; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

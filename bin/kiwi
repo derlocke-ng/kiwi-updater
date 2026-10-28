@@ -10,7 +10,7 @@
 #   system — listed in /etc/kiwi-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-KIWI_VERSION=2.2.0
+KIWI_VERSION=2.2.1
 
 # systemd system services start without $HOME (set -u would abort at the
 # path definitions below) — root's user-scope paths are never used anyway
@@ -326,7 +326,7 @@ app_entries() {
     local url opts d seen=" " _src
     while IFS=$'\t' read -r _src url opts; do
         [[ -z $url ]] && continue
-        valid_url "$url" || continue     # reported once by check_lists
+        entry_ok "$url" "$opts" || continue     # reported once by check_lists
         d="$(dir_name "$url")"
         [[ $seen == *" $d "* ]] && continue
         seen+="$d "
@@ -349,6 +349,12 @@ check_lists() {
             warn "ignoring an unusable entry in $src: '$url'"
             warn "  a list holds git URLs (https://…, or an absolute path), not app names."
             warn "  delete that line, or replace it with the repo's URL: kiwi add <url>"
+            continue
+        fi
+        if ! entry_ok "$url" "$opts"; then
+            warn "ignoring a local path a catalog names, as root: $src: '$url'"
+            warn "  it is not owned by root, or others can write it. Root takes such a path"
+            warn "  only from $SYS_LIST"
             continue
         fi
         d="$(dir_name "$url")"; u="$(norm_url "$url")"
@@ -624,6 +630,23 @@ valid_url() { # url
     b="$(dir_name "$u")"
     [[ -n $b && $b != . && $b != .. && $b != */* ]] || return 1
     return 0
+}
+
+# A local path in a CATALOG is someone else's choice of a directory on this
+# machine. As a user that is your own risk; as root it would mean that whoever
+# can write that directory has code run as root on the next passwordless
+# update, without the admin ever naming it. So from a catalog, root follows a
+# local path only if root owns it and nobody else can write it — the same test
+# list_trusted applies to the lists. A path in root's own list (local=1) was
+# put there by the admin, with a password, and is taken as it is.
+entry_ok() { # url opts
+    valid_url "$1" || return 1
+    [[ $EUID -eq 0 && $1 != https://* && $1 != http://* ]] || return 0
+    [[ "$(entry_opt "${2:-}" local 0)" == 1 ]] && return 0
+    local st owner mode
+    st="$(stat -c '%u %a' "${1#file://}" 2>/dev/null)" || return 1
+    read -r owner mode <<<"$st"
+    [[ $owner == 0 ]] && (( (8#$mode & 8#022) == 0 ))
 }
 
 list_has() { # file url
@@ -1663,7 +1686,7 @@ dep_app() { # word dependent_url
         if [[ "$(entry_opt "$o" local 0)" != 1 ]] && ! grep -qxF -- "$src" <<<"$homes"; then
             continue
         fi
-        valid_url "$u" || continue
+        entry_ok "$u" "$o" || continue
         printf '%s\t%s\n' "$u" "$o"; return 0
     done < <(app_entries_raw)
     return 1
@@ -2209,8 +2232,10 @@ cmd_catalog() { # add <url> | list      (--system routes to the system file)
             valid_url "$url" || die "not a usable git url: '$url'
 expected https://…, http://… or an absolute path to a local repo."
             [[ $url == http://* ]] && warn "http:// is not encrypted; anyone on the path can change what you install"
+            # root reads only the system file (catalog_urls), so as root that
+            # is the one to write — the user file under /root was never read
             local f="$USER_CATALOGS"
-            [[ $SCOPE_FILTER == system ]] && f="$SYS_CATALOGS"
+            [[ $SCOPE_FILTER == system || $EUID -eq 0 ]] && f="$SYS_CATALOGS"
             if [[ $f == "$SYS_CATALOGS" && $EUID -ne 0 ]]; then
                 local rk; rk="$(root_kiwi)" || return 1
                 as_root "$rk" catalog add "$url" --system
@@ -2264,8 +2289,10 @@ Both would share one clone. Rename the repo, or use a fork with a distinct name.
         remove)
             local url="${1:-}"
             [[ -n $url ]] || die "usage: kiwi catalog remove <git-url> [--system]"
+            # root reads only the system file (catalog_urls), so as root that
+            # is the one to write — the user file under /root was never read
             local f="$USER_CATALOGS"
-            [[ $SCOPE_FILTER == system ]] && f="$SYS_CATALOGS"
+            [[ $SCOPE_FILTER == system || $EUID -eq 0 ]] && f="$SYS_CATALOGS"
             if [[ $f == "$SYS_CATALOGS" && $EUID -ne 0 ]]; then
                 local rk; rk="$(root_kiwi)" || return 1
                 as_root "$rk" catalog remove "$url" --system

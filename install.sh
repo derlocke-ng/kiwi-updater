@@ -238,7 +238,8 @@ user_uninstall() {
     say "removing user service, binaries, desktop entry"
     systemctl --user disable --now kiwi-updater.timer 2>/dev/null || true
     rm -f "$USER_UNIT_DIR/kiwi-updater.service" "$USER_UNIT_DIR/kiwi-updater.timer"
-    systemctl --user daemon-reload
+    # no user session (ssh, a container): still remove the files below
+    systemctl --user daemon-reload 2>/dev/null || true
     rm -f "$USER_BIN/kiwi" "$USER_BIN/kiwi-gui" \
           "${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions/kiwi" \
           "$USER_APPS/eu.kiwinetwork.KiwiUpdater.desktop" "$USER_APPS/kiwi-gui.desktop" \
@@ -303,7 +304,7 @@ root_uninstall() {
     systemctl disable --now kiwi-updater-system.timer 2>/dev/null || true
     rm -f "$SYS_UNIT_DIR/kiwi-updater-system.service" "$SYS_UNIT_DIR/kiwi-updater-system.timer" \
           /etc/polkit-1/rules.d/50-kiwi-updater.rules
-    systemctl daemon-reload
+    systemctl daemon-reload 2>/dev/null || true
     rm -f "$SYS_BIN/kiwi" /usr/local/libexec/kiwi-system-update \
           /usr/local/share/bash-completion/completions/kiwi
 

@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-k
 curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash
 ```
 
-Anything that is only files in your home — the CLI tools, ensconce — is
+Anything that is only files in your home — the CLI tools, ensconce, syncman — is
 complete on the minimal install. An app with a **root half** (kiwi-killswitch:
 a root firewall daemon plus a desktop part) needs the system scope; if it is
 not there yet, `kiwi install kiwi-killswitch` sets it up on the spot with one

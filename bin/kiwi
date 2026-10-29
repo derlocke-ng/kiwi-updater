@@ -10,7 +10,7 @@
 #   system — listed in /etc/kiwi-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-KIWI_VERSION=2.3.1
+KIWI_VERSION=2.3.2
 
 # systemd system services start without $HOME (set -u would abort at the
 # path definitions below) — root's user-scope paths are never used anyway
@@ -1112,7 +1112,7 @@ install_one() { # scope url opts
     deps="$(manifest_get "$dir" DEPENDS "")"
     if [[ -n $deps ]]; then
         # A dependency that is itself a kiwi app (a provider module needs
-        # kiwi-fox) is installed first, in this process; what is left in
+        # kiwi-proxy) is installed first, in this process; what is left in
         # DEPS_MISSING is commands no kiwi app provides, which we can only
         # warn about.
         ensure_deps "$scope" "$url" "$deps"
@@ -1640,10 +1640,11 @@ cmd_search() { # term...
 }
 
 # which of an app's declared dependencies are actually present — looked up in
-# the PATH that scope's installer will get, not kiwi's own. kiwi-fox's plugins
-# declare DEPENDS=kiwi-fox, a command kiwi-fox installs into ~/.local/bin; from
-# a user manager without the desktop's environment, kiwi's own PATH reported it
-# missing on every update while the installer would have found it.
+# the PATH that scope's installer will get, not kiwi's own. The provider plugins
+# declare DEPENDS=kiwi-proxy, a command kiwi-proxy installs into ~/.local/bin;
+# from a user manager without the desktop's environment, kiwi's own PATH
+# reported such a command missing on every update while the installer would
+# have found it.
 deps_missing() { # "a b c" [scope] -> missing ones
     local scope="${2:-}" d out=()
     if [[ -z $scope ]]; then
@@ -1660,7 +1661,7 @@ deps_missing() { # "a b c" [scope] -> missing ones
 # ---------------------------------------------------------------------------
 # App-level dependencies. A DEPENDS word is normally a command (podman, git)
 # that kiwi only checks for. When it is not found and names a kiwi app, that
-# app is installed first: `kiwi install kiwi-plugin-tor` brings kiwi-fox.
+# app is installed first: `kiwi install kiwi-plugin-tor` brings kiwi-proxy.
 #
 # Three limits, each the fix for a way this went wrong when it first shipped:
 #   - it installs in THIS process, never inside $(…), where the dependency's

@@ -82,7 +82,7 @@ CATEGORY_ICON = {
 COMPONENT_ICON = (
     ("gnome-extension", ["extension-symbolic", "application-x-addon",
                          "extension", "preferences-desktop-theme"]),
-    # a plugin for another app (kiwi-fox's provider modules)
+    # a plugin for another app (kiwi-proxy's provider modules)
     ("module",          ["application-x-addon-symbolic", "application-x-addon",
                          "extension-symbolic", "extension"]),
     ("daemon",          ["emblem-system-symbolic", "applications-system", "system-run"]),
@@ -919,7 +919,7 @@ class DetailDialog(Adw.Dialog):
         deps = info.get("depends", "").split()
         if deps:
             missing = set(info.get("depends_missing", "").split())
-            # kiwi apps an install brings in first (kiwi-fox for its plugins)
+            # kiwi apps an install brings in first (kiwi-proxy for the plugins)
             # are not missing: saying so warned that a plugin's installer
             # "may fail" over the very app kiwi was about to install for it
             installs = set(info.get("depends_installs", "").split())

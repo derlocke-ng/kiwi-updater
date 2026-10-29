@@ -3,6 +3,13 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 2.3.2 — 2026-10-29
+
+- **DEPENDS examples follow the kiwi-proxy split.** The provider plugins now
+  declare `DEPENDS=kiwi-proxy podman`, so `kiwi install kiwi-plugin-tor` brings
+  kiwi-proxy, not kiwi-fox. The README, the manifest template and the comments
+  that used kiwi-fox as the example say so.
+
 ## 2.3.1 — 2026-10-28
 
 - **The grid is a grid again.** It showed one card per line at any window

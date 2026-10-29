@@ -153,9 +153,9 @@ where there is no GTK stack.
 `DEPENDS` lists commands your installer needs — `DEPENDS=podman git`. kiwi
 checks each one with `command -v` (in the `PATH` your installer will get) and
 says what is missing before it runs anything. When a missing word is the name
-of a **kiwi app**, kiwi installs that app first: kiwi-fox's provider plugins
-say `DEPENDS=kiwi-fox podman`, so `kiwi install kiwi-plugin-tor` brings
-kiwi-fox along. `kiwi install … --dry-run`, `kiwi info` and the GUI all show
+of a **kiwi app**, kiwi installs that app first: the provider plugins say
+`DEPENDS=kiwi-proxy podman`, so `kiwi install kiwi-plugin-tor` brings
+kiwi-proxy along. `kiwi install … --dry-run`, `kiwi info` and the GUI all show
 which apps an install would bring.
 
 Only where it is safe to:

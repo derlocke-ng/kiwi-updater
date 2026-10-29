@@ -772,8 +772,8 @@ pathprobe-$KIWI_SCOPE'
 }
 
 t_P28() { # DEPENDS is checked with the PATH the installer will get, not kiwi's own
-    # kiwi-fox's plugins declare DEPENDS=kiwi-fox — a command kiwi-fox installs
-    # into ~/.local/bin. In miniature: provider installs the tool, consumer
+    # The provider plugins declare DEPENDS=kiwi-proxy — a command kiwi-proxy
+    # installs into ~/.local/bin. In miniature: provider installs the tool, consumer
     # depends on it, and kiwi's own PATH (here, like a headless user manager)
     # has no ~/.local/bin.
     mkapp a provider user 'mkdir -p "$KIWI_PREFIX/bin"; printf "#!/bin/sh\n" > "$KIWI_PREFIX/bin/provtool"; chmod +x "$KIWI_PREFIX/bin/provtool"'

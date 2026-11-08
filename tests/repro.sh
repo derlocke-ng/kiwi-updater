@@ -278,31 +278,37 @@ t_F15() { # list files are matched by exact URL, not by substring
 }
 
 t_F16() { # do not ask for a password and then say "unknown app"
-    # 2.0: an install is always authenticated, so instead of refusing, the URL
-    # the user was shown goes along (--from) and root records it. What must
-    # NOT happen is an escalation by name alone, which is the "password, then
-    # unknown app" the finding was about.
-    # 2.4 (H1): root records only https URLs that way. A local path is not
-    # escalated at all — no password for work root would refuse.
+    # 2.0 handed root the URL the user was shown (--from) and root recorded it.
+    # 2.4 (D4): root installs only sources it already lists. For one it does
+    # not, nothing is escalated — no password for work root would refuse, and
+    # never an escalation by name alone — and the user is told how to register
+    # it. Once root lists it, the escalation names the app and says, before
+    # the password, where it comes from (M4).
     mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater
     install -Dm755 $K /usr/local/bin/kiwi
-    # (a) https (kiwi.test, see the top): handed over by URL
     mkapp a hsvc system
-    local hu=https://kiwi.test/a/hsvc.git
+    local hu=https://kiwi.test/a/hsvc.git      # https (kiwi.test, see the top)
     ulist "$hu"
     : > $ESC
-    ku install hsvc >/dev/null 2>&1
-    local https_ok=no; grep -q -- "install --system.*hsvc.*--from $hu" $ESC && https_ok=yes
-    # (b) a user-owned local path from a user catalog: no escalation at all
+    local out1; out1="$(ku install hsvc 2>&1)"
+    local unknown_ok=no
+    [[ ! -s $ESC ]] && grep -q "kiwi add --system $hu" <<<"$out1" && unknown_ok=yes
+    # a user-owned local path from a user catalog: no escalation at all either
     mkapp a rootsvc "user system"
     mkcat c usercat $GITROOT/a/rootsvc.git
-    ulist
     ku catalog add $GITROOT/c/usercat.git >/dev/null 2>&1       # user-level only
     : > $ESC
-    local out; out="$(ku install rootsvc 2>&1)"
-    local local_quiet=no; [[ ! -s $ESC ]] && grep -q 'https://' <<<"$out" && local_quiet=yes
-    f() { [[ $https_ok == yes && $local_quiet == yes ]]; }
-    check F16 "root is handed an https URL, never a name alone (ok=$https_ok); a local path asks for no password and says why (ok=$local_quiet)" f
+    ku install rootsvc >/dev/null 2>&1
+    local local_ok=no; [[ ! -s $ESC ]] && local_ok=yes
+    # root lists it now: escalated by name, the source printed first
+    echo "$hu" > /etc/kiwi-updater/apps.list
+    : > $ESC
+    local out2; out2="$(ku install hsvc 2>&1)"
+    local known_ok=no
+    grep -q -- "install --system hsvc" $ESC && ! grep -q -- '--from' $ESC &&
+        grep -q "hsvc from $hu" <<<"$out2" && known_ok=yes
+    f() { [[ $unknown_ok == yes && $local_ok == yes && $known_ok == yes ]]; }
+    check F16 "unknown source: no password, says 'kiwi add --system' ($unknown_ok); local path: no password ($local_ok); listed: escalated by name with its source shown ($known_ok)" f
 }
 
 t_F17() { # installing without a systemd user session must still finish
@@ -729,15 +735,34 @@ t_P22() { # on a user-only machine a dual-scope app installs its user half and s
     # which a real install always has and the harness has to provide
     mkdir -p $TH/.local/share/kiwi-updater/repos && cp -r $W $TH/.local/share/kiwi-updater/repos/kiwi-updater
     chown -R $T $TH/.local
-    # https: since H1 a local path is not handed to root at all (see F16)
-    ku add https://kiwi.test/a/halfapp.git >/dev/null
+    local hu=https://kiwi.test/a/halfapp.git
+    ku add "$hu" >/dev/null
     : > $ESC
     local out rc; out="$(ku install halfapp 2>&1)"; rc=$?
-    # 2.0: the system scope is set up on the spot (one password prompt; the
-    # harness's pkexec stub refuses it, so the root half is left, rc != 0).
-    f() { [[ $rc -ne 0 && -f $(urepo halfapp)/.kiwi-installed ]] &&
-          grep -q 'install.sh install --with-system' $ESC && grep -q 'root half' <<<"$out"; }
-    check P22 "user half installs; the system scope bootstrap is offered with one password" f
+    # 2.4 (D4): root installs only sources it lists, so the root half waits for
+    # an explicit `kiwi add --system` — no password is asked for here at all
+    local first=no
+    [[ $rc -ne 0 && -f $(urepo halfapp)/.kiwi-installed && ! -s $ESC ]] &&
+        grep -q "kiwi add --system $hu" <<<"$out" && first=yes
+    # ...and that step sets the system scope up on the spot (one password; the
+    # harness's pkexec stub refuses it)
+    : > $ESC
+    ku add --system "$hu" >/dev/null 2>&1
+    local boot=no; grep -q 'install.sh install --with-system' $ESC && boot=yes
+    # An app from the DEFAULT catalog needs no registering: the bootstrap gives
+    # root that catalog, so `kiwi install` sets the scope up with one password.
+    # (The real catalog URL is mapped onto a fixture for this check only.)
+    mkapp a defapp "user system"
+    mkcat c defcat https://kiwi.test/a/defapp.git
+    local dc=https://github.com/derlocke-ng/kiwi-catalog.git
+    git config --system "url.$GITROOT/c/defcat.git.insteadOf" "$dc"
+    ku catalog add "$dc" >/dev/null 2>&1
+    : > $ESC
+    ku install defapp >/dev/null 2>&1
+    git config --system --unset "url.$GITROOT/c/defcat.git.insteadOf"
+    local defboot=no; grep -q 'install.sh install --with-system' $ESC && defboot=yes
+    f() { [[ $first == yes && $boot == yes && $defboot == yes ]]; }
+    check P22 "user half installs, root half asks for no password (ok=$first); 'kiwi add --system' bootstraps (ok=$boot); a default-catalog app bootstraps directly (ok=$defboot)" f
 }
 
 t_P23() { # --with-system=manual: root-owned kiwi and lists, nothing that runs as root unattended
@@ -976,8 +1001,9 @@ t_P35() { # an app's own icon reaches the GUI: list --porcelain field 15 is its 
     mkapp a plainapp user
     ku add $GITROOT/a/iconapp.git >/dev/null; ku add $GITROOT/a/plainapp.git >/dev/null
     local out; out="$(ku list --porcelain 2>/dev/null)"     # syncs: the manifests come from the clones
-    f() { awk -F'\t' '$1=="iconapp"  && NF==15 && $15=="data/iconapp.svg" && $11!="" {a=1}
-                      $1=="plainapp" && NF==15 && $15==""                            {b=1}
+    # NF>=15: append-only, later fields follow (16 origin, 17 root-known: M4)
+    f() { awk -F'\t' '$1=="iconapp"  && NF>=15 && $15=="data/iconapp.svg" && $11!="" {a=1}
+                      $1=="plainapp" && NF>=15 && $15==""                            {b=1}
                       END {exit !(a && b)}' <<<"$out"; }
     check P35 "list --porcelain appends the app's ICON as field 15 (empty when it has none)" f
 }

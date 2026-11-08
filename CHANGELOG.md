@@ -54,6 +54,19 @@ behaviour someone may rely on; those say so.
   app installers do not inherit either. Root runs with `umask 022`, so its
   clones stay readable to the user-side view after every fetch, not only after
   the first clone.
+- **Root installs only sources it lists, and you see the source before the
+  password** (M4). The URL root recorded and then updated without a password
+  came from the user side — files the user can write — and neither it nor the
+  apps root would also install as dependencies appeared in the GUI's dialog or
+  the password prompt. Now the CLI and the GUI show, per root app, its URL, the
+  list or catalog it came from, and "also installs as root: …" before asking.
+  *Changes behaviour (D4):* root no longer records a URL handed over by the
+  user side (`--from`). An app whose source root does not list yet installs its
+  user half and says how to register the source: `kiwi add --system <url>`
+  (https only), or "Register and Install" in the GUI. Apps from the default
+  catalog are unaffected, including on a `--minimal` install, where the first
+  one still sets up the system scope with one password. `list --porcelain`
+  gains field 16 (where the entry comes from) and 17 (root lists it: 1/0).
 - **Tab completion no longer runs code from a catalog** (H2). `compgen -W`
   expands its word list, so an entry like `https://…/$(cmd).git` — whose
   basename becomes the app's name when the repo has no usable `NAME` — ran

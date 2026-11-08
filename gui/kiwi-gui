@@ -1697,7 +1697,9 @@ class Window(Adw.ApplicationWindow):
                      root_reason=p[11] if len(p) > 11 else "",
                      installed_scopes=p[12] if len(p) > 12 else "",
                      pinned=p[13] if len(p) > 13 else "",
-                     icon=p[14] if len(p) > 14 else "")
+                     icon=p[14] if len(p) > 14 else "",
+                     origin=p[15] if len(p) > 15 else "",
+                     root_known=p[16] if len(p) > 16 else "")
             if d["status"] == "update-available":
                 updates += 1
             if d["category"]:
@@ -1759,26 +1761,75 @@ class Window(Adw.ApplicationWindow):
 
     def _confirm_root(self, verb, names, root_apps):
         """Installing an app that declares the system scope runs its installer
-        as root. Say that, and say why, while it is still a decision — not at
-        the password prompt, by which point the choice has been made."""
-        parts = []
-        for a in root_apps:
-            parts.append("<b>%s</b>\n%s" % (
-                esc(a["name"]),
-                esc(a["root_reason"]
-                    or "installs files and services outside your home directory")))
-        dlg = Adw.AlertDialog(
-            heading="Install with root access?",
-            body="\n\n".join(parts) + "\n\nYou will be asked to authenticate.")
+        as root. Say that, why, WHERE FROM, and what else comes along as root
+        (FIXPLAN-2.4 M4) — while it is still a decision, not at the password
+        prompt, which shows none of it. The extra apps come from
+        `kiwi info --porcelain`, so they are looked up off the main thread."""
+        self.title.set_subtitle("Checking what runs as root…")
+        apps = [(a["name"], a["url"], a["origin"], a["root_known"], a["root_reason"])
+                for a in root_apps]
+
+        def worker():
+            also = {}
+            for name, *_ in apps:
+                try:
+                    out = subprocess.run([self.kiwi, "info", "--porcelain", "--", name],
+                                         capture_output=True, text=True,
+                                         stdin=subprocess.DEVNULL, timeout=120).stdout
+                except Exception:  # noqa: BLE001
+                    out = ""
+                for line in out.splitlines():
+                    if line.startswith("depends_installs_system="):
+                        also[name] = line.split("=", 1)[1].split()
+            GLib.idle_add(self._show_confirm_root, verb, names, apps, also)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_confirm_root(self, verb, names, apps, also):
+        parts, unknown = [], []
+        for name, url, origin, known, reason in apps:
+            t = "<b>%s</b>\n%s\n<small>from %s%s</small>" % (
+                esc(name),
+                esc(reason or "installs files and services outside your home directory"),
+                esc(url), (" (%s)" % esc(origin)) if origin else "")
+            if also.get(name):
+                t += "\n<small>also installs as root: %s</small>" % esc(", ".join(also[name]))
+            if known == "0":
+                t += "\n<small>root does not list this source yet</small>"
+                unknown.append(url)
+            parts.append(t)
+        if unknown:
+            # D4: root installs only sources it lists. Registering one is its
+            # own step, and it names the URL — so is this button.
+            tail = ("\n\nRoot installs only sources it has been told about. "
+                    "Registering lets root install and update %s; you will be asked "
+                    "to authenticate for that, and again for the install."
+                    % ("it" if len(unknown) == 1 else "them"))
+            go = ("register", "Register and Install")
+        else:
+            tail = "\n\nYou will be asked to authenticate."
+            go = ("install", "Install")
+        dlg = Adw.AlertDialog(heading="Install with root access?",
+                              body="\n\n".join(parts) + tail)
         dlg.set_body_use_markup(True)
         dlg.add_response("cancel", "Cancel")
-        dlg.add_response("install", "Install")
-        dlg.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
+        dlg.add_response(*go)
+        dlg.set_response_appearance(go[0], Adw.ResponseAppearance.SUGGESTED)
         dlg.set_default_response("cancel")
         dlg.set_close_response("cancel")
-        dlg.connect("response", lambda _d, r: r == "install"
-                    and self.run_action(verb, names, confirmed=True))
+
+        def on_response(_d, r):
+            if r == "register":
+                for u in unknown:
+                    self.run_cli(["add", "--system", "--", u])
+            if r in ("register", "install"):
+                self.run_action(verb, names, confirmed=True)
+        dlg.connect("response", on_response)
+        if not self.busy:
+            n = self.store.get_n_items()
+            self.title.set_subtitle("%d app%s" % (n, "" if n == 1 else "s"))
         dlg.present(self)
+        return False
 
     def _confirm_uninstall(self, names):
         """Removing a catalog asks first; removing an actual app did not —

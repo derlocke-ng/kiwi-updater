@@ -339,6 +339,15 @@ A plain `kiwi install` never touches root unless the app declares
 A `--minimal` install has no system scope at all; the first such app sets it
 up on the spot, with one password.
 
+Root installs only **sources it lists**: its own `/etc/kiwi-updater/apps.list`
+and the catalogs registered for it (the default catalog is, from the start).
+An app with a root half from anywhere else — your own list, a catalog only you
+added — installs its user half and tells you the one command that registers the
+source for root, `kiwi add --system <https-url>`; the GUI offers the same as
+"Register and Install". Before any password prompt, kiwi shows each root app's
+source, where that entry came from, and which other apps it would also install
+as root.
+
 Passwordless system *updates* go through `/usr/local/libexec/kiwi-system-update`,
 which the polkit rule authorises by exact path. It takes app names but treats
 them as a **selection**: every name must look like a name (never an option) and

@@ -19,6 +19,8 @@ export HOME="${HOME:-/root}"
 # root-owned copy used for system-scope work (installed by 'install.sh --with-system');
 # escalating to it instead of this script means root never executes a user-writable file
 ROOT_KIWI="/usr/local/bin/kiwi"
+# the catalog install.sh registers for both scopes; keep the two in step
+DEFAULT_CATALOG="https://github.com/derlocke-ng/kiwi-catalog.git"
 
 # NEVER returns $SELF. Running ~/.local/bin/kiwi as root would hand every
 # process running as you a path to root on the next privileged call, which is
@@ -1000,6 +1002,17 @@ root_knows() { # url
         root_usable "$1"     # root skips a path it does not own (H1)
 }
 
+# root_knows, or will once the system scope is set up: on a machine without
+# it, root has no lists yet, and the bootstrap registers the default catalog
+# for root — so an app from that catalog installs with the one password the
+# bootstrap asks for, as it always did. Anything else must be registered (D4).
+root_will_know() { # url
+    root_knows "$1" && return 0
+    [[ ! -x $ROOT_KIWI && $1 == https://* ]] || return 1
+    list_has "$(catalogs_dir)/$(dir_name "$DEFAULT_CATALOG")/apps.list" "$1" &&
+        grep -qxF -- "$DEFAULT_CATALOG" < <(catalog_urls)    # not a pipe: pipefail + grep -q
+}
+
 acquire_lock() { # scope
     local lock dir me
     if [[ $1 == system ]]; then dir="$SYS_DATA_DIR"; else dir="$USER_DATA_DIR"; fi
@@ -1413,7 +1426,13 @@ dry_run_plan() { # verb
             if [[ ${#DEPS_MISSING[@]} -gt 0 ]]; then row missing "${DEPS_MISSING[*]}"; fi
         fi
         [[ $verb == uninstall ]] && row purge "$([[ ${PURGE:-0} == 1 ]] && echo yes || echo no)"
-        [[ $sc == system && $EUID -ne 0 ]] && row note "needs root — would escalate"
+        if [[ $sc == system && $EUID -ne 0 ]]; then
+            if [[ $verb == install ]] && ! root_will_know "$url"; then
+                row note "root does not list this source — register it first: kiwi add --system $url"
+            else
+                row note "needs root — would escalate"
+            fi
+        fi
     done
     # explicitly: the loop's status is its last [[ ]], false for any user-scope
     # target, and under set -e that made `install --dry-run` exit 1
@@ -1421,7 +1440,7 @@ dry_run_plan() { # verb
 }
 
 dispatch() { # verb extra_flag
-    local verb="$1" i had_user=0 sys_names=() rc_pre=0 from_urls=()
+    local verb="$1" i had_user=0 sys_names=() rc_pre=0
     for i in "${!T_URL[@]}"; do
         [[ ${T_SCOPE[$i]} == user ]] && had_user=1
         [[ ${T_SCOPE[$i]} == system && $EUID -ne 0 ]] || continue
@@ -1444,18 +1463,25 @@ dispatch() { # verb extra_flag
         # to `kiwi catalog add --system` first; and when no system scope existed
         # at all it refused too, where root_kiwi below sets one up with one
         # password. Both were the opposite of "install root parts with ease".
-        if [[ $verb == install ]] && ! root_knows "${T_URL[$i]}"; then
-            # Root takes a handed-over URL only over https (H1): a local path
-            # can be rewritten by whoever owns it, after the password was typed.
-            # Say so here instead of asking for a password root would refuse.
-            if [[ ${T_URL[$i]} != https://* ]]; then
-                warn "$(app_name system "${T_URL[$i]}"): its root half was not installed —"
-                warn "  root installs only from https:// URLs or from local repos root owns all the"
-                warn "  way up, and ${T_URL[$i]} is neither."
-                rc_pre=1
-                continue
+        if [[ $verb == install ]] && ! root_will_know "${T_URL[$i]}"; then
+            # Root installs only sources it already lists (FIXPLAN-2.4 M4, D4).
+            # The user side — which the user can write — used to hand the URL
+            # over with --from, and root recorded whatever it was given, then
+            # updated it without a password from then on. Registering a source
+            # for root is now its own explicit, password-gated step that names
+            # the URL. Say so here rather than ask for a password root refuses.
+            local nm; nm="$(app_name system "${T_URL[$i]}")"
+            warn "$nm: its root half was not installed — root does not list this source:"
+            warn "    ${T_URL[$i]}"
+            if [[ ${T_URL[$i]} == https://* ]]; then
+                warn "  to let root install and update it, register it (asks for your password):"
+                warn "    kiwi add --system ${T_URL[$i]}"
+                warn "  then run: kiwi install $nm"
+            else
+                warn "  root takes only https:// URLs or local repos root owns all the way up (H1)."
             fi
-            from_urls+=("${T_URL[$i]}")
+            rc_pre=1
+            continue
         fi
         sys_names+=("$(app_name system "${T_URL[$i]}")")
     done
@@ -1524,19 +1550,29 @@ dispatch() { # verb extra_flag
     if [[ ${#sys_names[@]} -gt 0 ]]; then
         # Say what root is for before asking for it. "Needs your password" with
         # no reason is how people learn to type it without reading.
-        local i2 d2 why
+        # And WHERE from, and what else comes along as root (M4): the
+        # password prompt shows none of it.
+        local i2 d2 why nm2 dl2 also
         for i2 in "${!T_URL[@]}"; do
             [[ ${T_SCOPE[$i2]} == system ]] || continue
+            nm2="$(app_name system "${T_URL[$i2]}")"
+            [[ " ${sys_names[*]} " == *" $nm2 "* ]] || continue
             d2="$(meta_dir)/$(dir_name "${T_URL[$i2]}")"
             why="$(manifest_get "$d2" ROOT_REASON "")"
-            [[ -n $why ]] && info "  ${c_bold}$(app_name system "${T_URL[$i2]}")${c_off} needs root: $why"
+            info "  ${c_bold}$nm2${c_off} from ${T_URL[$i2]} ($(entry_origin "${T_URL[$i2]}"))"
+            [[ -n $why ]] && info "    needs root: $why"
+            if [[ $verb == install ]]; then
+                plan_deps system "${T_URL[$i2]}" "$(manifest_get "$d2" DEPENDS "")"
+                also=()
+                for dl2 in ${DEP_APPS[@]+"${DEP_APPS[@]}"}; do also+=("$(dir_name "${dl2%%$'\t'*}")"); done
+                (( ${#also[@]} )) && info "    also installs as root: ${also[*]}"
+            fi
         done
         info "escalating for system apps: ${sys_names[*]}"
         # Capture first. root_kiwi dies when it cannot provide a root-owned
         # copy, and inside $(...) that exit leaves only the subshell — the
         # caller went on to run `pkexec "" update --system …`.
         local rk; rk="$(root_kiwi)" || return 1
-        local u; for u in ${from_urls[@]+"${from_urls[@]}"}; do extra+=(--from "$u"); done
         as_root "$rk" "$verb" --system "${sys_names[@]}" "${extra[@]+"${extra[@]}"}" 9>&- || rc=1
     fi
 
@@ -1732,13 +1768,19 @@ cmd_list() {
             # APPEND new fields only — the GUI indexes by position.
             # 15: the app's own icon (manifest ICON=, repo-relative) — each app
             # ships its own; the GUI draws it from the clone at field 11
-            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            # 16: where the entry comes from ("your list", "system list",
+            # "catalog NAME"); 17: for an app with a system half, 1 if root
+            # lists this URL (it can install it), 0 if it must be registered
+            # first (D4); empty otherwise
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
                 "$name" "$scs" "$comp_full" "$status" "$ver" "$url" "$desc" "${tref:-}" \
                 "$(manifest_get "$dir" CATEGORY "")" \
                 "$(manifest_get "$dir" TAGS "")" "$dir" \
                 "$(manifest_get "$dir" ROOT_REASON "")" \
                 "$inst_scs" "$pin_ref" \
-                "$(manifest_get "$dir" ICON "")"
+                "$(manifest_get "$dir" ICON "")" \
+                "$(entry_origin "$url")" \
+                "$([[ $scs == *system* ]] && { root_will_know "$url" && echo 1 || echo 0; } || true)"
         else
             local col=""
             [[ $status == update-available ]] && col="$c_ylw"
@@ -1826,6 +1868,19 @@ entry_sources() { # url
     while IFS=$'\t' read -r src u o; do
         [[ -n $u && "$(norm_url "$u")" == "$want" ]] && printf '%s\n' "$src"
     done < <(app_entries_raw)
+}
+
+# where the entry for <url> comes from, said for a person: "your list",
+# "system list", or "catalog <NAME>" — shown before root is asked for (M4)
+entry_origin() { # url
+    local src; src="$(entry_sources "$1" | head -1)"
+    case "$src" in
+        "") echo "" ;;
+        "$USER_LIST") echo "your list" ;;
+        "$SYS_LIST")  echo "system list" ;;
+        */apps.list)  echo "catalog $(catalog_meta "$(dirname "$src")" NAME "$(basename "$(dirname "$src")")")" ;;
+        *)            echo "$src" ;;
+    esac
 }
 
 # the kiwi app a DEPENDS word names, looked up only where that is allowed
@@ -1956,6 +2011,14 @@ cmd_info() { # [--porcelain] [--installer] name
         for dl in ${DEP_APPS[@]+"${DEP_APPS[@]}"}; do inst_first+=("$(dir_name "${dl%%$'\t'*}")"); done
         printf 'depends_missing=%s\n' "$(echo ${DEPS_MISSING[@]+"${DEPS_MISSING[@]}"} ${DEP_ELSEWHERE[@]+"${DEP_ELSEWHERE[@]}"})"
         printf 'depends_installs=%s\n' "${inst_first[*]:-}"
+        # what installing the system half would ALSO install as root (M4)
+        local sys_first=()
+        if [[ $scs == *system* ]]; then
+            plan_deps system "$url" "$deps"
+            for dl in ${DEP_APPS[@]+"${DEP_APPS[@]}"}; do sys_first+=("$(dir_name "${dl%%$'\t'*}")"); done
+        fi
+        printf 'depends_installs_system=%s\n' "${sys_first[*]:-}"
+        printf 'origin=%s\n'      "$(entry_origin "$url")"
         printf 'icon=%s\n'        "$(manifest_get "$dir" ICON "")"
         printf 'screenshots=%s\n' "$(manifest_get "$dir" SCREENSHOTS "")"
         printf 'about=%s\n'       "$(manifest_get "$dir" ABOUT README.md)"
@@ -2375,6 +2438,9 @@ expected https://… or an absolute path to a local repo (http:// is refused: an
     fi
     f="$(list_file "$scope")"
     if [[ $scope == system && $EUID -ne 0 ]]; then
+        # the one step that decides what root may install (D4): name it
+        info "registering for root: $url"
+        info "  root will run this repo's installer, and update it without asking again"
         local rk; rk="$(root_kiwi)" || return 1
         as_root "$rk" add --system "$url"
         return
@@ -2539,7 +2605,7 @@ PURGE=0
 PORCELAIN=0
 DRY_RUN=0
 GUI_CHOICE=""      # ""=auto/keep, 0=cli-only, 1=with-gui (install/update)
-FROM_URLS=()       # install --from <url>: root records the URL it is installing
+FROM_URLS=()       # install --from <url>: from kiwi <= 2.3; since 2.4 only checked, never recorded
 DEP_APPS=(); DEP_ELSEWHERE=(); DEPS_MISSING=()   # plan_deps results
 ARGS=()
 CMD=""
@@ -2603,28 +2669,20 @@ case "$CMD" in
     # still means "everything already installed", which is a safe default.
     install)     [[ ${#ARGS[@]} -gt 0 ]] ||
                      die "usage: kiwi install <app>... | --all   (--all installs every listed app)"
-                 # Root resolves names against its OWN lists. An install is
-                 # always authenticated, so when the user side hands over the
-                 # URL it showed the user (--from), root records it first: an
-                 # admin typing a password for "install this repo as root" is
-                 # exactly the decision the root list exists to record.
-                 # Passwordless updates later still touch only what it names.
-                 if [[ $EUID -eq 0 && ${#FROM_URLS[@]} -gt 0 ]]; then
-                     # https only (H1): --from is composed by the user side,
-                     # which the user can write. A local path from there would
-                     # make whoever owns it the author of root's next update.
-                     for from_url in "${FROM_URLS[@]}"; do
-                         valid_url "$from_url" && [[ $from_url == https://* ]] ||
-                             die "root records only https:// URLs handed over with --from: '$from_url'
-to install a local repo as root, clone it somewhere root-owned and run: kiwi add --system <path>"
-                     done
-                     mkdir -p "$(dirname "$SYS_LIST")"; touch "$SYS_LIST"
-                     for from_url in "${FROM_URLS[@]}"; do
-                         list_has "$SYS_LIST" "$from_url" ||
-                             { echo "$from_url" >> "$SYS_LIST"; info "registered $from_url for root"; }
+                 # Root resolves names against its OWN lists, and installs
+                 # only sources they name (D4). --from is what kiwi up to
+                 # 2.3 sent to have root record a URL; it is still accepted
+                 # from an older user-side kiwi, but only as a check that
+                 # root already lists that URL — it records nothing.
+                 sync_catalogs
+                 if [[ $EUID -eq 0 ]]; then
+                     for from_url in ${FROM_URLS[@]+"${FROM_URLS[@]}"}; do
+                         valid_url "$from_url" && root_knows "$from_url" ||
+                             die "root installs only sources it already lists: '$from_url'
+register it first (kiwi add --system <url>, https:// only), then install by name"
                      done
                  fi
-                 sync_catalogs; collect_targets "${ARGS[@]}"; dispatch install ;;
+                 collect_targets "${ARGS[@]}"; dispatch install ;;
     update)      sync_catalogs; collect_targets "${ARGS[@]:---all}"; dispatch update ;;
     uninstall)   [[ ${#ARGS[@]} -gt 0 ]] || die "usage: kiwi uninstall <name...>"
                  collect_targets "${ARGS[@]}"; dispatch uninstall ;;

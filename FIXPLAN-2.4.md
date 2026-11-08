@@ -131,8 +131,8 @@ hatch would be the first exception.
 | M3 | `mkapp a esc user` whose `install.sh` contains a raw ESC byte (`printf '\033[8m'` written literally into the file) and a commit subject with one; install, release, `ku diff esc`, `ku info --installer esc`. Same for a catalog whose `catalog.manifest` `NAME=` contains ESC, via `ku catalog list`. | No `$'\e'` byte in any of those outputs. |
 | M6 | (a) app whose manifest says `INSTALLER=../../../tmp/kt-outside.sh`, with that file present; (b) app whose `install.sh` is a git symlink to `/tmp/kt-outside.sh`. `ku install` each. | Both exit non-zero and `/tmp/kt-outside.sh` never ran (have it `touch /tmp/kt-ran`). |
 | M7 | Root catalog listing two root-fixture apps; install one as root. `kr update --all --system`. Same for the user scope with `ku update`. | No clone directory exists for the app that is not installed, in either scope. |
-| L1 | `KENV='KIWI_FETCH_JOBS=a[$(touch${IFS}/tmp/kt-l1)]' kr list --porcelain` with a fresh root catalog (so `sync_all_meta` runs). | `/tmp/kt-l1` does not exist. |
-| Q1 | Put a `git` wrapper first in `$STUBS` that appends `ls-remote` invocations to `/tmp/kt-lsr.log` and then `exec /usr/bin/git "$@"`. Three installed user apps; `ku list --porcelain --check`. | `ls-remote` was called at most once per URL (3 lines, not 6+). |
+| L1 | `KENV='KIWI_FETCH_JOBS=PATH[$(touch${IFS}/tmp/kt-l1)]' kr list --porcelain` with a fresh root catalog (so `sync_all_meta` runs). The name must be a *set* variable: under kiwi's `set -u`, `a[…]` aborts on the unset `a` before the subscript is evaluated. | `/tmp/kt-l1` does not exist. |
+| Q1 | Put a `git` wrapper first in `$STUBS` that appends `ls-remote` invocations to `/tmp/kt-lsr.log` and then `exec /usr/bin/git "$@"`. Three system apps installed by root (root fixtures), plus the user's metadata clones of them (`ku list`); then `ku list --porcelain --check`. (Apps installed only in the user scope already get one call each: `refresh_meta` skips a clone with a marker. The duplicate is `refresh_meta` on the user's metadata clone plus the status lookup.) | `ls-remote` was called at most once per URL (3 lines; 6 on 2.3.2). |
 | Q4 | Catalog with five apps, none installed, user scope. `ku update`. | No metadata clone was made for any of them (same mechanism as M7). |
 
 ---
@@ -613,16 +613,27 @@ The GUI waits on `kiwi list --porcelain --check`; that is where the time goes.
 - **D1 (H1):** P36 currently asserts that a local path in `/etc/kiwi-updater/apps.list`
   is *always* followed by root. H1 reverses that. Recommended: reverse it; root-owned
   local paths keep working.
+  **Answered (8 Nov 2026): reverse it.** P36 is rewritten in Phase 0.
 - **D2 (M2):** refuse `http://` in the user scope too, or only warn? Recommended: refuse
   everywhere — nothing in the catalog uses it.
+  **Answered: refuse everywhere.**
 - **D3 (H4):** SSH vs GPG signatures; TOFU vs a signer key carried in the catalog line
   (a compromised catalog could then swap keys — TOFU is safer); whether CI may sign (it
   should not; then the CI token is the signing key). Also: keep "auto" as the default
   mode in `get-kiwi.sh`, or default to `manual`?
+  **Answered: SSH signatures (GPG acceptable but not preferred). Keep "auto"
+  (passwordless root updates) as the default; it must stay switchable off — `manual`
+  mode already does that, so document it next to the default.** TOFU vs catalog key and
+  "CI never signs" follow the recommendation above unless revisited.
 - **D4 (M4):** should root accept `--from` only when a root-registered catalog lists that
   URL? Safer, but brings back the "run `kiwi catalog add --system` first" step that 2.x
   removed for user-catalog apps with a root half.
+  **Answered: yes, the secure option** — root accepts `--from` only for a URL a
+  root-registered catalog lists (or root's own list already names).
 - **D5 (U3):** multi-select in both views or only the grid; selection survives a refresh?
+  **Answered: no multi-select needed for now.** U1's queue (clicks chained and folded
+  into one `kiwi <verb> -- a b c`) covers installing several apps. U3 is dropped
+  unless that turns out not to be enough.
 
 ## Not doing: a rewrite in Rust
 

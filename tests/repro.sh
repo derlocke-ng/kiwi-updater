@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# tests/repro.sh — reproduces the findings in FIXPLAN.md against the working tree.
+# tests/repro.sh — reproduces the findings in FIXPLAN.md and FIXPLAN-2.4.md
+# against the working tree.
 #
 # Every check asserts BEHAVIOUR, not message text, so it prints
 #     BUG  <id>   while the problem is still there
@@ -34,6 +35,9 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 T=kiwitest; TH=/home/$T
 W=/opt/kiwi-under-test; STUBS=/opt/kiwi-stubs; GITROOT=/srv/kiwi-git; ESC=/tmp/kt-escalations.log
+# repos root may follow: root-owned and not group/other-writable all the way
+# up (H1). $GITROOT is the test user's, so anything root reads lives here.
+ROOTGIT=/srv/kiwi-git-root
 K=$W/bin/kiwi
 
 id $T >/dev/null 2>&1 || useradd -m -s /bin/bash $T
@@ -57,7 +61,7 @@ reset() {
     pkill -u $T sleep 2>/dev/null
     rm -rf $TH/.config/kiwi-updater $TH/.config/systemd $TH/.local /etc/kiwi-updater /var/lib/kiwi-updater \
            /root/.config/kiwi-updater /usr/local/bin/kiwi /usr/local/libexec/kiwi-system-update \
-           $GITROOT /tmp/kt-*
+           $GITROOT $ROOTGIT /tmp/kt-*
     mkdir -p $GITROOT; chown $T $GITROOT; : > $ESC; chmod 666 $ESC
 }
 
@@ -82,6 +86,23 @@ mkcat() { # owner name url...
       printf 'NAME=%s\nDESCRIPTION=test catalog\n' "$n" > catalog.manifest &&
       git add -A && git commit -qm cat && git clone -q --bare . $GITROOT/"$o"/"$n".git )
     chown -R $T $GITROOT/"$o"
+}
+# rootfix owner name -> prints the path of a root-owned copy of $GITROOT/owner/name.git
+# Root follows a local path only if it and every parent are root-owned (H1).
+# Re-run it after `release` (or any push) so root sees the new commits. There is
+# deliberately no environment switch that lets root skip the check for tests.
+rootfix() {
+    mkdir -p "$ROOTGIT/$1"; chmod 755 "$ROOTGIT" "$ROOTGIT/$1"
+    rm -rf "$ROOTGIT/$1/$2.git"
+    cp -a "$GITROOT/$1/$2.git" "$ROOTGIT/$1/$2.git"
+    chown -R root:root "$ROOTGIT/$1/$2.git"; chmod -R go-w "$ROOTGIT/$1/$2.git"
+    echo "$ROOTGIT/$1/$2.git"
+}
+# ulist line... -> the test user's own apps.list, exactly these lines
+ulist() {
+    mkdir -p $TH/.config/kiwi-updater
+    printf '%s\n' "$@" > $TH/.config/kiwi-updater/apps.list
+    chown -R $T $TH/.config; chmod 644 $TH/.config/kiwi-updater/apps.list
 }
 
 BUGS=0
@@ -124,10 +145,11 @@ t_F4() { # the root-owned kiwi must be able to update itself from the timer
     ( cd $w && git init -q && git add -A && git commit -qm one && git tag -a v0.0.1 -m v0.0.1 &&
       git commit -q --allow-empty -m two && git tag -a v0.0.2 -m v0.0.2 &&
       git clone -q --bare . $GITROOT/d/kiwi-updater.git )
+    local u; u="$(rootfix d kiwi-updater)"
     mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
-    echo "$GITROOT/d/kiwi-updater.git" > /etc/kiwi-updater/apps.list
+    echo "$u" > /etc/kiwi-updater/apps.list
     local r=/var/lib/kiwi-updater/repos/kiwi-updater
-    git clone -q $GITROOT/d/kiwi-updater.git $r && git -C $r checkout -q v0.0.1
+    git clone -q $u $r && git -C $r checkout -q v0.0.1
     git -C $r rev-parse HEAD > $r/.kiwi-installed
     kr update --all --system --quiet >/dev/null; local rc=$?
     f() { [[ $rc -eq 0 && "$(git -C $r rev-parse HEAD)" == "$(git -C $w rev-parse 'v0.0.2^{commit}')" ]]; }
@@ -166,13 +188,13 @@ t_F7() { # 'kiwi install' with no arguments must not install the whole catalog
 
 t_F8() { # F8 + F9 share a setup: a system app from a catalog, seen by the user
     mkapp a rootsvc system
-    mkcat c cat1 $GITROOT/a/rootsvc.git
-    chown -R root:root $GITROOT/a      # a catalog's local path: root follows it only if root owns it (P36)
-    mkdir -p /etc/kiwi-updater; echo $GITROOT/c/cat1.git > /etc/kiwi-updater/catalogs.list
-    ku catalog add $GITROOT/c/cat1.git >/dev/null 2>&1
+    local app cat; app="$(rootfix a rootsvc)"   # root follows a local path only if root owns it (P36, H1)
+    mkcat c cat1 "$app"; cat="$(rootfix c cat1)"
+    mkdir -p /etc/kiwi-updater; echo "$cat" > /etc/kiwi-updater/catalogs.list
+    ku catalog add "$cat" >/dev/null 2>&1
     ku list >/dev/null 2>&1
     kr install --system rootsvc >/dev/null
-    release a rootsvc v1.1.0
+    release a rootsvc v1.1.0; rootfix a rootsvc >/dev/null
     ku check >/dev/null; local rc=$?
     f9() { [[ $rc -eq 10 ]]; }
     check F9 "'kiwi check' reports a pending update of a catalog system app (exit 10)" f9
@@ -456,13 +478,14 @@ t_P9() { # an app listed in BOTH lists must stay reachable in both scopes
     # so the second was thrown away and the root half became unreachable — a
     # permanent "update available" that no command could clear.
     mkapp a dual user 'echo "scope=$KIWI_SCOPE"'
+    local u; u="$(rootfix a dual)"
     mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
     install -Dm755 $K /usr/local/bin/kiwi      # something for root to escalate to
-    echo "$GITROOT/a/dual.git" > /etc/kiwi-updater/apps.list
-    ku add $GITROOT/a/dual.git >/dev/null
+    echo "$u" > /etc/kiwi-updater/apps.list
+    ku add "$u" >/dev/null
     ku install dual >/dev/null 2>&1
     kr install --system dual >/dev/null 2>&1
-    release a dual v1.1.0
+    release a dual v1.1.0; rootfix a dual >/dev/null
     local line scopes status
     line="$(ku list --porcelain --check 2>/dev/null | grep '^dual')"
     scopes="$(cut -f2 <<<"$line")"; status="$(cut -f4 <<<"$line")"
@@ -474,9 +497,10 @@ t_P9() { # an app listed in BOTH lists must stay reachable in both scopes
 
 t_P10() { # the porcelain must tell the GUI which scopes are actually installed
     mkapp a dualp "user system"
+    local u; u="$(rootfix a dualp)"
     mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
-    echo "$GITROOT/a/dualp.git" > /etc/kiwi-updater/apps.list
-    ku add $GITROOT/a/dualp.git >/dev/null
+    echo "$u" > /etc/kiwi-updater/apps.list
+    ku add "$u" >/dev/null
     ku install dualp --user >/dev/null 2>&1        # the user half only
     local line nf inst pinf
     line="$(ku list --porcelain --no-sync 2>/dev/null | grep '^dualp')"
@@ -508,9 +532,10 @@ t_P12() { # `kiwi info` and `kiwi list` must agree about an app's scopes
     # line at all — and the GUI detail view, which is built from info, had no
     # root row to show for an app installed as root.
     mkapp a bothsc user 'echo "scope=$KIWI_SCOPE"'
+    local u; u="$(rootfix a bothsc)"
     mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
-    echo "$GITROOT/a/bothsc.git" > /etc/kiwi-updater/apps.list
-    ku add $GITROOT/a/bothsc.git >/dev/null
+    echo "$u" > /etc/kiwi-updater/apps.list
+    ku add "$u" >/dev/null
     ku install bothsc >/dev/null 2>&1
     kr install --system bothsc >/dev/null 2>&1
     local lsc isc isys
@@ -528,13 +553,14 @@ t_P13() { # a user-side pin must not mark the root half update-available for eve
     # sat exactly where their configuration wanted them, `kiwi update` said
     # "up to date", and nothing cleared the indicator.
     mkapp a dualpin "user system"
+    local u; u="$(rootfix a dualpin)"
     mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
     install -Dm755 $K /usr/local/bin/kiwi
-    echo "$GITROOT/a/dualpin.git" > /etc/kiwi-updater/apps.list
-    ku add $GITROOT/a/dualpin.git >/dev/null
+    echo "$u" > /etc/kiwi-updater/apps.list
+    ku add "$u" >/dev/null
     ku install dualpin --user >/dev/null 2>&1
     kr install --system dualpin >/dev/null 2>&1
-    release a dualpin v1.1.0
+    release a dualpin v1.1.0; rootfix a dualpin >/dev/null
     ku pin dualpin v1.0.0 >/dev/null 2>&1
     kr update --all --system --quiet >/dev/null 2>&1   # roots timer, unpinned
     local st; st="$(ku list --porcelain --check 2>/dev/null | awk -F'\t' '$1=="dualpin"{print $4}')"
@@ -564,11 +590,12 @@ t_P16() { # the root phase of the bootstrap must register self-update even under
     # The harness runs root with env -i, which is exactly that environment.
     # a USER-owned git checkout (the thing under test), cloned from a
     # root-owned bare repo (so the source itself is not what trips git)
-    local src=$TH/checkout; rm -rf $src $GITROOT/self
+    local src=$TH/checkout; rm -rf $src $ROOTGIT/self
     cp -r $W $src && chown -R $T $src
     runuser -u $T -- bash -c "cd $src && git init -q && git add -A && git -c user.email=t@e -c user.name=t commit -qm x"
-    mkdir -p $GITROOT/self && git clone -q --bare $src $GITROOT/self/kiwi-updater.git
-    runuser -u $T -- git -C $src remote add origin $GITROOT/self/kiwi-updater.git
+    mkdir -p $ROOTGIT/self && chmod 755 $ROOTGIT $ROOTGIT/self &&
+        git clone -q --bare $src $ROOTGIT/self/kiwi-updater.git
+    runuser -u $T -- git -C $src remote add origin $ROOTGIT/self/kiwi-updater.git
     # GIT_CONFIG_SYSTEM=/dev/null: the harness sets safe.directory='*' globally,
     # which would hide exactly the refusal this test is about
     env -i HOME=/root PATH=$STUBS:/usr/sbin:/usr/bin:/bin GIT_CONFIG_SYSTEM=/dev/null \
@@ -596,8 +623,9 @@ t_P18() { # --force cannot ride the passwordless wrapper, so it must escalate di
     install -Dm755 $K /usr/local/bin/kiwi
     printf '#!/bin/sh\necho "WRAPPER $*" >> %s\nexit 0\n' "$ESC" > /usr/local/libexec/kiwi-system-update
     chmod +x /usr/local/libexec/kiwi-system-update
-    echo "$GITROOT/a/frc.git" > /etc/kiwi-updater/apps.list
-    ku add $GITROOT/a/frc.git >/dev/null
+    local u; u="$(rootfix a frc)"
+    echo "$u" > /etc/kiwi-updater/apps.list
+    ku add "$u" >/dev/null
     ku install frc --user >/dev/null 2>&1
     kr install --system frc >/dev/null 2>&1
     : > $ESC; ku update frc >/dev/null 2>&1
@@ -726,10 +754,11 @@ t_P25() { # the USER timer updates system halves through the wrapper; unattended
     install -Dm755 $K /usr/local/bin/kiwi
     printf '#!/bin/sh\necho "WRAPPER $*" >> %s\nexit 0\n' "$ESC" > /usr/local/libexec/kiwi-system-update
     chmod +x /usr/local/libexec/kiwi-system-update
-    echo "$GITROOT/a/both.git" > /etc/kiwi-updater/apps.list
-    ku add $GITROOT/a/both.git >/dev/null
+    local u; u="$(rootfix a both)"
+    echo "$u" > /etc/kiwi-updater/apps.list
+    ku add "$u" >/dev/null
     ku install both --user >/dev/null 2>&1; kr install --system both >/dev/null 2>&1
-    release a both v1.1.0
+    release a both v1.1.0; rootfix a both >/dev/null
     : > $ESC
     KENV="KIWI_UNATTENDED=1" ku update --all >/dev/null 2>&1; local rc1=$?
     local via; via="$(cat $ESC)"
@@ -753,14 +782,15 @@ printf "#!/bin/sh\necho probe-ok\n" > "$KIWI_PREFIX/bin/pathprobe-$KIWI_SCOPE"
 chmod +x "$KIWI_PREFIX/bin/pathprobe-$KIWI_SCOPE"
 pathprobe-$KIWI_SCOPE'
     mkapp a pathprobe "user system" "$body"
+    local u; u="$(rootfix a pathprobe)"
     mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
-    echo "$GITROOT/a/pathprobe.git" > /etc/kiwi-updater/apps.list
-    ku add $GITROOT/a/pathprobe.git >/dev/null
+    echo "$u" > /etc/kiwi-updater/apps.list
+    ku add "$u" >/dev/null
     ku install pathprobe --user >/dev/null 2>&1; local ru=$?
     kr install --system pathprobe >/dev/null 2>&1; local rs=$?
     install -Dm755 $K /usr/local/bin/kiwi
     install -Dm755 $W/data/kiwi-system-update /usr/local/libexec/kiwi-system-update
-    release a pathprobe v1.1.0
+    release a pathprobe v1.1.0; rootfix a pathprobe >/dev/null
     env -i HOME=/root USER=root PATH=/usr/sbin:/usr/bin:/sbin:/bin:/root/bin \
         bash /usr/local/libexec/kiwi-system-update pathprobe >/dev/null 2>&1
     local want got
@@ -798,14 +828,15 @@ t_P29() { # `kiwi update kiwi-updater` typed in a terminal escalates ONCE
       git commit -q --allow-empty -m two && git tag -a v0.0.2 -m v0.0.2 &&
       git clone -q --bare . $GITROOT/d/kiwi-updater.git )
     chown -R $T $GITROOT/d
+    local src; src="$(rootfix d kiwi-updater)"
     mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
-    echo "$GITROOT/d/kiwi-updater.git" > /etc/kiwi-updater/apps.list
-    ku add $GITROOT/d/kiwi-updater.git >/dev/null
+    echo "$src" > /etc/kiwi-updater/apps.list
+    ku add "$src" >/dev/null
     local u r=/var/lib/kiwi-updater/repos/kiwi-updater; u="$(urepo kiwi-updater)"
-    runuser -u $T -- git clone -q $GITROOT/d/kiwi-updater.git $u
+    runuser -u $T -- git clone -q "$src" $u
     runuser -u $T -- git -C $u -c advice.detachedHead=false checkout -q v0.0.1
     runuser -u $T -- bash -c "git -C $u rev-parse HEAD > $u/.kiwi-installed"
-    git clone -q $GITROOT/d/kiwi-updater.git $r
+    git clone -q "$src" $r
     git -C $r -c advice.detachedHead=false checkout -q v0.0.1
     git -C $r rev-parse HEAD > $r/.kiwi-installed
     install -Dm755 $K /usr/local/bin/kiwi        # the system scope exists
@@ -923,22 +954,30 @@ t_P35() { # an app's own icon reaches the GUI: list --porcelain field 15 is its 
     check P35 "list --porcelain appends the app's ICON as field 15 (empty when it has none)" f
 }
 
-t_P36() { # root follows a local path a catalog names only if root owns it
+t_P36() { # root follows a local path only if root owns it, all the way up — catalog or its own list
     # valid_url accepted /path and file:// from any source. A trusted catalog
     # that lists a user-writable directory would have had root clone and run
     # whatever its owner put there, on the next passwordless update.
     mkapp a localapp "system"                      # $GITROOT/a is owned by the test user
     mkcat c rootcat $GITROOT/a/localapp.git
     kr catalog add --system $GITROOT/c/rootcat.git >/dev/null 2>&1
-    local userowned rootowned vialist
+    local userowned rootowned
     userowned="$(kr list --porcelain 2>/dev/null | cut -f1)"
-    chown -R root:root $GITROOT/a
+    # root-owned all the way up (H1), at the same path the catalog names
+    chown root:root $GITROOT; chown -R root:root $GITROOT/a
     rootowned="$(kr list --porcelain 2>/dev/null | cut -f1)"
-    chown -R $T $GITROOT/a
+    chown $T $GITROOT; chown -R $T $GITROOT/a
+    # D1 (FIXPLAN-2.4): the system list gets the same rule. Anyone who can
+    # write the repo could otherwise have root run it, without a password.
+    kr catalog remove --system $GITROOT/c/rootcat.git >/dev/null 2>&1
     mkdir -p /etc/kiwi-updater; echo "$GITROOT/a/localapp.git" > /etc/kiwi-updater/apps.list
-    vialist="$(kr list --porcelain 2>/dev/null | cut -f1)"
-    f() { ! grep -qx localapp <<<"$userowned" && grep -qx localapp <<<"$rootowned" && grep -qx localapp <<<"$vialist"; }
-    check P36 "as root, a catalog's local path counts only when root owns it; the system list's always" f
+    local listuser listroot
+    listuser="$(kr list --porcelain --no-sync 2>/dev/null | cut -f1)"
+    rootfix a localapp > /etc/kiwi-updater/apps.list
+    listroot="$(kr list --porcelain --no-sync 2>/dev/null | cut -f1)"
+    f() { ! grep -qx localapp <<<"$userowned" && grep -qx localapp <<<"$rootowned" &&
+          ! grep -qx localapp <<<"$listuser" && grep -qx localapp <<<"$listroot"; }
+    check P36 "as root, a local path counts only when root owns it all the way up, from a catalog or from root's own list" f
 }
 
 t_P37() { # uninstalling without a systemd user session must still remove the files
@@ -952,9 +991,203 @@ t_P37() { # uninstalling without a systemd user session must still remove the fi
     check P37 "install.sh uninstall completes when 'systemctl --user' is unavailable" f
 }
 
+# ---------------------------------------------------------------------------
+# FIXPLAN-2.4.md. Same rule: each prints BUG on 2.3.2 and ok once fixed.
+# The GUI findings (U*) have no check here; the plan lists manual steps.
+# ---------------------------------------------------------------------------
+t_H1() { # a user-owned local repo must never become something root runs
+    # Anyone running as the user could commit a new tag there and have the
+    # passwordless wrapper install it as root.
+    mkapp a lp system 'touch /tmp/kt-h1-ran'
+    mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
+    echo "$GITROOT/a/lp.git" > /etc/kiwi-updater/apps.list
+    local listed m1=no m2=no appended=no
+    listed="$(kr list --porcelain --no-sync 2>/dev/null | cut -f1)"
+    kr install --system lp >/dev/null 2>&1
+    [[ -f /var/lib/kiwi-updater/repos/lp/.kiwi-installed ]] && m1=yes
+    # the same path handed over by the user side, as the GUI's --from does
+    rm -rf /var/lib/kiwi-updater/repos/lp /tmp/kt-h1-ran; : > /etc/kiwi-updater/apps.list
+    kr install --system lp --from "$GITROOT/a/lp.git" >/dev/null 2>&1
+    [[ -f /var/lib/kiwi-updater/repos/lp/.kiwi-installed ]] && m2=yes
+    grep -q "$GITROOT/a/lp.git" /etc/kiwi-updater/apps.list && appended=yes
+    f() { ! grep -qx lp <<<"$listed" && [[ $m1 == no && $m2 == no && $appended == no ]]; }
+    check H1 "root ignores a user-owned local repo, from its list or --from (via list: installed=$m1; --from: installed=$m2 recorded=$appended)" f
+}
+
+t_H2() { # pressing Tab must never run code from a catalog
+    # compgen -W expands every word it is given, $(…) included, and an app
+    # name falls back to the URL's basename, which nothing validated.
+    ulist 'https://example.invalid/$(touch${IFS}kt-pwned).git'
+    local bin=/tmp/kt-h2bin cwd=/tmp/kt-h2cwd
+    mkdir -p $bin $cwd; chown $T $cwd
+    # bin/kiwi may have lost its exec bit on the way here; completion needs `kiwi` on PATH
+    printf '#!/bin/sh\nexec bash %s "$@"\n' "$K" > $bin/kiwi; chmod 755 $bin/kiwi
+    runuser -u $T -- env -i HOME=$TH USER=$T PATH=$bin:/usr/bin:/bin bash -c \
+        "cd $cwd && source $W/data/bash-completion/kiwi && COMP_WORDS=(kiwi install '') && COMP_CWORD=2 && _kiwi" \
+        </dev/null >/dev/null 2>&1
+    local pwned=no; [[ -e $cwd/kt-pwned ]] && pwned=yes
+    local rows; rows="$(ku list --porcelain --no-sync 2>/dev/null | cut -f1)"
+    f() { [[ $pwned == no ]] && ! grep -qF '$(' <<<"$rows"; }
+    check H2 "a \$(…) in a URL's basename is neither run by completion (ran=$pwned) nor listed as a name" f
+}
+
+t_H3() { # a repo's basename must never become a command-line option
+    # The GUI runs `kiwi install <name>`: an app called --all installed everything.
+    ulist https://example.invalid/--all.git https://example.invalid/-x.git
+    local names; names="$(ku list --porcelain --no-sync 2>/dev/null | cut -f1)"
+    ku add https://example.invalid/--purge.git >/dev/null 2>&1; local rc=$?
+    f() { ! grep -q '^-' <<<"$names" && [[ $rc -ne 0 ]]; }
+    check H3 "no listed name starts with '-', and 'kiwi add …/--purge.git' is refused (rc=$rc)" f
+}
+
+t_M1() { # a catalog must not choose an older ref, or a branch, for what root installed
+    mkapp a dg system
+    release a dg v1.1.0
+    ( cd /tmp/kt-work-a-dg && git commit -q --allow-empty -m 'untagged work' && git push -q origin HEAD )
+    local app cat; app="$(rootfix a dg)"
+    mkcat c dgcat "$app"; cat="$(rootfix c dgcat)"
+    kr catalog add --system "$cat" >/dev/null 2>&1
+    kr install --system dg >/dev/null 2>&1
+    local want m=/var/lib/kiwi-updater/repos/dg/.kiwi-installed got_ref got_branch
+    want="$(git -C /tmp/kt-work-a-dg rev-parse 'v1.1.0^{commit}')"
+    catset() { ( cd /tmp/kt-cat-c-dgcat && printf '%s\n' "$1" > apps.list &&
+                 git commit -qam "$1" && git push -q "$cat" HEAD:main ); }
+    catset "$app ref=v1.0.0"
+    kr update --all --system >/dev/null 2>&1
+    got_ref="$(head -1 $m 2>/dev/null)"
+    catset "$app branch=main"
+    kr update --all --system >/dev/null 2>&1
+    got_branch="$(head -1 $m 2>/dev/null)"
+    f() { [[ -n $want && $got_ref == "$want" && $got_branch == "$want" ]]; }
+    check M1 "root stays on v1.1.0 when its catalog says ref=v1.0.0 ($([[ $got_ref == "$want" ]] && echo stayed || echo moved)) or branch=main ($([[ $got_branch == "$want" ]] && echo stayed || echo moved))" f
+}
+
+t_M2() { # root speaks https only
+    mkdir -p /etc/kiwi-updater
+    kr add --system http://example.invalid/x.git >/dev/null 2>&1; local rc=$?
+    echo http://example.invalid/y.git >> /etc/kiwi-updater/apps.list
+    mkcat c httpcat http://example.invalid/z.git
+    local cat; cat="$(rootfix c httpcat)"
+    kr catalog add --system "$cat" >/dev/null 2>&1
+    local names; names="$(kr list --porcelain --no-sync 2>/dev/null | cut -f1)"
+    f() { [[ $rc -ne 0 ]] && ! grep -qxE 'x|y|z' <<<"$names"; }
+    check M2 "root refuses http:// from 'add --system' (rc=$rc), its list and its catalogs (listed: $(grep -xE 'x|y|z' <<<"$names" | tr '\n' ' '))" f
+}
+
+t_M3() { # nothing untrusted reaches the terminal with its escape sequences intact
+    local e=$'\033'
+    mkapp a esc user "echo visible # ${e}[8mconcealed"
+    ku add $GITROOT/a/esc.git >/dev/null; ku install esc >/dev/null 2>&1
+    ( cd /tmp/kt-work-a-esc && sed -i 's/^VERSION=.*/VERSION=1.1.0/' kiwi.manifest &&
+      printf 'echo also # %s[2Khidden\n' "$e" >> install.sh &&
+      git commit -qam "harmless ${e}[8msubject" && git tag -a v1.1.0 -m v1.1.0 && git push -q origin HEAD --tags )
+    local diff inst cat
+    diff="$(ku diff esc 2>&1)"
+    inst="$(ku info --installer esc 2>&1)"
+    mkcat c esccat
+    ( cd /tmp/kt-cat-c-esccat && printf 'NAME=nice%s[8mcat\nDESCRIPTION=ok\n' "$e" > catalog.manifest &&
+      git commit -qam name && git push -q $GITROOT/c/esccat.git HEAD:main )
+    ku catalog add $GITROOT/c/esccat.git >/dev/null 2>&1
+    cat="$(ku catalog list 2>&1)"
+    local where=""
+    [[ $diff == *"$e"* ]] && where+="diff "
+    [[ $inst == *"$e"* ]] && where+="info-installer "
+    [[ $cat == *"$e"* ]] && where+="catalog-list "
+    f() { [[ -z $where ]]; }
+    check M3 "no raw ESC from an installer, a commit subject or a catalog NAME (found in: ${where:-nowhere})" f
+}
+
+t_M6() { # the installer that runs is a regular file inside the clone
+    printf '#!/bin/sh\ntouch /tmp/kt-ran\n' > /tmp/kt-outside.sh; chmod 755 /tmp/kt-outside.sh
+    # (a) INSTALLER= climbs out of the clone
+    mkapp a m6a user
+    ( cd /tmp/kt-work-a-m6a && echo 'INSTALLER=../../../../../../../../../../tmp/kt-outside.sh' >> kiwi.manifest &&
+      git commit -qam out && git tag -a v1.0.1 -m x && git push -q origin HEAD --tags )
+    ku add $GITROOT/a/m6a.git >/dev/null
+    ku install m6a >/dev/null 2>&1; local rca=$? rana=no
+    [[ -e /tmp/kt-ran ]] && rana=yes; rm -f /tmp/kt-ran
+    # (b) install.sh is a symlink to a file outside it
+    mkapp a m6b user
+    ( cd /tmp/kt-work-a-m6b && rm install.sh && ln -s /tmp/kt-outside.sh install.sh &&
+      git add -A && git commit -qm link && git tag -a v1.0.1 -m x && git push -q origin HEAD --tags )
+    ku add $GITROOT/a/m6b.git >/dev/null
+    ku install m6b >/dev/null 2>&1; local rcb=$? ranb=no
+    [[ -e /tmp/kt-ran ]] && ranb=yes
+    f() { [[ $rca -ne 0 && $rcb -ne 0 && $rana == no && $ranb == no ]]; }
+    check M6 "an installer outside the clone is refused: INSTALLER=../ (rc=$rca ran=$rana), symlink (rc=$rcb ran=$ranb)" f
+}
+
+t_M7() { # update clones only what is installed, as root and as the user
+    # root: every catalog-listed repo cloned and parsed as root on every timer run
+    mkapp a m7in system; mkapp a m7out system
+    local a1 a2 cat; a1="$(rootfix a m7in)"; a2="$(rootfix a m7out)"
+    mkcat c m7cat "$a1" "$a2"; cat="$(rootfix c m7cat)"
+    kr catalog add --system "$cat" >/dev/null 2>&1
+    kr install --system m7in >/dev/null 2>&1
+    rm -rf /var/lib/kiwi-updater/repos/m7out
+    kr update --all --system >/dev/null 2>&1
+    local rootclone=no; [[ -e /var/lib/kiwi-updater/repos/m7out ]] && rootclone=yes
+    # user
+    mkapp a u7in user; mkapp a u7out user
+    mkcat c u7cat $GITROOT/a/u7in.git $GITROOT/a/u7out.git
+    ku catalog add $GITROOT/c/u7cat.git >/dev/null 2>&1
+    ku install u7in >/dev/null 2>&1
+    rm -rf "$(urepo u7out)"
+    ku update >/dev/null 2>&1
+    local userclone=no; [[ -e $(urepo u7out) ]] && userclone=yes
+    f() { [[ -f /var/lib/kiwi-updater/repos/m7in/.kiwi-installed && -f $(urepo u7in)/.kiwi-installed &&
+             $rootclone == no && $userclone == no ]]; }
+    check M7 "update does not clone an app that is not installed (root cloned it: $rootclone, user: $userclone)" f
+}
+
+t_L1() { # root reads no KIWI_* tuning from the environment
+    mkapp a l1app system
+    local app cat; app="$(rootfix a l1app)"
+    mkcat c l1cat "$app"; cat="$(rootfix c l1cat)"
+    kr catalog add --system "$cat" >/dev/null 2>&1
+    rm -rf /var/lib/kiwi-updater/repos/l1app        # so sync_all_meta has work to do
+    # PATH, not an arbitrary name: under set -u an unset array name aborts
+    # before the subscript is evaluated, a set one does not
+    KENV='KIWI_FETCH_JOBS=PATH[$(touch${IFS}/tmp/kt-l1)]' kr list --porcelain >/dev/null 2>&1
+    f() { [[ ! -e /tmp/kt-l1 ]]; }
+    check L1 "KIWI_FETCH_JOBS from the environment is not evaluated as root" f
+}
+
+t_Q1() { # one ls-remote per URL per run
+    # The common GUI case: system apps root installed, seen by the user, who has
+    # a metadata clone of each. refresh_meta asks once, the status asks again.
+    local n u urls=()
+    mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
+    for n in qa qb qc; do mkapp a $n system; u="$(rootfix a $n)"; urls+=("$u"); done
+    printf '%s\n' "${urls[@]}" > /etc/kiwi-updater/apps.list
+    for n in qa qb qc; do kr install --system $n >/dev/null 2>&1; done
+    ku list >/dev/null 2>&1                     # the user's metadata clones
+    : > /tmp/kt-lsr.log; chmod 666 /tmp/kt-lsr.log
+    printf '#!/bin/sh\ncase " $* " in *" ls-remote "*) echo "$*" >> /tmp/kt-lsr.log ;; esac\nexec /usr/bin/git "$@"\n' > $STUBS/git
+    chmod +x $STUBS/git
+    ku list --porcelain --check >/dev/null 2>&1
+    rm -f $STUBS/git
+    local calls inst=0; calls="$(wc -l < /tmp/kt-lsr.log)"
+    for n in qa qb qc; do [[ -f /var/lib/kiwi-updater/repos/$n/.kiwi-installed ]] && inst=$((inst+1)); done
+    f() { [[ $inst -eq 3 && $calls -ge 1 && $calls -le 3 ]]; }
+    check Q1 "list --check asks each of 3 remotes once (ls-remote calls: $calls, root-installed: $inst/3)" f
+}
+
+t_Q4() { # a plain 'kiwi update' with nothing installed fetches nothing
+    local n urls=()
+    for n in q4a q4b q4c q4d q4e; do mkapp a $n user; urls+=("$GITROOT/a/$n.git"); done
+    mkcat c q4cat "${urls[@]}"
+    ku catalog add $GITROOT/c/q4cat.git >/dev/null 2>&1
+    ku update >/dev/null 2>&1
+    local made=0; for n in q4a q4b q4c q4d q4e; do [[ -e $(urepo $n) ]] && made=$((made+1)); done
+    f() { [[ $made -eq 0 ]]; }
+    check Q4 "'kiwi update' with none of 5 catalog apps installed makes no clone (made: $made)" f
+}
+
 for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
          P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P17 P18 P19 P20 P22 P23 P25 \
-         P27 P28 P29 P30 P31 P32 P33 P34 P35 P36 P37; do run $t; done
+         P27 P28 P29 P30 P31 P32 P33 P34 P35 P36 P37 \
+         H1 H2 H3 M1 M2 M3 M6 M7 L1 Q1 Q4; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

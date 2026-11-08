@@ -24,6 +24,14 @@ behaviour someone may rely on; those say so.
   `--purge`, `--force` and `--system` worked the same way. Such URLs are now
   refused (above), and every GUI call puts `--` before the names and URLs it
   passes, so nothing from a catalog can be read as an option.
+- **`http://` is refused, everywhere** (M2). Root cloned and ran installers
+  fetched in plain text when a catalog or list named an `http://` URL — and git
+  followed an `https` → `http` redirect because `http` was an allowed protocol.
+  Anyone on the network path got root. kiwi now allows only `https` and local
+  paths (`GIT_ALLOW_PROTOCOL=https:file`), in both scopes; `kiwi add` and
+  `kiwi catalog add` refuse `http://` instead of warning, and such entries in a
+  list or catalog are reported and skipped. *Changes behaviour:* an `http://`
+  entry stops working — switch it to `https://`.
 
 ## 2.3.2 — 2026-10-29
 

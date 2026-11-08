@@ -170,7 +170,12 @@ unset GIT_ASKPASS SSH_ASKPASS 2>/dev/null || true
 # the root timer does the same as root — so the set of usable transports should
 # not be "whatever this git was built with". git blocks ext:: by default
 # already; this is the belt to that braces.
-export GIT_ALLOW_PROTOCOL=https:http:file
+#
+# No http (FIXPLAN-2.4 M2). An installer fetched in plain text is code anyone on
+# the network path can replace — as root, for a system app — and with http
+# allowed, git also follows an https -> http redirect. file stays for local
+# paths, which root follows only when it owns them.
+export GIT_ALLOW_PROTOCOL=https:file
 
 # git that talks to a remote: hard wall-clock cap, plus git's own stalled
 # transfer abort so a connection that goes quiet does not sit there.
@@ -635,7 +640,7 @@ valid_url() { # url
     [[ $u == *[[:space:]]* ]] && return 1
     [[ $u == *[[:cntrl:]]* ]] && return 1
     case "$u" in
-        https://?*|http://?*|file:///?*|/?*) ;;      # local paths: dev and tests
+        https://?*|file:///?*|/?*) ;;      # local paths: dev and tests; never http (M2)
         *) return 1 ;;
     esac
     b="$(dir_name "$u")"
@@ -652,7 +657,7 @@ valid_url() { # url
 # put there by the admin, with a password, and is taken as it is.
 entry_ok() { # url opts
     valid_url "$1" || return 1
-    [[ $EUID -eq 0 && $1 != https://* && $1 != http://* ]] || return 0
+    [[ $EUID -eq 0 && $1 != https://* ]] || return 0
     [[ "$(entry_opt "${2:-}" local 0)" == 1 ]] && return 0
     local st owner mode
     st="$(stat -c '%u %a' "${1#file://}" 2>/dev/null)" || return 1
@@ -2209,8 +2214,7 @@ cmd_add() {
     done
     [[ -n $url ]] || die "usage: kiwi add <git-url> [--system]"
     valid_url "$url" || die "not a usable git url: '$url'
-expected https://…, http://… or an absolute path to a local repo."
-    [[ $url == http://* ]] && warn "http:// is not encrypted; anyone on the path can change what you install"
+expected https://… or an absolute path to a local repo (http:// is refused: anyone on the path could change what you install)."
     local scope=user f
     (( system )) && scope=system
     # There is no useful root "user" list: `kiwi add <url>` from a root shell
@@ -2247,8 +2251,7 @@ cmd_catalog() { # add <url> | list      (--system routes to the system file)
             local url="${1:-}"
             [[ -n $url ]] || die "usage: kiwi catalog add <git-url> [--system]"
             valid_url "$url" || die "not a usable git url: '$url'
-expected https://…, http://… or an absolute path to a local repo."
-            [[ $url == http://* ]] && warn "http:// is not encrypted; anyone on the path can change what you install"
+expected https://… or an absolute path to a local repo (http:// is refused: anyone on the path could change what you install)."
             # root reads only the system file (catalog_urls), so as root that
             # is the one to write — the user file under /root was never read
             local f="$USER_CATALOGS"

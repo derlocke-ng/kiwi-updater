@@ -12,10 +12,11 @@
 # Run it in a throwaway container, never on your real machine:
 #
 #   podman run --rm -v "$PWD":/src:ro,Z fedora:latest bash -c \
-#     'dnf -y -q install git-core gawk util-linux shadow-utils procps-ng python3 >/dev/null && bash /src/tests/repro.sh'
+#     'dnf -y -q install git-core gawk util-linux shadow-utils procps-ng python3 openssl >/dev/null && bash /src/tests/repro.sh'
 #
 # gawk matters: fedora:latest ships no awk, and without it remote_target fails
 # on every app, so checks "pass" because nothing can be reached at all.
+# openssl makes S1's https test server (kiwi refuses http:// since 2.4).
 #
 #   bash tests/repro.sh F1 F6      # run only some checks (F9 runs as part of F8)
 set -uo pipefail
@@ -25,7 +26,7 @@ if [[ ! -f /run/.containerenv && ! -f /.dockerenv && ${KIWI_REPRO_FORCE:-0} != 1
     exit 2
 fi
 [[ $EUID -eq 0 ]] || { echo "must run as root (inside the container)" >&2; exit 2; }
-for c in git awk sed grep flock timeout runuser useradd pkill; do
+for c in git awk sed grep flock timeout runuser useradd pkill openssl; do
     command -v "$c" >/dev/null || { echo "missing: $c (the suite would report false passes without it)" >&2; exit 2; }
 done
 
@@ -321,26 +322,36 @@ t_S5() { # a name the wrapper accepts must never be able to look like an option
 
 t_S1() { # no credential helper on ANY network call, including ls-remote
     command -v python3 >/dev/null || { echo "skip S1   (needs python3)"; return 0; }
-    local port=18473 log=/tmp/kt-cred.log
-    : > $log; chmod 666 $log
+    # https with a throwaway certificate: kiwi refuses http:// (M2), so a plain
+    # http server would make this pass without kiwi ever asking it anything
+    local port=18473 log=/tmp/kt-cred.log hits=/tmp/kt-s1-hits.log
+    : > $log; chmod 666 $log; : > $hits
+    openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=127.0.0.1 \
+        -keyout /tmp/kt-s1.key -out /tmp/kt-s1.crt >/dev/null 2>&1
     printf '#!/bin/sh\necho "$*" >> %s\n' "$log" > $STUBS/cred-helper; chmod +x $STUBS/cred-helper
-    python3 - "$port" <<'PY' &
-import sys, http.server
+    python3 - "$port" "$hits" <<'PY2' &
+import sys, ssl, http.server
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        open(sys.argv[2], "a").write(self.path + "\n")
         self.send_response(401); self.send_header("WWW-Authenticate", 'Basic realm="x"'); self.end_headers()
     def log_message(self, *a): pass
-http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
-PY
+srv = http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H)
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); ctx.load_cert_chain("/tmp/kt-s1.crt", "/tmp/kt-s1.key")
+srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+srv.serve_forever()
+PY2
     local srv=$!; sleep 1
     mkapp a private user; ku add $GITROOT/a/private.git >/dev/null; ku install private >/dev/null
     runuser -u $T -- env HOME=$TH git config --global credential.helper $STUBS/cred-helper
-    echo "http://127.0.0.1:$port/private.git" > $TH/.config/kiwi-updater/apps.list
+    runuser -u $T -- env HOME=$TH git config --global http.sslVerify false
+    echo "https://127.0.0.1:$port/private.git" > $TH/.config/kiwi-updater/apps.list
     ku check >/dev/null 2>&1
     kill $srv 2>/dev/null
     runuser -u $T -- env HOME=$TH git config --global --unset credential.helper
-    f() { [[ ! -s $log ]]; }
-    check S1 "credential helper is never invoked (ls-remote path)" f
+    runuser -u $T -- env HOME=$TH git config --global --unset http.sslVerify
+    f() { [[ -s $hits && ! -s $log ]]; }
+    check S1 "credential helper is never invoked (ls-remote path; server asked: $(wc -l < $hits) time(s))" f
 }
 
 t_S2() { # root must not resolve apps from a list the user can write
@@ -1062,7 +1073,7 @@ t_M1() { # a catalog must not choose an older ref, or a branch, for what root in
     check M1 "root stays on v1.1.0 when its catalog says ref=v1.0.0 ($([[ $got_ref == "$want" ]] && echo stayed || echo moved)) or branch=main ($([[ $got_branch == "$want" ]] && echo stayed || echo moved))" f
 }
 
-t_M2() { # root speaks https only
+t_M2() { # https only — root (invariant 7) and, per D2, the user too
     mkdir -p /etc/kiwi-updater
     kr add --system http://example.invalid/x.git >/dev/null 2>&1; local rc=$?
     echo http://example.invalid/y.git >> /etc/kiwi-updater/apps.list
@@ -1070,8 +1081,12 @@ t_M2() { # root speaks https only
     local cat; cat="$(rootfix c httpcat)"
     kr catalog add --system "$cat" >/dev/null 2>&1
     local names; names="$(kr list --porcelain --no-sync 2>/dev/null | cut -f1)"
-    f() { [[ $rc -ne 0 ]] && ! grep -qxE 'x|y|z' <<<"$names"; }
-    check M2 "root refuses http:// from 'add --system' (rc=$rc), its list and its catalogs (listed: $(grep -xE 'x|y|z' <<<"$names" | tr '\n' ' '))" f
+    ku add http://example.invalid/ux.git >/dev/null 2>&1; local urc=$?
+    ku catalog add http://example.invalid/ucat.git >/dev/null 2>&1; local crc=$?
+    ulist http://example.invalid/uy.git
+    local unames; unames="$(ku list --porcelain --no-sync 2>/dev/null | cut -f1)"
+    f() { [[ $rc -ne 0 && $urc -ne 0 && $crc -ne 0 ]] && ! grep -qxE 'x|y|z' <<<"$names" && ! grep -qxE 'ux|uy' <<<"$unames"; }
+    check M2 "http:// refused: root add (rc=$rc), user add (rc=$urc), catalog add (rc=$crc); listed as root: $(grep -xE 'x|y|z' <<<"$names" | tr '\n' ' ')user: $(grep -xE 'ux|uy' <<<"$unames" | tr '\n' ' ')" f
 }
 
 t_M3() { # nothing untrusted reaches the terminal with its escape sequences intact

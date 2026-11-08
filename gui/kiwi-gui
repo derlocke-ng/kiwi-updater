@@ -759,7 +759,7 @@ class DetailDialog(Adw.Dialog):
     def _pin(self, ref):
         name = self.app["name"]
         self.close()
-        self.win.run_cli(["pin", name, ref] if ref else ["unpin", name])
+        self.win.run_cli(["pin", "--", name, ref] if ref else ["unpin", "--", name])
 
     # ---- what is about to run -------------------------------------------
     def _inspect_group(self, info):
@@ -773,13 +773,13 @@ class DetailDialog(Adw.Dialog):
 
         e = Adw.ExpanderRow(title="Installer",
                             subtitle=esc(info.get("installer") or "install.sh"))
-        self._lazy_text(e, [self.win.kiwi, "info", "--installer", name])
+        self._lazy_text(e, [self.win.kiwi, "info", "--installer", "--", name])
         g.add(e)
 
         if self.app["status"] == "update-available":
             e2 = Adw.ExpanderRow(title="What this update changes",
                                  subtitle="commits, files, and the installer's own diff")
-            self._lazy_text(e2, [self.win.kiwi, "diff", name])
+            self._lazy_text(e2, [self.win.kiwi, "diff", "--", name])
             g.add(e2)
         return g
 
@@ -824,7 +824,7 @@ class DetailDialog(Adw.Dialog):
 
     def _load(self):
         try:
-            out = subprocess.run([self.win.kiwi, "info", "--porcelain", self.app["name"]],
+            out = subprocess.run([self.win.kiwi, "info", "--porcelain", "--", self.app["name"]],
                                  capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120).stdout
         except Exception as e:  # noqa: BLE001
             out = ""
@@ -1064,7 +1064,7 @@ class CatalogDialog(Adw.Dialog):
         if not url:
             return
         self.entry.set_text("")
-        self.win.run_catalog(["catalog", "add", url], self)
+        self.win.run_catalog(["catalog", "add", "--", url], self)
 
     def _remove(self, url, name):
         dlg = Adw.AlertDialog(
@@ -1075,7 +1075,7 @@ class CatalogDialog(Adw.Dialog):
         dlg.add_response("remove", "Remove")
         dlg.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
         dlg.connect("response", lambda _d, r: r == "remove"
-                    and self.win.run_catalog(["catalog", "remove", url], self))
+                    and self.win.run_catalog(["catalog", "remove", "--", url], self))
         dlg.present(self)
 
 
@@ -1725,7 +1725,9 @@ class Window(Adw.ApplicationWindow):
                 self._confirm_root(verb, names, root_apps)
                 return
         self.set_busy(True, "%s %d app(s)…" % (verb.capitalize(), len(names)))
-        self._spawn([self.kiwi, verb] + (["--purge"] if purge else []) + list(names),
+        # "--": a name is data from a catalog and must never read as an option.
+        # A repo called --all.git used to make Install run `kiwi install --all`.
+        self._spawn([self.kiwi, verb] + (["--purge"] if purge else []) + ["--"] + list(names),
                     lambda rc: self.after_action(rc, verb))
 
     def run_catalog(self, args, dialog):

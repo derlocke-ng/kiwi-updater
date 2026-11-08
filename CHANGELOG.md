@@ -17,6 +17,13 @@ behaviour someone may rely on; those say so.
   everywhere: `kiwi add`, `catalog add`, lists and catalogs (reported with the
   file it is in), and the root wrapper. *Changes behaviour:* a repo whose name
   starts with `.`/`_`/`-` or contains other characters can no longer be listed.
+- **The GUI can no longer be made to run `kiwi install --all`** (H3). A repo
+  called `--all.git` was listed as an app named `--all`; clicking Install ran
+  `kiwi install --all` — every app in every catalog, root halves included — and
+  because the decoy declared `SCOPES=user`, without the root confirmation.
+  `--purge`, `--force` and `--system` worked the same way. Such URLs are now
+  refused (above), and every GUI call puts `--` before the names and URLs it
+  passes, so nothing from a catalog can be read as an option.
 
 ## 2.3.2 — 2026-10-29
 

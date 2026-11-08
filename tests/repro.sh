@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# tests/repro.sh — reproduces the findings in FIXPLAN.md against the working tree.
+# tests/repro.sh — reproduces the findings in FIXPLAN.md and FIXPLAN-2.4.md
+# against the working tree.
 #
 # Every check asserts BEHAVIOUR, not message text, so it prints
 #     BUG  <id>   while the problem is still there
@@ -11,10 +12,12 @@
 # Run it in a throwaway container, never on your real machine:
 #
 #   podman run --rm -v "$PWD":/src:ro,Z fedora:latest bash -c \
-#     'dnf -y -q install git-core gawk util-linux shadow-utils procps-ng python3 >/dev/null && bash /src/tests/repro.sh'
+#     'dnf -y -q install git-core gawk util-linux shadow-utils procps-ng python3 openssl openssh-clients >/dev/null && bash /src/tests/repro.sh'
 #
 # gawk matters: fedora:latest ships no awk, and without it remote_target fails
 # on every app, so checks "pass" because nothing can be reached at all.
+# openssl makes S1's https test server (kiwi refuses http:// since 2.4);
+# openssh-clients is git's SSH signature check, which root relies on (H4).
 #
 #   bash tests/repro.sh F1 F6      # run only some checks (F9 runs as part of F8)
 set -uo pipefail
@@ -24,7 +27,7 @@ if [[ ! -f /run/.containerenv && ! -f /.dockerenv && ${KIWI_REPRO_FORCE:-0} != 1
     exit 2
 fi
 [[ $EUID -eq 0 ]] || { echo "must run as root (inside the container)" >&2; exit 2; }
-for c in git awk sed grep flock timeout runuser useradd pkill; do
+for c in git awk sed grep flock timeout runuser useradd pkill openssl ssh-keygen; do
     command -v "$c" >/dev/null || { echo "missing: $c (the suite would report false passes without it)" >&2; exit 2; }
 done
 
@@ -34,6 +37,9 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 T=kiwitest; TH=/home/$T
 W=/opt/kiwi-under-test; STUBS=/opt/kiwi-stubs; GITROOT=/srv/kiwi-git; ESC=/tmp/kt-escalations.log
+# repos root may follow: root-owned and not group/other-writable all the way
+# up (H1). $GITROOT is the test user's, so anything root reads lives here.
+ROOTGIT=/srv/kiwi-git-root
 K=$W/bin/kiwi
 
 id $T >/dev/null 2>&1 || useradd -m -s /bin/bash $T
@@ -41,6 +47,10 @@ git config --system safe.directory '*'
 git config --system user.email t@example.com
 git config --system user.name tester
 git config --system init.defaultBranch main
+# https://kiwi.test/<owner>/<name>.git is $GITROOT/<owner>/<name>.git: kiwi sees
+# an https URL (root takes nothing else from the user side since H1), git
+# fetches from the local fixture. .test is reserved, so nothing real is shadowed.
+git config --system "url.$GITROOT/.insteadOf" https://kiwi.test/
 rm -rf $W && mkdir -p $W $STUBS && cp -r "$SRC"/. $W/ && rm -rf $W/.git && chmod -R a+rX $W
 
 stub_systemctl() { printf '#!/bin/sh\nexit %s\n' "${1:-0}" > $STUBS/systemctl; chmod +x $STUBS/systemctl; }
@@ -57,7 +67,7 @@ reset() {
     pkill -u $T sleep 2>/dev/null
     rm -rf $TH/.config/kiwi-updater $TH/.config/systemd $TH/.local /etc/kiwi-updater /var/lib/kiwi-updater \
            /root/.config/kiwi-updater /usr/local/bin/kiwi /usr/local/libexec/kiwi-system-update \
-           $GITROOT /tmp/kt-*
+           $GITROOT $ROOTGIT /tmp/kt-*
     mkdir -p $GITROOT; chown $T $GITROOT; : > $ESC; chmod 666 $ESC
 }
 
@@ -82,6 +92,57 @@ mkcat() { # owner name url...
       printf 'NAME=%s\nDESCRIPTION=test catalog\n' "$n" > catalog.manifest &&
       git add -A && git commit -qm cat && git clone -q --bare . $GITROOT/"$o"/"$n".git )
     chown -R $T $GITROOT/"$o"
+}
+# Two release-signing keys (H4), made once per run and kept outside /tmp/kt-*,
+# which reset() clears: KEYA is "the project's" key, KEYB someone else's.
+KEYS=/opt/kiwi-keys; KEYA=$KEYS/a; KEYB=$KEYS/b
+if [[ ! -f $KEYA ]]; then
+    mkdir -p $KEYS
+    ssh-keygen -q -t ed25519 -N '' -C kt-a -f $KEYA; ssh-keygen -q -t ed25519 -N '' -C kt-b -f $KEYB
+fi
+# resign owner name tag key -> replace an app's (mkapp) tag with a signed one
+resign() {
+    ( cd /tmp/kt-work-"$1"-"$2" &&
+      git -c gpg.format=ssh -c user.signingkey="$4" tag -f -s "$3" -m "$3" "$3^{commit}" >/dev/null &&
+      git push -q -f origin "refs/tags/$3" )
+}
+# release_signed owner name tag key -> like release, with an SSH-signed tag
+release_signed() {
+    ( cd /tmp/kt-work-"$1"-"$2" && sed -i "s/^VERSION=.*/VERSION=${3#v}/" kiwi.manifest &&
+      git commit -qam "release $3" &&
+      git -c gpg.format=ssh -c user.signingkey="$4" tag -s "$3" -m "$3" &&
+      git push -q origin HEAD --tags )
+}
+# rootfix owner name -> prints the path of a root-owned copy of $GITROOT/owner/name.git
+# Root follows a local path only if it and every parent are root-owned (H1).
+# Re-run it after `release` (or any push) so root sees the new commits. There is
+# deliberately no environment switch that lets root skip the check for tests.
+rootfix() {
+    mkdir -p "$ROOTGIT/$1"; chmod 755 "$ROOTGIT" "$ROOTGIT/$1"
+    rm -rf "$ROOTGIT/$1/$2.git"
+    cp -a "$GITROOT/$1/$2.git" "$ROOTGIT/$1/$2.git"
+    chown -R root:root "$ROOTGIT/$1/$2.git"; chmod -R go-w "$ROOTGIT/$1/$2.git"
+    echo "$ROOTGIT/$1/$2.git"
+}
+# selffix -> a root-owned, release-tagged repo of the tree under test, named
+# in /etc/kiwi-updater/self-url. Since M5 root installs kiwi only from its own
+# clone of that source (by default the real GitHub repo), so without this a
+# root bootstrap in a test would install the published release, not this tree.
+selffix() {
+    local w=/tmp/kt-work-selffix v
+    v="$(sed -n 's/^VERSION=//p' $W/kiwi.manifest | head -1)"
+    rm -rf $w; mkdir -p $w; cp -r $W/. $w/
+    ( cd $w && git init -q && git add -A && git commit -qm self && git tag -a "v$v" -m "v$v" )
+    mkdir -p $ROOTGIT/self; chmod 755 $ROOTGIT $ROOTGIT/self
+    rm -rf $ROOTGIT/self/kiwi-updater.git
+    git clone -q --bare $w $ROOTGIT/self/kiwi-updater.git; chmod -R go-w $ROOTGIT/self/kiwi-updater.git
+    mkdir -p /etc/kiwi-updater; echo "$ROOTGIT/self/kiwi-updater.git" > /etc/kiwi-updater/self-url
+}
+# ulist line... -> the test user's own apps.list, exactly these lines
+ulist() {
+    mkdir -p $TH/.config/kiwi-updater
+    printf '%s\n' "$@" > $TH/.config/kiwi-updater/apps.list
+    chown -R $T $TH/.config; chmod 644 $TH/.config/kiwi-updater/apps.list
 }
 
 BUGS=0
@@ -124,10 +185,11 @@ t_F4() { # the root-owned kiwi must be able to update itself from the timer
     ( cd $w && git init -q && git add -A && git commit -qm one && git tag -a v0.0.1 -m v0.0.1 &&
       git commit -q --allow-empty -m two && git tag -a v0.0.2 -m v0.0.2 &&
       git clone -q --bare . $GITROOT/d/kiwi-updater.git )
+    local u; u="$(rootfix d kiwi-updater)"
     mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
-    echo "$GITROOT/d/kiwi-updater.git" > /etc/kiwi-updater/apps.list
+    echo "$u" > /etc/kiwi-updater/apps.list
     local r=/var/lib/kiwi-updater/repos/kiwi-updater
-    git clone -q $GITROOT/d/kiwi-updater.git $r && git -C $r checkout -q v0.0.1
+    git clone -q $u $r && git -C $r checkout -q v0.0.1
     git -C $r rev-parse HEAD > $r/.kiwi-installed
     kr update --all --system --quiet >/dev/null; local rc=$?
     f() { [[ $rc -eq 0 && "$(git -C $r rev-parse HEAD)" == "$(git -C $w rev-parse 'v0.0.2^{commit}')" ]]; }
@@ -166,13 +228,13 @@ t_F7() { # 'kiwi install' with no arguments must not install the whole catalog
 
 t_F8() { # F8 + F9 share a setup: a system app from a catalog, seen by the user
     mkapp a rootsvc system
-    mkcat c cat1 $GITROOT/a/rootsvc.git
-    chown -R root:root $GITROOT/a      # a catalog's local path: root follows it only if root owns it (P36)
-    mkdir -p /etc/kiwi-updater; echo $GITROOT/c/cat1.git > /etc/kiwi-updater/catalogs.list
-    ku catalog add $GITROOT/c/cat1.git >/dev/null 2>&1
+    local app cat; app="$(rootfix a rootsvc)"   # root follows a local path only if root owns it (P36, H1)
+    mkcat c cat1 "$app"; cat="$(rootfix c cat1)"
+    mkdir -p /etc/kiwi-updater; echo "$cat" > /etc/kiwi-updater/catalogs.list
+    ku catalog add "$cat" >/dev/null 2>&1
     ku list >/dev/null 2>&1
     kr install --system rootsvc >/dev/null
-    release a rootsvc v1.1.0
+    release a rootsvc v1.1.0; rootfix a rootsvc >/dev/null
     ku check >/dev/null; local rc=$?
     f9() { [[ $rc -eq 10 ]]; }
     check F9 "'kiwi check' reports a pending update of a catalog system app (exit 10)" f9
@@ -251,19 +313,37 @@ t_F15() { # list files are matched by exact URL, not by substring
 }
 
 t_F16() { # do not ask for a password and then say "unknown app"
+    # 2.0 handed root the URL the user was shown (--from) and root recorded it.
+    # 2.4 (D4): root installs only sources it already lists. For one it does
+    # not, nothing is escalated — no password for work root would refuse, and
+    # never an escalation by name alone — and the user is told how to register
+    # it. Once root lists it, the escalation names the app and says, before
+    # the password, where it comes from (M4).
+    mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater
+    install -Dm755 $K /usr/local/bin/kiwi
+    mkapp a hsvc system
+    local hu=https://kiwi.test/a/hsvc.git      # https (kiwi.test, see the top)
+    ulist "$hu"
+    : > $ESC
+    local out1; out1="$(ku install hsvc 2>&1)"
+    local unknown_ok=no
+    [[ ! -s $ESC ]] && grep -q "kiwi add --system $hu" <<<"$out1" && unknown_ok=yes
+    # a user-owned local path from a user catalog: no escalation at all either
     mkapp a rootsvc "user system"
     mkcat c usercat $GITROOT/a/rootsvc.git
     ku catalog add $GITROOT/c/usercat.git >/dev/null 2>&1       # user-level only
-    mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater
-    install -Dm755 $K /usr/local/bin/kiwi
     : > $ESC
     ku install rootsvc >/dev/null 2>&1
-    # 2.0: an install is always authenticated, so instead of refusing, the URL
-    # the user was shown goes along (--from) and root records it. What must
-    # NOT happen is an escalation by name alone, which is the "password, then
-    # unknown app" the finding was about.
-    f() { grep -q -- "install --system.*--from $GITROOT/a/rootsvc.git" $ESC; }
-    check F16 "a system app root cannot resolve is handed over by URL, not by name alone" f
+    local local_ok=no; [[ ! -s $ESC ]] && local_ok=yes
+    # root lists it now: escalated by name, the source printed first
+    echo "$hu" > /etc/kiwi-updater/apps.list
+    : > $ESC
+    local out2; out2="$(ku install hsvc 2>&1)"
+    local known_ok=no
+    grep -q -- "install --system hsvc" $ESC && ! grep -q -- '--from' $ESC &&
+        grep -q "hsvc from $hu" <<<"$out2" && known_ok=yes
+    f() { [[ $unknown_ok == yes && $local_ok == yes && $known_ok == yes ]]; }
+    check F16 "unknown source: no password, says 'kiwi add --system' ($unknown_ok); local path: no password ($local_ok); listed: escalated by name with its source shown ($known_ok)" f
 }
 
 t_F17() { # installing without a systemd user session must still finish
@@ -299,26 +379,36 @@ t_S5() { # a name the wrapper accepts must never be able to look like an option
 
 t_S1() { # no credential helper on ANY network call, including ls-remote
     command -v python3 >/dev/null || { echo "skip S1   (needs python3)"; return 0; }
-    local port=18473 log=/tmp/kt-cred.log
-    : > $log; chmod 666 $log
+    # https with a throwaway certificate: kiwi refuses http:// (M2), so a plain
+    # http server would make this pass without kiwi ever asking it anything
+    local port=18473 log=/tmp/kt-cred.log hits=/tmp/kt-s1-hits.log
+    : > $log; chmod 666 $log; : > $hits
+    openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=127.0.0.1 \
+        -keyout /tmp/kt-s1.key -out /tmp/kt-s1.crt >/dev/null 2>&1
     printf '#!/bin/sh\necho "$*" >> %s\n' "$log" > $STUBS/cred-helper; chmod +x $STUBS/cred-helper
-    python3 - "$port" <<'PY' &
-import sys, http.server
+    python3 - "$port" "$hits" <<'PY2' &
+import sys, ssl, http.server
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        open(sys.argv[2], "a").write(self.path + "\n")
         self.send_response(401); self.send_header("WWW-Authenticate", 'Basic realm="x"'); self.end_headers()
     def log_message(self, *a): pass
-http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
-PY
+srv = http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H)
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); ctx.load_cert_chain("/tmp/kt-s1.crt", "/tmp/kt-s1.key")
+srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+srv.serve_forever()
+PY2
     local srv=$!; sleep 1
     mkapp a private user; ku add $GITROOT/a/private.git >/dev/null; ku install private >/dev/null
     runuser -u $T -- env HOME=$TH git config --global credential.helper $STUBS/cred-helper
-    echo "http://127.0.0.1:$port/private.git" > $TH/.config/kiwi-updater/apps.list
+    runuser -u $T -- env HOME=$TH git config --global http.sslVerify false
+    echo "https://127.0.0.1:$port/private.git" > $TH/.config/kiwi-updater/apps.list
     ku check >/dev/null 2>&1
     kill $srv 2>/dev/null
     runuser -u $T -- env HOME=$TH git config --global --unset credential.helper
-    f() { [[ ! -s $log ]]; }
-    check S1 "credential helper is never invoked (ls-remote path)" f
+    runuser -u $T -- env HOME=$TH git config --global --unset http.sslVerify
+    f() { [[ -s $hits && ! -s $log ]]; }
+    check S1 "credential helper is never invoked (ls-remote path; server asked: $(wc -l < $hits) time(s))" f
 }
 
 t_S2() { # root must not resolve apps from a list the user can write
@@ -456,13 +546,14 @@ t_P9() { # an app listed in BOTH lists must stay reachable in both scopes
     # so the second was thrown away and the root half became unreachable — a
     # permanent "update available" that no command could clear.
     mkapp a dual user 'echo "scope=$KIWI_SCOPE"'
+    local u; u="$(rootfix a dual)"
     mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
     install -Dm755 $K /usr/local/bin/kiwi      # something for root to escalate to
-    echo "$GITROOT/a/dual.git" > /etc/kiwi-updater/apps.list
-    ku add $GITROOT/a/dual.git >/dev/null
+    echo "$u" > /etc/kiwi-updater/apps.list
+    ku add "$u" >/dev/null
     ku install dual >/dev/null 2>&1
     kr install --system dual >/dev/null 2>&1
-    release a dual v1.1.0
+    release a dual v1.1.0; rootfix a dual >/dev/null
     local line scopes status
     line="$(ku list --porcelain --check 2>/dev/null | grep '^dual')"
     scopes="$(cut -f2 <<<"$line")"; status="$(cut -f4 <<<"$line")"
@@ -474,9 +565,10 @@ t_P9() { # an app listed in BOTH lists must stay reachable in both scopes
 
 t_P10() { # the porcelain must tell the GUI which scopes are actually installed
     mkapp a dualp "user system"
+    local u; u="$(rootfix a dualp)"
     mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
-    echo "$GITROOT/a/dualp.git" > /etc/kiwi-updater/apps.list
-    ku add $GITROOT/a/dualp.git >/dev/null
+    echo "$u" > /etc/kiwi-updater/apps.list
+    ku add "$u" >/dev/null
     ku install dualp --user >/dev/null 2>&1        # the user half only
     local line nf inst pinf
     line="$(ku list --porcelain --no-sync 2>/dev/null | grep '^dualp')"
@@ -508,9 +600,10 @@ t_P12() { # `kiwi info` and `kiwi list` must agree about an app's scopes
     # line at all — and the GUI detail view, which is built from info, had no
     # root row to show for an app installed as root.
     mkapp a bothsc user 'echo "scope=$KIWI_SCOPE"'
+    local u; u="$(rootfix a bothsc)"
     mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
-    echo "$GITROOT/a/bothsc.git" > /etc/kiwi-updater/apps.list
-    ku add $GITROOT/a/bothsc.git >/dev/null
+    echo "$u" > /etc/kiwi-updater/apps.list
+    ku add "$u" >/dev/null
     ku install bothsc >/dev/null 2>&1
     kr install --system bothsc >/dev/null 2>&1
     local lsc isc isys
@@ -528,13 +621,14 @@ t_P13() { # a user-side pin must not mark the root half update-available for eve
     # sat exactly where their configuration wanted them, `kiwi update` said
     # "up to date", and nothing cleared the indicator.
     mkapp a dualpin "user system"
+    local u; u="$(rootfix a dualpin)"
     mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
     install -Dm755 $K /usr/local/bin/kiwi
-    echo "$GITROOT/a/dualpin.git" > /etc/kiwi-updater/apps.list
-    ku add $GITROOT/a/dualpin.git >/dev/null
+    echo "$u" > /etc/kiwi-updater/apps.list
+    ku add "$u" >/dev/null
     ku install dualpin --user >/dev/null 2>&1
     kr install --system dualpin >/dev/null 2>&1
-    release a dualpin v1.1.0
+    release a dualpin v1.1.0; rootfix a dualpin >/dev/null
     ku pin dualpin v1.0.0 >/dev/null 2>&1
     kr update --all --system --quiet >/dev/null 2>&1   # roots timer, unpinned
     local st; st="$(ku list --porcelain --check 2>/dev/null | awk -F'\t' '$1=="dualpin"{print $4}')"
@@ -557,25 +651,27 @@ t_P15() { # a pin value that would corrupt the list file is refused
     check P15 "a pin value with whitespace is refused before touching the list" f
 }
 
-t_P16() { # the root phase of the bootstrap must register self-update even under pkexec
-    # Under pkexec there is no SUDO_UID, so git refused the user-owned checkout
-    # as "dubious ownership", origin_url came back empty, and the root clone
-    # was never created — the root-owned kiwi had nothing to self-update from.
-    # The harness runs root with env -i, which is exactly that environment.
-    # a USER-owned git checkout (the thing under test), cloned from a
-    # root-owned bare repo (so the source itself is not what trips git)
-    local src=$TH/checkout; rm -rf $src $GITROOT/self
-    cp -r $W $src && chown -R $T $src
+t_P16() { # the root phase of the bootstrap registers kiwi's own self-update, from root's own source
+    # Under pkexec there is no SUDO_UID; the root phase must still register
+    # self-update (the harness runs root with env -i, which is that environment).
+    # M5: and what it registers and installs is root's choice — self-url here,
+    # the canonical URL otherwise — never the user checkout's origin or files.
+    selffix
+    local src=$TH/checkout; rm -rf $src
+    cp -r $W $src && echo '# USER-CHECKOUT-COPY' >> $src/bin/kiwi && chown -R $T $src
     runuser -u $T -- bash -c "cd $src && git init -q && git add -A && git -c user.email=t@e -c user.name=t commit -qm x"
-    mkdir -p $GITROOT/self && git clone -q --bare $src $GITROOT/self/kiwi-updater.git
-    runuser -u $T -- git -C $src remote add origin $GITROOT/self/kiwi-updater.git
+    runuser -u $T -- git -C $src remote add origin https://kiwi.test/elsewhere/kiwi-updater.git
     # GIT_CONFIG_SYSTEM=/dev/null: the harness sets safe.directory='*' globally,
-    # which would hide exactly the refusal this test is about
+    # which would hide a "dubious ownership" refusal of the user's checkout
     env -i HOME=/root PATH=$STUBS:/usr/sbin:/usr/bin:/bin GIT_CONFIG_SYSTEM=/dev/null \
         bash $src/install.sh install >/dev/null 2>&1
-    f() { grep -q 'self/kiwi-updater' /etc/kiwi-updater/apps.list 2>/dev/null &&
-          [[ -f /var/lib/kiwi-updater/repos/kiwi-updater/.kiwi-installed ]]; }
-    check P16 "root bootstrap phase registers kiwi's own self-update without SUDO_UID" f
+    local reg=no own=no marker=no
+    grep -qx "$ROOTGIT/self/kiwi-updater.git" /etc/kiwi-updater/apps.list 2>/dev/null &&
+        ! grep -q elsewhere /etc/kiwi-updater/apps.list && reg=yes
+    [[ -f /usr/local/bin/kiwi ]] && ! grep -q USER-CHECKOUT-COPY /usr/local/bin/kiwi && own=yes
+    [[ -f /var/lib/kiwi-updater/repos/kiwi-updater/.kiwi-installed ]] && marker=yes
+    f() { [[ $reg == yes && $own == yes && $marker == yes ]]; }
+    check P16 "root bootstrap registers root's own source, not the checkout's origin ($reg), installs kiwi from its own clone ($own), marks it ($marker)" f
 }
 
 t_P17() { # an option value from a list must never be glob-expanded
@@ -596,8 +692,9 @@ t_P18() { # --force cannot ride the passwordless wrapper, so it must escalate di
     install -Dm755 $K /usr/local/bin/kiwi
     printf '#!/bin/sh\necho "WRAPPER $*" >> %s\nexit 0\n' "$ESC" > /usr/local/libexec/kiwi-system-update
     chmod +x /usr/local/libexec/kiwi-system-update
-    echo "$GITROOT/a/frc.git" > /etc/kiwi-updater/apps.list
-    ku add $GITROOT/a/frc.git >/dev/null
+    local u; u="$(rootfix a frc)"
+    echo "$u" > /etc/kiwi-updater/apps.list
+    ku add "$u" >/dev/null
     ku install frc --user >/dev/null 2>&1
     kr install --system frc >/dev/null 2>&1
     : > $ESC; ku update frc >/dev/null 2>&1
@@ -674,17 +771,38 @@ t_P22() { # on a user-only machine a dual-scope app installs its user half and s
     # which a real install always has and the harness has to provide
     mkdir -p $TH/.local/share/kiwi-updater/repos && cp -r $W $TH/.local/share/kiwi-updater/repos/kiwi-updater
     chown -R $T $TH/.local
-    ku add $GITROOT/a/halfapp.git >/dev/null
+    local hu=https://kiwi.test/a/halfapp.git
+    ku add "$hu" >/dev/null
     : > $ESC
     local out rc; out="$(ku install halfapp 2>&1)"; rc=$?
-    # 2.0: the system scope is set up on the spot (one password prompt; the
-    # harness's pkexec stub refuses it, so the root half is left, rc != 0).
-    f() { [[ $rc -ne 0 && -f $(urepo halfapp)/.kiwi-installed ]] &&
-          grep -q 'install.sh install --with-system' $ESC && grep -q 'root half' <<<"$out"; }
-    check P22 "user half installs; the system scope bootstrap is offered with one password" f
+    # 2.4 (D4): root installs only sources it lists, so the root half waits for
+    # an explicit `kiwi add --system` — no password is asked for here at all
+    local first=no
+    [[ $rc -ne 0 && -f $(urepo halfapp)/.kiwi-installed && ! -s $ESC ]] &&
+        grep -q "kiwi add --system $hu" <<<"$out" && first=yes
+    # ...and that step sets the system scope up on the spot (one password; the
+    # harness's pkexec stub refuses it)
+    : > $ESC
+    ku add --system "$hu" >/dev/null 2>&1
+    local boot=no; grep -q 'install.sh install --with-system' $ESC && boot=yes
+    # An app from the DEFAULT catalog needs no registering: the bootstrap gives
+    # root that catalog, so `kiwi install` sets the scope up with one password.
+    # (The real catalog URL is mapped onto a fixture for this check only.)
+    mkapp a defapp "user system"
+    mkcat c defcat https://kiwi.test/a/defapp.git
+    local dc=https://github.com/derlocke-ng/kiwi-catalog.git
+    git config --system "url.$GITROOT/c/defcat.git.insteadOf" "$dc"
+    ku catalog add "$dc" >/dev/null 2>&1
+    : > $ESC
+    ku install defapp >/dev/null 2>&1
+    git config --system --unset "url.$GITROOT/c/defcat.git.insteadOf"
+    local defboot=no; grep -q 'install.sh install --with-system' $ESC && defboot=yes
+    f() { [[ $first == yes && $boot == yes && $defboot == yes ]]; }
+    check P22 "user half installs, root half asks for no password (ok=$first); 'kiwi add --system' bootstraps (ok=$boot); a default-catalog app bootstraps directly (ok=$defboot)" f
 }
 
 t_P23() { # --with-system=manual: root-owned kiwi and lists, nothing that runs as root unattended
+    selffix                      # root installs from its own clone of this tree (M5)
     local src=$TH/checkout; rm -rf $src; cp -r $W $src; chown -R $T $src
     rootphase() { env -i HOME=/root PATH=$STUBS:/usr/sbin:/usr/bin:/bin bash $src/install.sh install "$@" >/dev/null 2>&1; }
     rootphase --with-system=manual
@@ -726,10 +844,11 @@ t_P25() { # the USER timer updates system halves through the wrapper; unattended
     install -Dm755 $K /usr/local/bin/kiwi
     printf '#!/bin/sh\necho "WRAPPER $*" >> %s\nexit 0\n' "$ESC" > /usr/local/libexec/kiwi-system-update
     chmod +x /usr/local/libexec/kiwi-system-update
-    echo "$GITROOT/a/both.git" > /etc/kiwi-updater/apps.list
-    ku add $GITROOT/a/both.git >/dev/null
+    local u; u="$(rootfix a both)"
+    echo "$u" > /etc/kiwi-updater/apps.list
+    ku add "$u" >/dev/null
     ku install both --user >/dev/null 2>&1; kr install --system both >/dev/null 2>&1
-    release a both v1.1.0
+    release a both v1.1.0; rootfix a both >/dev/null
     : > $ESC
     KENV="KIWI_UNATTENDED=1" ku update --all >/dev/null 2>&1; local rc1=$?
     local via; via="$(cat $ESC)"
@@ -753,14 +872,16 @@ printf "#!/bin/sh\necho probe-ok\n" > "$KIWI_PREFIX/bin/pathprobe-$KIWI_SCOPE"
 chmod +x "$KIWI_PREFIX/bin/pathprobe-$KIWI_SCOPE"
 pathprobe-$KIWI_SCOPE'
     mkapp a pathprobe "user system" "$body"
+    resign a pathprobe v1.0.0 $KEYA            # the wrapper updates signed releases only (H4)
+    local u; u="$(rootfix a pathprobe)"
     mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
-    echo "$GITROOT/a/pathprobe.git" > /etc/kiwi-updater/apps.list
-    ku add $GITROOT/a/pathprobe.git >/dev/null
+    echo "$u" > /etc/kiwi-updater/apps.list
+    ku add "$u" >/dev/null
     ku install pathprobe --user >/dev/null 2>&1; local ru=$?
     kr install --system pathprobe >/dev/null 2>&1; local rs=$?
     install -Dm755 $K /usr/local/bin/kiwi
     install -Dm755 $W/data/kiwi-system-update /usr/local/libexec/kiwi-system-update
-    release a pathprobe v1.1.0
+    release_signed a pathprobe v1.1.0 $KEYA; rootfix a pathprobe >/dev/null
     env -i HOME=/root USER=root PATH=/usr/sbin:/usr/bin:/sbin:/bin:/root/bin \
         bash /usr/local/libexec/kiwi-system-update pathprobe >/dev/null 2>&1
     local want got
@@ -798,14 +919,15 @@ t_P29() { # `kiwi update kiwi-updater` typed in a terminal escalates ONCE
       git commit -q --allow-empty -m two && git tag -a v0.0.2 -m v0.0.2 &&
       git clone -q --bare . $GITROOT/d/kiwi-updater.git )
     chown -R $T $GITROOT/d
+    local src; src="$(rootfix d kiwi-updater)"
     mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
-    echo "$GITROOT/d/kiwi-updater.git" > /etc/kiwi-updater/apps.list
-    ku add $GITROOT/d/kiwi-updater.git >/dev/null
+    echo "$src" > /etc/kiwi-updater/apps.list
+    ku add "$src" >/dev/null
     local u r=/var/lib/kiwi-updater/repos/kiwi-updater; u="$(urepo kiwi-updater)"
-    runuser -u $T -- git clone -q $GITROOT/d/kiwi-updater.git $u
+    runuser -u $T -- git clone -q "$src" $u
     runuser -u $T -- git -C $u -c advice.detachedHead=false checkout -q v0.0.1
     runuser -u $T -- bash -c "git -C $u rev-parse HEAD > $u/.kiwi-installed"
-    git clone -q $GITROOT/d/kiwi-updater.git $r
+    git clone -q "$src" $r
     git -C $r -c advice.detachedHead=false checkout -q v0.0.1
     git -C $r rev-parse HEAD > $r/.kiwi-installed
     install -Dm755 $K /usr/local/bin/kiwi        # the system scope exists
@@ -896,11 +1018,14 @@ t_P34() { # a self-update that replaced both copies does not report the fresh ro
     # now". Reproduced exactly: old code in memory (bash -c), new file at $0.
     install -Dm755 $K /usr/local/bin/kiwi
     install -Dm755 $K $TH/.local/bin/kiwi; chown -R $T $TH/.local
-    local old; old="$(sed 's/^KIWI_VERSION=.*/KIWI_VERSION=0.0.1/' $K)"
+    # the old code in a file and SOURCED, with $0 still the path on disk: a
+    # `bash -c "$old"` stopped working once bin/kiwi outgrew the kernel's
+    # 128 KiB limit for one argument
+    sed 's/^KIWI_VERSION=.*/KIWI_VERSION=0.0.1/' $K > /tmp/kt-old-kiwi; chmod 644 /tmp/kt-old-kiwi
     mkapp a skewapp user
     ku add $GITROOT/a/skewapp.git >/dev/null; ku install skewapp >/dev/null 2>&1
     local out; out="$(runuser -u $T -- env -i HOME=$TH USER=$T PATH=$STUBS:/usr/bin:/bin KIWI_LOCK_WAIT=3 \
-        bash -c "$old" $TH/.local/bin/kiwi update skewapp </dev/null 2>&1)"
+        bash -c 'source /tmp/kt-old-kiwi "$@"' $TH/.local/bin/kiwi update skewapp </dev/null 2>&1)"
     f() { ! grep -q 'root-owned copy of kiwi is' <<<"$out" && grep -q 'skewapp' <<<"$out"; }
     check P34 "no false version-skew warning from the old process that just updated both copies" f
 }
@@ -917,28 +1042,37 @@ t_P35() { # an app's own icon reaches the GUI: list --porcelain field 15 is its 
     mkapp a plainapp user
     ku add $GITROOT/a/iconapp.git >/dev/null; ku add $GITROOT/a/plainapp.git >/dev/null
     local out; out="$(ku list --porcelain 2>/dev/null)"     # syncs: the manifests come from the clones
-    f() { awk -F'\t' '$1=="iconapp"  && NF==15 && $15=="data/iconapp.svg" && $11!="" {a=1}
-                      $1=="plainapp" && NF==15 && $15==""                            {b=1}
+    # NF>=15: append-only, later fields follow (16 origin, 17 root-known: M4)
+    f() { awk -F'\t' '$1=="iconapp"  && NF>=15 && $15=="data/iconapp.svg" && $11!="" {a=1}
+                      $1=="plainapp" && NF>=15 && $15==""                            {b=1}
                       END {exit !(a && b)}' <<<"$out"; }
     check P35 "list --porcelain appends the app's ICON as field 15 (empty when it has none)" f
 }
 
-t_P36() { # root follows a local path a catalog names only if root owns it
+t_P36() { # root follows a local path only if root owns it, all the way up — catalog or its own list
     # valid_url accepted /path and file:// from any source. A trusted catalog
     # that lists a user-writable directory would have had root clone and run
     # whatever its owner put there, on the next passwordless update.
     mkapp a localapp "system"                      # $GITROOT/a is owned by the test user
     mkcat c rootcat $GITROOT/a/localapp.git
     kr catalog add --system $GITROOT/c/rootcat.git >/dev/null 2>&1
-    local userowned rootowned vialist
+    local userowned rootowned
     userowned="$(kr list --porcelain 2>/dev/null | cut -f1)"
-    chown -R root:root $GITROOT/a
+    # root-owned all the way up (H1), at the same path the catalog names
+    chown root:root $GITROOT; chown -R root:root $GITROOT/a
     rootowned="$(kr list --porcelain 2>/dev/null | cut -f1)"
-    chown -R $T $GITROOT/a
+    chown $T $GITROOT; chown -R $T $GITROOT/a
+    # D1 (FIXPLAN-2.4): the system list gets the same rule. Anyone who can
+    # write the repo could otherwise have root run it, without a password.
+    kr catalog remove --system $GITROOT/c/rootcat.git >/dev/null 2>&1
     mkdir -p /etc/kiwi-updater; echo "$GITROOT/a/localapp.git" > /etc/kiwi-updater/apps.list
-    vialist="$(kr list --porcelain 2>/dev/null | cut -f1)"
-    f() { ! grep -qx localapp <<<"$userowned" && grep -qx localapp <<<"$rootowned" && grep -qx localapp <<<"$vialist"; }
-    check P36 "as root, a catalog's local path counts only when root owns it; the system list's always" f
+    local listuser listroot
+    listuser="$(kr list --porcelain --no-sync 2>/dev/null | cut -f1)"
+    rootfix a localapp > /etc/kiwi-updater/apps.list
+    listroot="$(kr list --porcelain --no-sync 2>/dev/null | cut -f1)"
+    f() { ! grep -qx localapp <<<"$userowned" && grep -qx localapp <<<"$rootowned" &&
+          ! grep -qx localapp <<<"$listuser" && grep -qx localapp <<<"$listroot"; }
+    check P36 "as root, a local path counts only when root owns it all the way up, from a catalog or from root's own list" f
 }
 
 t_P37() { # uninstalling without a systemd user session must still remove the files
@@ -952,9 +1086,254 @@ t_P37() { # uninstalling without a systemd user session must still remove the fi
     check P37 "install.sh uninstall completes when 'systemctl --user' is unavailable" f
 }
 
+# ---------------------------------------------------------------------------
+# FIXPLAN-2.4.md. Same rule: each prints BUG on 2.3.2 and ok once fixed.
+# The GUI findings (U*) have no check here; the plan lists manual steps.
+# ---------------------------------------------------------------------------
+t_H1() { # a user-owned local repo must never become something root runs
+    # Anyone running as the user could commit a new tag there and have the
+    # passwordless wrapper install it as root.
+    mkapp a lp system 'touch /tmp/kt-h1-ran'
+    mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
+    echo "$GITROOT/a/lp.git" > /etc/kiwi-updater/apps.list
+    local listed m1=no m2=no appended=no doctor=no
+    listed="$(kr list --porcelain --no-sync 2>/dev/null | cut -f1)"
+    local doc; doc="$(kr doctor 2>&1)"        # exits 1 here, so not in a pipeline
+    grep -q "root ignores '$GITROOT/a/lp.git'" <<<"$doc" && doctor=yes
+    kr install --system lp >/dev/null 2>&1
+    [[ -f /var/lib/kiwi-updater/repos/lp/.kiwi-installed ]] && m1=yes
+    # the same path handed over by the user side, as the GUI's --from does
+    rm -rf /var/lib/kiwi-updater/repos/lp /tmp/kt-h1-ran; : > /etc/kiwi-updater/apps.list
+    kr install --system lp --from "$GITROOT/a/lp.git" >/dev/null 2>&1
+    [[ -f /var/lib/kiwi-updater/repos/lp/.kiwi-installed ]] && m2=yes
+    grep -q "$GITROOT/a/lp.git" /etc/kiwi-updater/apps.list && appended=yes
+    f() { ! grep -qx lp <<<"$listed" && [[ $m1 == no && $m2 == no && $appended == no && $doctor == yes ]]; }
+    check H1 "root ignores a user-owned local repo, from its list or --from (via list: installed=$m1; --from: installed=$m2 recorded=$appended; doctor says so: $doctor)" f
+}
+
+t_H2() { # pressing Tab must never run code from a catalog
+    # compgen -W expands every word it is given, $(…) included, and an app
+    # name falls back to the URL's basename, which nothing validated.
+    ulist 'https://example.invalid/$(touch${IFS}kt-pwned).git'
+    local bin=/tmp/kt-h2bin cwd=/tmp/kt-h2cwd
+    mkdir -p $bin $cwd; chown $T $cwd
+    # bin/kiwi may have lost its exec bit on the way here; completion needs `kiwi` on PATH
+    printf '#!/bin/sh\nexec bash %s "$@"\n' "$K" > $bin/kiwi; chmod 755 $bin/kiwi
+    runuser -u $T -- env -i HOME=$TH USER=$T PATH=$bin:/usr/bin:/bin bash -c \
+        "cd $cwd && source $W/data/bash-completion/kiwi && COMP_WORDS=(kiwi install '') && COMP_CWORD=2 && _kiwi" \
+        </dev/null >/dev/null 2>&1
+    local pwned=no; [[ -e $cwd/kt-pwned ]] && pwned=yes
+    local rows; rows="$(ku list --porcelain --no-sync 2>/dev/null | cut -f1)"
+    f() { [[ $pwned == no ]] && ! grep -qF '$(' <<<"$rows"; }
+    check H2 "a \$(…) in a URL's basename is neither run by completion (ran=$pwned) nor listed as a name" f
+}
+
+t_H3() { # a repo's basename must never become a command-line option
+    # The GUI runs `kiwi install <name>`: an app called --all installed everything.
+    ulist https://example.invalid/--all.git https://example.invalid/-x.git
+    local names; names="$(ku list --porcelain --no-sync 2>/dev/null | cut -f1)"
+    ku add https://example.invalid/--purge.git >/dev/null 2>&1; local rc=$?
+    f() { ! grep -q '^-' <<<"$names" && [[ $rc -ne 0 ]]; }
+    check H3 "no listed name starts with '-', and 'kiwi add …/--purge.git' is refused (rc=$rc)" f
+}
+
+t_M1() { # a catalog must not choose an older ref, or a branch, for what root installed
+    mkapp a dg system
+    release a dg v1.1.0
+    ( cd /tmp/kt-work-a-dg && git commit -q --allow-empty -m 'untagged work' && git push -q origin HEAD )
+    local app cat; app="$(rootfix a dg)"
+    mkcat c dgcat "$app"; cat="$(rootfix c dgcat)"
+    kr catalog add --system "$cat" >/dev/null 2>&1
+    kr install --system dg >/dev/null 2>&1
+    local want m=/var/lib/kiwi-updater/repos/dg/.kiwi-installed got_ref got_branch
+    want="$(git -C /tmp/kt-work-a-dg rev-parse 'v1.1.0^{commit}')"
+    catset() { ( cd /tmp/kt-cat-c-dgcat && printf '%s\n' "$1" > apps.list &&
+                 git commit -qam "$1" && git push -q "$cat" HEAD:main ); }
+    catset "$app ref=v1.0.0"
+    kr update --all --system >/dev/null 2>&1
+    got_ref="$(head -1 $m 2>/dev/null)"
+    catset "$app branch=main"
+    kr update --all --system >/dev/null 2>&1
+    got_branch="$(head -1 $m 2>/dev/null)"
+    # and the remote itself: deleting the newest tag must not roll root back
+    catset "$app"
+    git -C "$app" tag -d v1.1.0 >/dev/null
+    kr update --all --system >/dev/null 2>&1
+    local got_deleted; got_deleted="$(head -1 $m 2>/dev/null)"
+    st() { [[ $1 == "$want" ]] && echo stayed || echo moved; }
+    f() { [[ -n $want && $got_ref == "$want" && $got_branch == "$want" && $got_deleted == "$want" ]]; }
+    check M1 "root stays on v1.1.0 when its catalog says ref=v1.0.0 ($(st "$got_ref")), branch=main ($(st "$got_branch")), or v1.1.0 is deleted upstream ($(st "$got_deleted"))" f
+}
+
+t_M2() { # https only — root (invariant 7) and, per D2, the user too
+    mkdir -p /etc/kiwi-updater
+    kr add --system http://example.invalid/x.git >/dev/null 2>&1; local rc=$?
+    echo http://example.invalid/y.git >> /etc/kiwi-updater/apps.list
+    mkcat c httpcat http://example.invalid/z.git
+    local cat; cat="$(rootfix c httpcat)"
+    kr catalog add --system "$cat" >/dev/null 2>&1
+    local names; names="$(kr list --porcelain --no-sync 2>/dev/null | cut -f1)"
+    ku add http://example.invalid/ux.git >/dev/null 2>&1; local urc=$?
+    ku catalog add http://example.invalid/ucat.git >/dev/null 2>&1; local crc=$?
+    ulist http://example.invalid/uy.git
+    local unames; unames="$(ku list --porcelain --no-sync 2>/dev/null | cut -f1)"
+    f() { [[ $rc -ne 0 && $urc -ne 0 && $crc -ne 0 ]] && ! grep -qxE 'x|y|z' <<<"$names" && ! grep -qxE 'ux|uy' <<<"$unames"; }
+    check M2 "http:// refused: root add (rc=$rc), user add (rc=$urc), catalog add (rc=$crc); listed as root: $(grep -xE 'x|y|z' <<<"$names" | tr '\n' ' ')user: $(grep -xE 'ux|uy' <<<"$unames" | tr '\n' ' ')" f
+}
+
+t_M3() { # nothing untrusted reaches the terminal with its escape sequences intact
+    local e=$'\033'
+    mkapp a esc user "echo visible # ${e}[8mconcealed"
+    ku add $GITROOT/a/esc.git >/dev/null; ku install esc >/dev/null 2>&1
+    ( cd /tmp/kt-work-a-esc && sed -i 's/^VERSION=.*/VERSION=1.1.0/' kiwi.manifest &&
+      printf 'echo also # %s[2Khidden\n' "$e" >> install.sh &&
+      git commit -qam "harmless ${e}[8msubject" && git tag -a v1.1.0 -m v1.1.0 && git push -q origin HEAD --tags )
+    local diff inst cat
+    diff="$(ku diff esc 2>&1)"
+    inst="$(ku info --installer esc 2>&1)"
+    mkcat c esccat
+    ( cd /tmp/kt-cat-c-esccat && printf 'NAME=nice%s[8mcat\nDESCRIPTION=ok\n' "$e" > catalog.manifest &&
+      git commit -qam name && git push -q $GITROOT/c/esccat.git HEAD:main )
+    ku catalog add $GITROOT/c/esccat.git >/dev/null 2>&1
+    cat="$(ku catalog list 2>&1)"
+    local where=""
+    [[ $diff == *"$e"* ]] && where+="diff "
+    [[ $inst == *"$e"* ]] && where+="info-installer "
+    [[ $cat == *"$e"* ]] && where+="catalog-list "
+    f() { [[ -z $where ]]; }
+    check M3 "no raw ESC from an installer, a commit subject or a catalog NAME (found in: ${where:-nowhere})" f
+}
+
+t_M6() { # the installer that runs is a regular file inside the clone
+    printf '#!/bin/sh\ntouch /tmp/kt-ran\n' > /tmp/kt-outside.sh; chmod 755 /tmp/kt-outside.sh
+    # (a) INSTALLER= climbs out of the clone
+    mkapp a m6a user
+    ( cd /tmp/kt-work-a-m6a && echo 'INSTALLER=../../../../../../../../../../tmp/kt-outside.sh' >> kiwi.manifest &&
+      git commit -qam out && git tag -a v1.0.1 -m x && git push -q origin HEAD --tags )
+    ku add $GITROOT/a/m6a.git >/dev/null
+    ku install m6a >/dev/null 2>&1; local rca=$? rana=no
+    [[ -e /tmp/kt-ran ]] && rana=yes; rm -f /tmp/kt-ran
+    # (b) install.sh is a symlink to a file outside it
+    mkapp a m6b user
+    ( cd /tmp/kt-work-a-m6b && rm install.sh && ln -s /tmp/kt-outside.sh install.sh &&
+      git add -A && git commit -qm link && git tag -a v1.0.1 -m x && git push -q origin HEAD --tags )
+    ku add $GITROOT/a/m6b.git >/dev/null
+    ku install m6b >/dev/null 2>&1; local rcb=$? ranb=no
+    [[ -e /tmp/kt-ran ]] && ranb=yes
+    f() { [[ $rca -ne 0 && $rcb -ne 0 && $rana == no && $ranb == no ]]; }
+    check M6 "an installer outside the clone is refused: INSTALLER=../ (rc=$rca ran=$rana), symlink (rc=$rcb ran=$ranb)" f
+}
+
+t_M7() { # update clones only what is installed, as root and as the user
+    # root: every catalog-listed repo cloned and parsed as root on every timer run
+    mkapp a m7in system; mkapp a m7out system
+    local a1 a2 cat; a1="$(rootfix a m7in)"; a2="$(rootfix a m7out)"
+    mkcat c m7cat "$a1" "$a2"; cat="$(rootfix c m7cat)"
+    kr catalog add --system "$cat" >/dev/null 2>&1
+    kr install --system m7in >/dev/null 2>&1
+    rm -rf /var/lib/kiwi-updater/repos/m7out
+    kr update --all --system >/dev/null 2>&1
+    local rootclone=no; [[ -e /var/lib/kiwi-updater/repos/m7out ]] && rootclone=yes
+    # user
+    mkapp a u7in user; mkapp a u7out user
+    mkcat c u7cat $GITROOT/a/u7in.git $GITROOT/a/u7out.git
+    ku catalog add $GITROOT/c/u7cat.git >/dev/null 2>&1
+    ku install u7in >/dev/null 2>&1
+    rm -rf "$(urepo u7out)"
+    ku update >/dev/null 2>&1
+    local userclone=no; [[ -e $(urepo u7out) ]] && userclone=yes
+    f() { [[ -f /var/lib/kiwi-updater/repos/m7in/.kiwi-installed && -f $(urepo u7in)/.kiwi-installed &&
+             $rootclone == no && $userclone == no ]]; }
+    check M7 "update does not clone an app that is not installed (root cloned it: $rootclone, user: $userclone)" f
+}
+
+t_L1() { # root reads no KIWI_* tuning from the environment
+    mkapp a l1app system
+    local app cat; app="$(rootfix a l1app)"
+    mkcat c l1cat "$app"; cat="$(rootfix c l1cat)"
+    kr catalog add --system "$cat" >/dev/null 2>&1
+    rm -rf /var/lib/kiwi-updater/repos/l1app        # so sync_all_meta has work to do
+    # PATH, not an arbitrary name: under set -u an unset array name aborts
+    # before the subscript is evaluated, a set one does not
+    KENV='KIWI_FETCH_JOBS=PATH[$(touch${IFS}/tmp/kt-l1)]' kr list --porcelain >/dev/null 2>&1
+    f() { [[ ! -e /tmp/kt-l1 ]]; }
+    check L1 "KIWI_FETCH_JOBS from the environment is not evaluated as root" f
+}
+
+t_Q1() { # one ls-remote per URL per run
+    # The common GUI case: system apps root installed, seen by the user, who has
+    # a metadata clone of each. refresh_meta asks once, the status asks again.
+    local n u urls=()
+    mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
+    for n in qa qb qc; do mkapp a $n system; u="$(rootfix a $n)"; urls+=("$u"); done
+    printf '%s\n' "${urls[@]}" > /etc/kiwi-updater/apps.list
+    for n in qa qb qc; do kr install --system $n >/dev/null 2>&1; done
+    ku list >/dev/null 2>&1                     # the user's metadata clones
+    : > /tmp/kt-lsr.log; chmod 666 /tmp/kt-lsr.log
+    printf '#!/bin/sh\ncase " $* " in *" ls-remote "*) echo "$*" >> /tmp/kt-lsr.log ;; esac\nexec /usr/bin/git "$@"\n' > $STUBS/git
+    chmod +x $STUBS/git
+    ku list --porcelain --check >/dev/null 2>&1
+    rm -f $STUBS/git
+    local calls inst=0; calls="$(wc -l < /tmp/kt-lsr.log)"
+    for n in qa qb qc; do [[ -f /var/lib/kiwi-updater/repos/$n/.kiwi-installed ]] && inst=$((inst+1)); done
+    f() { [[ $inst -eq 3 && $calls -ge 1 && $calls -le 3 ]]; }
+    check Q1 "list --check asks each of 3 remotes once (ls-remote calls: $calls, root-installed: $inst/3)" f
+}
+
+t_Q4() { # a plain 'kiwi update' with nothing installed fetches nothing
+    local n urls=()
+    for n in q4a q4b q4c q4d q4e; do mkapp a $n user; urls+=("$GITROOT/a/$n.git"); done
+    mkcat c q4cat "${urls[@]}"
+    ku catalog add $GITROOT/c/q4cat.git >/dev/null 2>&1
+    ku update >/dev/null 2>&1
+    local made=0; for n in q4a q4b q4c q4d q4e; do [[ -e $(urepo $n) ]] && made=$((made+1)); done
+    f() { [[ $made -eq 0 ]]; }
+    check Q4 "'kiwi update' with none of 5 catalog apps installed makes no clone (made: $made)" f
+}
+
+t_H4() { # root updates without a password only to releases signed by the key it pinned
+    mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
+    install -Dm755 $K /usr/local/bin/kiwi
+    install -Dm755 $W/data/kiwi-system-update /usr/local/libexec/kiwi-system-update
+    wrap() { env -i HOME=/root USER=root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+                 bash /usr/local/libexec/kiwi-system-update "$1" >/dev/null 2>&1; }
+    at() { head -1 /var/lib/kiwi-updater/repos/$1/.kiwi-installed 2>/dev/null; }
+    is() { [[ "$(at "$1")" == "$(git -C /tmp/kt-work-a-"$1" rev-parse "$2^{commit}")" ]] && echo "$2" || echo "not-$2"; }
+    local r=()
+    # (a) unsigned: installs with a password; the wrapper does not update it, a password does
+    mkapp a h4u system; rootfix a h4u >> /etc/kiwi-updater/apps.list
+    kr install --system h4u >/dev/null 2>&1
+    release a h4u v1.1.0; rootfix a h4u >/dev/null
+    wrap h4u;                          r+=("unsigned/wrapper=$(is h4u v1.0.0)")
+    kr update --system h4u >/dev/null 2>&1; r+=("unsigned/password=$(is h4u v1.1.0)")
+    # (b) signed by the project's key: pinned at install, the wrapper updates it
+    mkapp a h4s system; resign a h4s v1.0.0 $KEYA; rootfix a h4s >> /etc/kiwi-updater/apps.list
+    kr install --system h4s >/dev/null 2>&1
+    local pinned=no; [[ -s /etc/kiwi-updater/signers/h4s ]] && pinned=yes; r+=("pinned=$pinned")
+    release_signed a h4s v1.1.0 $KEYA; rootfix a h4s >/dev/null
+    wrap h4s;                          r+=("signed/wrapper=$(is h4s v1.1.0)")
+    # (c) signed by another key: refused with or without a password, until `kiwi trust`
+    release_signed a h4s v1.2.0 $KEYB; rootfix a h4s >/dev/null
+    wrap h4s;                          r+=("otherkey/wrapper=$(is h4s v1.1.0)")
+    kr update --system h4s >/dev/null 2>&1; r+=("otherkey/password=$(is h4s v1.1.0)")
+    kr trust --system h4s >/dev/null 2>&1
+    kr update --system h4s >/dev/null 2>&1; r+=("trusted-again=$(is h4s v1.2.0)")
+    # (d) an unsigned tag of an app whose releases are signed: refused, password or not
+    release a h4s v1.3.0; rootfix a h4s >/dev/null
+    kr update --system h4s >/dev/null 2>&1; r+=("unsigned-after-signed=$(is h4s v1.2.0)")
+    # (e) installed before 2.4 (no pin): the wrapper pins the installed release's key
+    mkapp a h4m system; resign a h4m v1.0.0 $KEYA; rootfix a h4m >> /etc/kiwi-updater/apps.list
+    kr install --system h4m >/dev/null 2>&1; rm -f /etc/kiwi-updater/signers/h4m
+    release_signed a h4m v1.1.0 $KEYA; rootfix a h4m >/dev/null
+    wrap h4m;                          r+=("migration=$(is h4m v1.1.0)")
+    f() { [[ ${r[*]} != *=not-* && " ${r[*]} " == *" pinned=yes "* ]]; }
+    check H4 "signed releases: ${r[*]}" f
+}
+
 for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
          P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P17 P18 P19 P20 P22 P23 P25 \
-         P27 P28 P29 P30 P31 P32 P33 P34 P35 P36 P37; do run $t; done
+         P27 P28 P29 P30 P31 P32 P33 P34 P35 P36 P37 \
+         H1 H2 H3 M1 M2 M3 M6 M7 L1 Q1 Q4 H4; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

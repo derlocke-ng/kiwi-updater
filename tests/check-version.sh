@@ -38,5 +38,12 @@ for f in bin/kiwi install.sh get-kiwi.sh gui/kiwi-gui templates/install.sh \
     [[ $mode == 100755 ]] || say_bad "$f is tracked as ${mode:-<untracked>}, not 100755 — chmod 755 it and re-add"
 done
 
+# 3. The default catalog is named twice: install.sh registers it, and bin/kiwi
+# lets an app from it bootstrap the system scope with one password (D4).
+cat_inst="$(sed -n 's/^DEFAULT_CATALOG="\(.*\)"$/\1/p' install.sh | head -1)"
+cat_bin="$(sed -n 's/^DEFAULT_CATALOG="\(.*\)"$/\1/p' bin/kiwi | head -1)"
+[[ -n $cat_inst && $cat_inst == "$cat_bin" ]] ||
+    say_bad "DEFAULT_CATALOG differs: install.sh '$cat_inst', bin/kiwi '$cat_bin'"
+
 (( rc )) || printf 'check-version: ok (%s, scripts executable)\n' "$bin"
 exit $rc

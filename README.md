@@ -184,13 +184,16 @@ kiwi network apps take theirs from
 installs a desktop entry, install the same file as its icon, so the app menu
 and kiwi show the same picture — kiwi-updater does exactly that.
 
-Release by tagging: `git tag v1.3.0 && git push --tags`. Or let a merged
-version bump release itself: copy [`templates/release.yml`](templates/release.yml)
-to `.github/workflows/release.yml`, and every push to `main` whose `VERSION`
-has no tag yet tags `v<VERSION>` and publishes a GitHub Release. It refuses a
-version kiwi would not install or one older than your newest release, and
-runs your `tests/check-version.sh` first if you have one. Every kiwi network
-app carries it.
+Release by pushing a **signed** tag: `git tag -s v1.3.0 -m v1.3.0 && git push
+origin v1.3.0`, with `gpg.format=ssh` and your release key as
+`user.signingkey` (see *Signed releases*: root updates an app without a
+password only to tags signed by the key it pinned). To publish the GitHub
+Release too, copy [`templates/release.yml`](templates/release.yml) to
+`.github/workflows/release.yml` and list your key in `.github/allowed_signers`:
+for each pushed `v*` tag it checks the signature, that the tag equals
+`VERSION`, that it is newer than your newest release and that your
+`tests/check-version.sh` passes, then publishes the notes. It never makes or
+signs a tag itself. Every kiwi network app carries it.
 
 A tag counts as a release only if it matches `^v?[0-9]+(\.[0-9]+){0,3}$` —
 `v1`, `v1.2`, `1.2.3` and `v1.2.3.4` all qualify. `v2.0.0-rc1`, `nightly` and
@@ -314,7 +317,13 @@ kiwi manages itself in both scopes at once (each scope follows its own list
 entry, so a pin on one half never silently holds or blocks the other), and
 the one bootstrap exception — `install --with-system` running a user-writable
 script as root once, password-gated — exists because no root-owned copy is
-there yet to do it instead.
+there yet to do it instead. Even then, that script only fetches kiwi as root
+into `/var/lib/kiwi-updater/repos/kiwi-updater`, checks out the latest release
+and hands over to the `install.sh` in that clone: the root-owned kiwi, the
+wrapper and the polkit rule come from root's own clone, and root updates itself
+from `https://github.com/derlocke-ng/kiwi-updater.git` — not from your
+checkout or its `origin`. To have root follow a fork instead, put its https
+URL in a root-owned `/etc/kiwi-updater/self-url` before the bootstrap.
 
 ## Background updates
 
@@ -330,7 +339,7 @@ In `manual` mode the timer leaves system halves for your next interactive
 | | needs root | asks for a password |
 |---|---|---|
 | anything in the user scope | no | no |
-| **updating** a system app | yes | **no** — your own update timer does it through one fixed-purpose helper that polkit grants to `wheel` users (with `--with-system=manual`: yes, every time) |
+| **updating** a system app | yes | **no**, for a release signed by the key root pinned for it — your own update timer does it through one fixed-purpose helper that polkit grants to `wheel` users (with `--with-system=manual`, or for an unsigned release: yes) |
 | **installing** a system app | yes | yes |
 | **uninstalling** a system app | yes | yes |
 
@@ -338,6 +347,15 @@ A plain `kiwi install` never touches root unless the app declares
 `SCOPES=… system`, and `kiwi info <app>` tells you why before you are asked.
 A `--minimal` install has no system scope at all; the first such app sets it
 up on the spot, with one password.
+
+Root installs only **sources it lists**: its own `/etc/kiwi-updater/apps.list`
+and the catalogs registered for it (the default catalog is, from the start).
+An app with a root half from anywhere else — your own list, a catalog only you
+added — installs its user half and tells you the one command that registers the
+source for root, `kiwi add --system <https-url>`; the GUI offers the same as
+"Register and Install". Before any password prompt, kiwi shows each root app's
+source, where that entry came from, and which other apps it would also install
+as root.
 
 Passwordless system *updates* go through `/usr/local/libexec/kiwi-system-update`,
 which the polkit rule authorises by exact path. It takes app names but treats
@@ -349,6 +367,33 @@ With no names it updates every one of them.
 
 The rule requires an **active** session in `wheel`, not a local one: VM and
 remote desktop sessions can report as non-local.
+
+### Signed releases
+
+A passwordless update runs new code as root that nobody looked at, so it only
+happens for a release root can check. Root pins one SSH signing key per system
+app, in `/etc/kiwi-updater/signers/<app>` — trust on first use, taken from the
+release you installed with your password (or, on a machine from before 2.4,
+from the release already installed). From then on:
+
+- a version tag signed by that key updates without a password;
+- an unsigned release, an app that follows a branch, or one without release
+  tags updates only when you type your password, and kiwi says it could not
+  verify it;
+- a release signed by any other key — or an unsigned one, once an app's
+  releases were signed — is refused, password or not. If the project really
+  changed its key: `kiwi trust --system <app>`, then update it with your
+  password, which pins the new key.
+
+This needs `ssh-keygen` (openssh-clients), which git uses to check SSH
+signatures; `kiwi doctor` says if it is missing.
+
+**App authors:** sign your release tags with an SSH key and push them —
+`git tag -s v1.2.0 -m v1.2.0` with `git config gpg.format ssh` and
+`user.signingkey` pointing at the key (ideally on a hardware token). Keep the
+key off CI: a release workflow that can sign would make its token the key.
+`templates/release.yml` publishes a GitHub Release only for a tag that is
+signed by a key listed in the repo's `.github/allowed_signers`.
 
 ## Notes
 
@@ -368,6 +413,8 @@ remote desktop sessions can report as non-local.
   usual collision is the background timer; if it still cannot get the lock it
   names the host and pid holding it. Every network git call is bounded by
   `KIWI_NET_TIMEOUT` (180s) so a stalled fetch cannot hold the lock forever.
+  Both are read only by the user-side kiwi: root ignores every `KIWI_*`
+  tuning variable in its environment and uses the defaults.
 - The GUI is a thin layer over `kiwi list --porcelain` — the CLI is the single
   source of truth. It shows which scopes an app is actually installed in, can
   pin and unpin, and shows an app's installer and an update's diff before you

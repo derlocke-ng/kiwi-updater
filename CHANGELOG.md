@@ -3,6 +3,178 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 2.4.0 — unreleased
+
+Security release from the 2.3.2 audit (`FIXPLAN-2.4.md`). Some entries change
+behaviour someone may rely on; those say so.
+
+- **Root updates without a password only to signed releases** (H4).
+  Whoever could push a tag to an app with a system half — or take over its
+  account, or a CI token — had root on every machine with the system scope
+  within hours. Root now pins one SSH signing key per system app (trust on
+  first use: at your authenticated install, or from the release already
+  installed on machines from before 2.4) and checks every release before it is
+  checked out. Passwordless updates need a version tag signed by that key; an
+  unsigned release, a branch or `HEAD` waits for your password and says it
+  could not be verified; a release signed by another key is refused either
+  way until `kiwi trust --system <app>`. Needs `ssh-keygen` (openssh-clients,
+  in the Fedora Atomic images). *Changes behaviour:* system apps whose
+  releases are not signed no longer update in the background — kiwi-updater's
+  own releases are signed from 2.4.0 on.
+- **Releases are signed tags; CI no longer makes them** (H4).
+  `release.yml` used to turn any push to `main` that bumped `VERSION` into a
+  tag, with a write token and actions pinned by tag — so a push to `main`, or a
+  compromised action, was a release root would install. Now a maintainer signs
+  and pushes the tag (`git tag -s`); the workflow runs for pushed `v*` tags
+  only, checks the signature against `.github/allowed_signers`, the version
+  and the ordering, and publishes the notes. Every action is pinned to a
+  commit SHA (`templates/release.yml` the same, for every kiwi app).
+- **Root no longer follows a local repo it does not own** (H1). *Migration:*
+  if you ran `kiwi add --system /home/…/repo` (or root ever recorded a local
+  path for you), root now skips that entry — `kiwi doctor` lists it. Use the
+  repo's `https://` URL instead, or `git clone` it into a root-owned directory
+  (for example under `/var/lib`) and `kiwi add --system` that path.
+  Why: once a path like `/home/you/dev/app` was in root's list, any process
+  running as you could commit a new tag there and call the passwordless
+  wrapper — root fetched it and ran the installer, no password, forever.
+  Root now takes a local path, from its own list or a catalog, only if the path
+  and every directory above it are root-owned and not writable by others.
+  `kiwi install --system --from` accepts only `https://` URLs, and the user
+  side no longer asks for a password to hand root a local path it would refuse;
+  it says why instead.
+- **A catalog can no longer pick an old version, or a branch, for root** (M1).
+  For a system app root installed from a catalog, the catalog's `ref=` or
+  `branch=` decided what root's next passwordless update checked out — a
+  compromised catalog could "update" it to an old, vulnerable release or to
+  any branch. As root, catalog entries now say only *which* repo; they always
+  follow its latest release. Root also refuses to move an app to an older
+  release than the one installed (as when the newest tag is deleted upstream)
+  unless root's own list pins it (`kiwi pin --system <app> <tag>`). *Changes
+  behaviour:* `ref=`/`branch=` in a catalog now only apply to user-scope
+  installs.
+- **The installer that runs is the one inside the clone** (M6).
+  `INSTALLER=../../../tmp/x.sh`, or an `install.sh` committed as a symlink,
+  made kiwi run a file outside the root-owned clone — one whoever owns it can
+  change at any time — and made `kiwi diff` review a different file from the
+  one that ran. The installer must now be a regular file inside the clone;
+  otherwise install, update, `info --installer` and `diff` refuse it.
+- **`kiwi update` only touches what is installed** (M7, Q4). It cloned every
+  repo every catalog listed before checking whether any of it was installed —
+  as root on every background run (git network and pack parsing as root
+  against any host a catalog names), and as a slow first `kiwi update` on a new
+  machine. Not-installed apps are now skipped before anything is fetched.
+- **Root reads no `KIWI_*` tuning from its environment** (L1). Under
+  `sudo -E` or an `env_keep` rule, `KIWI_FETCH_JOBS='PATH[$(cmd)]'` was
+  command execution: bash evaluates array subscripts in arithmetic. Root now
+  unsets `KIWI_NET_TIMEOUT`, `KIWI_FETCH_JOBS`, `KIWI_LOCK_WAIT`, `KIWI_GUI` and
+  `KIWI_DEP_STACK` (only `KIWI_UNATTENDED`, which can only suppress prompts,
+  is kept), and every numeric setting is checked to be a plain number before
+  use, as any user too.
+- **Root's git is stricter** (L2). Root checks every object a remote sends
+  (`transfer.fsckObjects`) and never runs git hooks (`core.hooksPath=/dev/null`);
+  app installers do not inherit either. Root runs with `umask 022`, so its
+  clones stay readable to the user-side view after every fetch, not only after
+  the first clone.
+- **Root installs only sources it lists, and you see the source before the
+  password** (M4). The URL root recorded and then updated without a password
+  came from the user side — files the user can write — and neither it nor the
+  apps root would also install as dependencies appeared in the GUI's dialog or
+  the password prompt. Now the CLI and the GUI show, per root app, its URL, the
+  list or catalog it came from, and "also installs as root: …" before asking.
+  *Changes behaviour (D4):* root no longer records a URL handed over by the
+  user side (`--from`). An app whose source root does not list yet installs its
+  user half and says how to register the source: `kiwi add --system <url>`
+  (https only), or "Register and Install" in the GUI. Apps from the default
+  catalog are unaffected, including on a `--minimal` install, where the first
+  one still sets up the system scope with one password. `list --porcelain`
+  gains field 16 (where the entry comes from) and 17 (root lists it: 1/0).
+- **Setting up the system scope no longer trusts your checkout** (M5). The
+  bootstrap ran your copy of `install.sh` as root (still the one documented
+  exception), installed root's `bin/kiwi`, wrapper and polkit rule from your
+  checkout, and registered your checkout's `origin` as root's self-update
+  source — so whatever controlled your account at that moment decided,
+  permanently, what root runs. Now that script only clones kiwi as root into
+  `/var/lib/kiwi-updater/repos/kiwi-updater`, checks out the latest release,
+  and hands over to the clone's `install.sh`; root registers the canonical URL
+  (or the one in a root-owned `/etc/kiwi-updater/self-url`). *Changes
+  behaviour:* running `install.sh --with-system` from a development checkout
+  installs the latest *release* as root, not your working tree.
+- **Checking for updates asks each remote once, in parallel** (Q1).
+  `kiwi list --check`, `kiwi check` and `kiwi update` asked the same remote
+  two or three times per app, strictly one after another — the wait behind
+  the GUI's refresh. Each run now asks every remote once, a few at a time
+  (`KIWI_FETCH_JOBS`, default 4), and remembers the answer for the rest of
+  the run; an unreachable remote costs one timeout instead of three.
+- **`kiwi list` is about 2.7× faster** (Q3): with 15 installed apps,
+  `kiwi list --porcelain --no-sync` (Tab completion, and the GUI's first
+  view) went from ~940 ms to ~350 ms, `--check` against local remotes from
+  ~1.5 s to ~0.8 s. Fewer processes: no `basename` per entry, each manifest
+  read once per app instead of a dozen times, and where an entry comes from
+  worked out once per listing instead of once per row. The output is
+  byte-for-byte the same.
+- **Tab completion no longer runs code from a catalog** (H2). `compgen -W`
+  expands its word list, so an entry like `https://…/$(cmd).git` — whose
+  basename becomes the app's name when the repo has no usable `NAME` — ran
+  `cmd` the moment you pressed Tab after `kiwi install `, as root in a root
+  shell. Completion now matches names as plain text, and a URL whose basename
+  does not look like a name (`^[A-Za-z0-9][A-Za-z0-9._-]*$`) is refused
+  everywhere: `kiwi add`, `catalog add`, lists and catalogs (reported with the
+  file it is in), and the root wrapper. *Changes behaviour:* a repo whose name
+  starts with `.`/`_`/`-` or contains other characters can no longer be listed.
+- **The GUI can no longer be made to run `kiwi install --all`** (H3). A repo
+  called `--all.git` was listed as an app named `--all`; clicking Install ran
+  `kiwi install --all` — every app in every catalog, root halves included — and
+  because the decoy declared `SCOPES=user`, without the root confirmation.
+  `--purge`, `--force` and `--system` worked the same way. Such URLs are now
+  refused (above), and every GUI call puts `--` before the names and URLs it
+  passes, so nothing from a catalog can be read as an option.
+- **`http://` is refused, everywhere** (M2). Root cloned and ran installers
+  fetched in plain text when a catalog or list named an `http://` URL — and git
+  followed an `https` → `http` redirect because `http` was an allowed protocol.
+  Anyone on the network path got root. kiwi now allows only `https` and local
+  paths (`GIT_ALLOW_PROTOCOL=https:file`), in both scopes; `kiwi add` and
+  `kiwi catalog add` refuse `http://` instead of warning, and such entries in a
+  list or catalog are reported and skipped. *Changes behaviour:* an `http://`
+  entry stops working — switch it to `https://`.
+- **What you read before installing is what runs** (M3). `kiwi info
+  --installer` and `kiwi diff` printed the app's bytes raw, so an installer
+  with `ESC[8m` (concealed text), cursor movement or a carriage return could
+  show something other than the code that runs; commit subjects and catalog
+  names reached the terminal raw too. Untrusted text is now shown with ESC as
+  a visible `^[` and other control characters as `?`; catalog names and
+  descriptions are cleaned like manifest values.
+
+### GUI
+
+- **You can install several apps in a row** (U1). While anything ran, every
+  other Install/Update/Uninstall click was silently dropped — from the detail
+  view the dialog even closed first — and after each action a full
+  `list --check` blocked the next click for 10–20 s. Clicks are now queued:
+  the button says "Queued", then "Running…"; queued jobs of the same kind run
+  as one `kiwi install -- a b c` (one lock, one password prompt); pin, unpin
+  and catalog changes wait their turn instead of colliding with the lock; and
+  the listing refreshes once, after the whole batch.
+- **The detail view handles an app's files more carefully** (M8).
+  Screenshots must be PNG, JPEG or WebP, at most 4 MiB, and at most
+  4096 px a side according to their header — checked before anything is
+  decoded, and decoded off the main thread, so a hostile or merely huge image
+  no longer freezes the window. A README is read up to 64 KiB. The homepage
+  row opens only `https://` links; anything else (`file:///…`, other schemes)
+  is shown as text.
+- **Icons no longer blink, and the list no longer jumps** (U2). Every
+  refresh — at startup and after every install, update, pin or catalog
+  change — threw away every card and row and rebuilt them, decoding each icon
+  again on the main thread, twice (the hidden view was built as well), and
+  lost the scroll position. Now icons are decoded in the background and kept;
+  a refresh changes only the cards whose app changed; only the visible view
+  is built; and an app's own icon sits in the same rounded tile as the
+  fallback glyph, so every icon has the same shape and place.
+- **The window shows your apps at once** (Q2). It waited for
+  `kiwi list --check` — a round trip to every remote — before showing
+  anything. It now shows the local state first (`list --no-sync`, well under a
+  second) and fills in update status when the check returns; offline, the list
+  still appears immediately. The Refresh button only re-runs the check.
+
 ## 2.3.2 — 2026-10-29
 
 - **DEPENDS examples follow the kiwi-proxy split.** The provider plugins now

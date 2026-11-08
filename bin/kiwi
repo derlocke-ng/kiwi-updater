@@ -10,7 +10,7 @@
 #   system — listed in /etc/kiwi-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-KIWI_VERSION=2.3.2
+KIWI_VERSION=2.4.0
 
 # systemd system services start without $HOME (set -u would abort at the
 # path definitions below) — root's user-scope paths are never used anyway
@@ -19,6 +19,8 @@ export HOME="${HOME:-/root}"
 # root-owned copy used for system-scope work (installed by 'install.sh --with-system');
 # escalating to it instead of this script means root never executes a user-writable file
 ROOT_KIWI="/usr/local/bin/kiwi"
+# the catalog install.sh registers for both scopes; keep the two in step
+DEFAULT_CATALOG="https://github.com/derlocke-ng/kiwi-catalog.git"
 
 # NEVER returns $SELF. Running ~/.local/bin/kiwi as root would hand every
 # process running as you a path to root on the next privileged call, which is
@@ -143,7 +145,21 @@ if [[ $EUID -eq 0 ]]; then
     USER_CATALOGS="$USER_CONFIG_DIR/catalogs.list"
     USER_REPOS="$USER_DATA_DIR/repos"
     USER_PREFIX=/root/.local
+    # Nor any tuning (FIXPLAN-2.4 L1). pkexec and systemd clean the
+    # environment; `sudo -E` or an env_keep entry does not, and
+    # KIWI_FETCH_JOBS='PATH[$(cmd)]' was command execution in an arithmetic
+    # context. KIWI_UNATTENDED stays: it only ever suppresses prompts.
+    unset KIWI_NET_TIMEOUT KIWI_FETCH_JOBS KIWI_LOCK_WAIT KIWI_GUI KIWI_DEP_STACK
+    # Root's clones are read by the user side (installed? which commit?), so
+    # they must stay world-readable after every fetch, not only after the
+    # first clone that sync_repo chmods (L2). Installers inherit this too.
+    umask 022
 fi
+
+# a number from the environment, or the default — never evaluated as an expression
+env_num() { # value default
+    if [[ ${1:-} =~ ^[0-9]+$ ]]; then echo "$1"; else echo "$2"; fi
+}
 
 MANIFEST="kiwi.manifest"
 LS_REMOTE_TIMEOUT=10
@@ -151,7 +167,7 @@ LS_REMOTE_TIMEOUT=10
 # link hangs the background timer, and because that run holds the scope lock,
 # every later kiwi command fails with "another instance is already running"
 # until the machine is rebooted. Observed in the field; this is the fix.
-NET_TIMEOUT="${KIWI_NET_TIMEOUT:-180}"
+NET_TIMEOUT="$(env_num "${KIWI_NET_TIMEOUT:-}" 180)"
 
 # kiwi only ever reads PUBLIC repos — never prompt for credentials
 # (no terminal prompt, no askpass popup, no keyring credential helper)
@@ -163,6 +179,13 @@ NET_TIMEOUT="${KIWI_NET_TIMEOUT:-180}"
 # credential helper (keyring, gh, a stored token) whenever a URL answered 401.
 export GIT_TERMINAL_PROMPT=0
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0=
+# Root's git, hardened (FIXPLAN-2.4 L2): check every object a remote sends
+# before it is stored, and never run a hook, whatever a clone's config says.
+if [[ $EUID -eq 0 ]]; then
+    export GIT_CONFIG_COUNT=3 \
+           GIT_CONFIG_KEY_1=transfer.fsckObjects GIT_CONFIG_VALUE_1=true \
+           GIT_CONFIG_KEY_2=core.hooksPath       GIT_CONFIG_VALUE_2=/dev/null
+fi
 unset GIT_ASKPASS SSH_ASKPASS 2>/dev/null || true
 
 # Transport allowlist, enforced by git itself. `kiwi list` clones every entry
@@ -170,7 +193,12 @@ unset GIT_ASKPASS SSH_ASKPASS 2>/dev/null || true
 # the root timer does the same as root — so the set of usable transports should
 # not be "whatever this git was built with". git blocks ext:: by default
 # already; this is the belt to that braces.
-export GIT_ALLOW_PROTOCOL=https:http:file
+#
+# No http (FIXPLAN-2.4 M2). An installer fetched in plain text is code anyone on
+# the network path can replace — as root, for a system app — and with http
+# allowed, git also follows an https -> http redirect. file stays for local
+# paths, which root follows only when it owns them.
+export GIT_ALLOW_PROTOCOL=https:file
 
 # git that talks to a remote: hard wall-clock cap, plus git's own stalled
 # transfer abort so a connection that goes quiet does not sit there.
@@ -188,6 +216,15 @@ c_bold=$'\033[1m'; c_grn=$'\033[32m'; c_ylw=$'\033[33m'; c_red=$'\033[31m'; c_di
 [[ -t 1 ]] || { c_bold=""; c_grn=""; c_ylw=""; c_red=""; c_dim=""; c_off=""; }
 
 log()  { (( QUIET )) || printf '%s\n' "$*"; }
+
+# Show untrusted text without letting it drive the terminal (FIXPLAN-2.4 M3).
+# "Read the installer before you run it" is only worth something if what you
+# read is what runs: ESC[8m conceals text, cursor moves and CR overwrite it.
+# Keeps \t, \n and printable UTF-8; ESC becomes a visible ^[, every other C0
+# control, DEL and the 8-bit C1 controls (UTF-8 C2 80..9F) become ?.
+safe_text() {
+    LC_ALL=C sed 's/\x1b/^[/g; s/\xc2[\x80-\x9f]/?/g; s/[\x00-\x08\x0b-\x1f\x7f]/?/g'
+}
 info() { (( QUIET )) || printf '%s::%s %s\n' "$c_bold" "$c_off" "$*"; }
 warn() { printf '%swarning:%s %s\n' "$c_ylw" "$c_off" "$*" >&2; }
 die()  { printf '%serror:%s %s\n' "$c_red" "$c_off" "$*" >&2; exit 1; }
@@ -323,9 +360,23 @@ app_entries_raw() {
         list_trusted "${c}apps.list" || continue
         while read -r url opts; do
             [[ -z ${url:-} ]] && continue
+            # As root, a catalog says WHICH repos, never which version: with
+            # ref=/branch= honoured, a compromised catalog could move what root
+            # runs to an old, vulnerable release or to any branch on the next
+            # passwordless update (FIXPLAN-2.4 M1). Root's own list still pins.
+            [[ $EUID -eq 0 ]] && opts="$(strip_ref_opts "${opts:-}")"
             printf '%s\t%s\t%s\n' "${c}apps.list" "$url" "${opts:-}"
         done < <(grep -Ev '^[[:space:]]*(#|$)' "${c}apps.list" 2>/dev/null || true)
     done
+}
+
+strip_ref_opts() { # opts -> the same without ref= and branch=
+    local w out=()
+    split_words "${1:-}"
+    for w in ${WORDS[@]+"${WORDS[@]}"}; do
+        [[ $w == ref=* || $w == branch=* ]] || out+=("$w")
+    done
+    printf '%s' "${out[*]:-}"
 }
 
 # every app we know about, deduped by repo name, regardless of scope:
@@ -360,9 +411,11 @@ check_lists() {
             continue
         fi
         if ! entry_ok "$url" "$opts"; then
-            warn "ignoring a local path a catalog names, as root: $src: '$url'"
-            warn "  it is not owned by root, or others can write it. Root takes such a path"
-            warn "  only from $SYS_LIST"
+            warn "ignoring a local path root does not own: $src: '$url'"
+            warn "  root follows a local repo only if it and every directory above it are"
+            warn "  owned by root and not writable by others — whoever can write it would"
+            warn "  decide what runs as root. Use an https:// URL, or clone it somewhere"
+            warn "  root-owned (e.g. under /var/lib) and list that path."
             continue
         fi
         d="$(dir_name "$url")"; u="$(norm_url "$url")"
@@ -482,7 +535,8 @@ effective_scopes() { # dir opts url
 # catalog of fifty tools strictly one after another is the slowest part of a
 # first `kiwi list` by a wide margin.
 sync_all_meta() {
-    local url opts line todo=() running=0 max="${KIWI_FETCH_JOBS:-4}"
+    local url opts line todo=() running=0 max
+    max="$(env_num "${KIWI_FETCH_JOBS:-}" 4)"; (( max > 0 )) || max=4
     while IFS=$'\t' read -r url opts; do
         [[ -z $url ]] && continue
         [[ -d "$(meta_dir)/$(dir_name "$url")/.git" ]] && continue
@@ -552,6 +606,8 @@ scope_target_sha() { # scope url row_opts row_sha
     local f so t sha
     f="$(list_file "$1")"
     if list_has "$f" "$2"; then so="$(entry_opts "$f" "$2")"; else so="${3:-}"; fi
+    # root ignores a catalog's ref=/branch= (M1); so must this view of root's half
+    [[ $1 == system ]] && ! list_has "$f" "$2" && so="$(strip_ref_opts "${so:-}")"
     if [[ "$(entry_opt "${so:-}" ref "")" == "$(entry_opt "${3:-}" ref "")" &&
           "$(entry_opt "${so:-}" branch "")" == "$(entry_opt "${3:-}" branch "")" ]]; then
         echo "$4"; return 0
@@ -621,10 +677,13 @@ scope_label() { # "user system" -> "user+system"
 norm_url() { local u="${1%/}"; echo "${u%.git}"; }
 
 # A URL out of a catalog is data from someone else, and it is about to be
-# handed to git and turned into a directory name. Nothing checked its scheme or
-# its shape, and nothing put `--` in front of it. No exploit was demonstrated,
-# so this is defence in depth: a shape that cannot be mistaken for an option,
-# and a basename that cannot escape the repos directory.
+# handed to git and turned into a directory name — and, when the repo has no
+# usable NAME, into the app's name: shown in listings, offered by Tab
+# completion, passed on command lines. So its basename has to look like a
+# name. Anything else was an exploit (FIXPLAN-2.4 H2/H3): bash completion
+# expanded https://…/$(cmd).git and ran it, and the GUI ran
+# `kiwi install --all` for a repo called --all.git.
+NAME_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 valid_url() { # url
     local u="$1" b
     [[ -n $u ]] || return 1
@@ -632,29 +691,44 @@ valid_url() { # url
     [[ $u == *[[:space:]]* ]] && return 1
     [[ $u == *[[:cntrl:]]* ]] && return 1
     case "$u" in
-        https://?*|http://?*|file:///?*|/?*) ;;      # local paths: dev and tests
+        https://?*|file:///?*|/?*) ;;      # local paths: dev and tests; never http (M2)
         *) return 1 ;;
     esac
     b="$(dir_name "$u")"
-    [[ -n $b && $b != . && $b != .. && $b != */* ]] || return 1
+    [[ $b =~ $NAME_RE ]] || return 1
     return 0
 }
 
-# A local path in a CATALOG is someone else's choice of a directory on this
-# machine. As a user that is your own risk; as root it would mean that whoever
-# can write that directory has code run as root on the next passwordless
-# update, without the admin ever naming it. So from a catalog, root follows a
-# local path only if root owns it and nobody else can write it — the same test
-# list_trusted applies to the lists. A path in root's own list (local=1) was
-# put there by the admin, with a password, and is taken as it is.
+# A local path is a directory on this machine, and whoever can write it decides
+# what its next commit contains. As a user that is your own risk; as root it
+# meant that anyone who could write it — any process running as you, for a
+# repo in your home — had code run as root on the next passwordless update
+# (FIXPLAN-2.4 H1). So root follows a local path only if the path AND every
+# directory above it are root-owned and not writable by group or other.
+# That holds for every source: catalogs, and root's own list too — an entry an
+# admin added years ago for a repo in their home is exactly the case.
+# Callable as any user (stat only), so the user side can ask before escalating.
+root_owned_chain() { # path or file:// url
+    local p st owner mode
+    p="$(realpath -e -- "${1#file://}" 2>/dev/null)" || return 1
+    while :; do
+        st="$(stat -c '%u %a' -- "$p" 2>/dev/null)" || return 1
+        read -r owner mode <<<"$st"
+        [[ $owner == 0 ]] && (( (8#$mode & 8#022) == 0 )) || return 1
+        [[ $p == / ]] && return 0
+        p="$(dirname -- "$p")"
+    done
+}
+
+# can root use this url at all: https, or a local path root owns all the way up
+root_usable() { # url
+    [[ $1 == https://* ]] || root_owned_chain "$1"
+}
+
 entry_ok() { # url opts
     valid_url "$1" || return 1
-    [[ $EUID -eq 0 && $1 != https://* && $1 != http://* ]] || return 0
-    [[ "$(entry_opt "${2:-}" local 0)" == 1 ]] && return 0
-    local st owner mode
-    st="$(stat -c '%u %a' "${1#file://}" 2>/dev/null)" || return 1
-    read -r owner mode <<<"$st"
-    [[ $owner == 0 ]] && (( (8#$mode & 8#022) == 0 ))
+    [[ $EUID -eq 0 ]] || return 0
+    root_usable "$1"
 }
 
 list_has() { # file url
@@ -732,7 +806,10 @@ catalog_has_url() { # url
 }
 
 dir_name() { # url -> repo directory name
-    local b; b="$(basename "$1")"
+    # no `basename`: this runs for every entry many times per command (Q3)
+    local b="$1"
+    while [[ $b == */ ]]; do b="${b%/}"; done
+    b="${b##*/}"
     echo "${b%.git}"
 }
 
@@ -782,12 +859,35 @@ manifest_get() { # repo_dir key default
 # wrapper, so it has to look like a name. A manifest that disagrees falls back
 # to the repo's directory name rather than putting something shaped like an
 # option where a name is expected.
+# The whole manifest in one read, for loops that want many keys of it (Q3):
+# cmd_list used to start ~12 subshells per app, one manifest_get each. Same
+# rules as manifest_get — the first KEY= line wins, cleaned the same way.
+declare -gA MF=()
+manifest_load() { # repo_dir -> MF[KEY]=value
+    MF=()
+    local f="$1/$MANIFEST" line k v
+    [[ -f $f ]] || return 0
+    while IFS= read -r line || [[ -n $line ]]; do
+        [[ $line == [A-Za-z_]*=* ]] || continue
+        k="${line%%=*}"
+        [[ -n ${MF[$k]+x} ]] && continue
+        v="${line#*=}"
+        v="${v//$'\t'/ }"
+        v="${v//[[:cntrl:]]/}"
+        v="${v%"${v##*[![:space:]]}"}"
+        MF[$k]="$v"
+    done < "$f"
+}
+
 manifest_name() { # repo_dir fallback
     local n; n="$(manifest_get "$1" NAME "")"
-    if [[ ! $n =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    if [[ ! $n =~ $NAME_RE ]]; then
         [[ -n $n ]] && warn "ignoring unusable NAME '$n' in $1/$MANIFEST"
         n="$2"
     fi
+    # the fallback is a URL's basename: valid_url checks it on every route in,
+    # and this is the belt to that
+    [[ $n =~ $NAME_RE ]] || n=""
     echo "$n"
 }
 
@@ -843,9 +943,50 @@ local_head() { # repo_dir
 }
 
 # resolve the commit an app should be at: ref= pin > branch= > latest tag > HEAD
+# One `git ls-remote` per URL per run (FIXPLAN-2.4 Q1). remote_target is asked
+# about the same URL from refresh_meta, the status check, scope_target_sha and
+# sync_repo — two or three network round trips per app, strictly one after
+# another. The cache is a directory, not a variable, because most callers run
+# inside $(...). A failure is cached too: an unreachable remote costs one
+# timeout, not three.
+LSR_DIR=""
+ls_remote() { # url -> its `git ls-remote` output
+    if [[ -z $LSR_DIR || ! -d $LSR_DIR ]]; then
+        timeout "$LS_REMOTE_TIMEOUT" git ls-remote --quiet -- "$1" 2>/dev/null
+        return
+    fi
+    local k="${1//%/%25}"; k="${k//\//%2F}"           # reversible, so no two URLs share a file
+    if (( ${#k} > 200 )); then k="$(printf '%s' "$1" | sha1sum)"; k="${k%% *}"; fi
+    k="$LSR_DIR/$k"
+    [[ -f $k.fail ]] && return 1
+    if [[ ! -f $k ]]; then
+        # named once, here: a redirection is expanded in the forked child,
+        # where $BASHPID is already another number
+        local tmp="$k.$BASHPID"
+        if timeout "$LS_REMOTE_TIMEOUT" git ls-remote --quiet -- "$1" > "$tmp" 2>/dev/null; then
+            mv -f "$tmp" "$k"
+        else
+            rm -f "$tmp"; : > "$k.fail"; return 1
+        fi
+    fi
+    local o; o="$(<"$k")"; printf '%s\n' "$o"
+}
+
+# warm that cache for many URLs at once, a few at a time
+prefetch_remotes() { # url...
+    local u running=0 max
+    max="$(env_num "${KIWI_FETCH_JOBS:-}" 4)"; (( max > 0 )) || max=4
+    for u in "$@"; do
+        ( ls_remote "$u" >/dev/null ) &
+        running=$((running+1))
+        if (( running >= max )); then wait -n 2>/dev/null || true; running=$((running-1)); fi
+    done
+    wait
+}
+
 remote_target() { # url opts -> "sha<TAB>refname"; empty output on failure
     local url="$1" opts="${2:-}" out sha="" ref branch tag
-    out="$(timeout "$LS_REMOTE_TIMEOUT" git ls-remote --quiet -- "$url" 2>/dev/null)" || return 1
+    out="$(ls_remote "$url")" || return 1
     [[ -n $out ]] || return 1
     ref="$(entry_opt "$opts" ref "")"
     branch="$(entry_opt "$opts" branch "")"
@@ -921,7 +1062,19 @@ root_url_for() { # dirname -> the url root would resolve it to
 }
 
 root_knows() { # url
-    [[ "$(root_url_for "$(dir_name "$1")" || true)" == "$(norm_url "$1")" ]]
+    [[ "$(root_url_for "$(dir_name "$1")" || true)" == "$(norm_url "$1")" ]] &&
+        root_usable "$1"     # root skips a path it does not own (H1)
+}
+
+# root_knows, or will once the system scope is set up: on a machine without
+# it, root has no lists yet, and the bootstrap registers the default catalog
+# for root — so an app from that catalog installs with the one password the
+# bootstrap asks for, as it always did. Anything else must be registered (D4).
+root_will_know() { # url
+    root_knows "$1" && return 0
+    [[ ! -x $ROOT_KIWI && $1 == https://* ]] || return 1
+    list_has "$(catalogs_dir)/$(dir_name "$DEFAULT_CATALOG")/apps.list" "$1" &&
+        grep -qxF -- "$DEFAULT_CATALOG" < <(catalog_urls)    # not a pipe: pipefail + grep -q
 }
 
 acquire_lock() { # scope
@@ -946,7 +1099,8 @@ acquire_lock() { # scope
     # Wait a little before giving up. The overwhelmingly common collision is the
     # background update timer firing while you type a command, and that is over
     # in seconds — failing instantly turns a non-event into an error.
-    if ! flock -w "${KIWI_LOCK_WAIT:-20}" 9; then
+    local wait_s; wait_s="$(env_num "${KIWI_LOCK_WAIT:-}" 20)"
+    if ! flock -w "$wait_s" 9; then
         local who host
         who="$(head -1 "$lock" 2>/dev/null || true)"
         host="${who%% *}"
@@ -957,7 +1111,7 @@ Wait for that run to finish, or raise KIWI_LOCK_WAIT."
         fi
         die "another kiwi is already running ($1 scope)${who:+: $who}.
 The background update timer may have it; it normally finishes in seconds.
-Retry, or raise KIWI_LOCK_WAIT (currently ${KIWI_LOCK_WAIT:-20}s)."
+Retry, or raise KIWI_LOCK_WAIT (currently ${wait_s}s)."
     fi
 
     # record who holds it, so the next caller can say something useful
@@ -1011,12 +1165,33 @@ installer_path() { # scope
     fi
 }
 
+# The installer that runs is a regular file inside the clone — the one `kiwi
+# diff` reviewed and root just checked out (FIXPLAN-2.4 M6). INSTALLER=../../x
+# or an install.sh committed as a symlink made kiwi run a file outside the
+# root-owned clone, which whoever owns that file can change at any time.
+installer_name() { # repo_dir -> the INSTALLER path, if its shape is usable
+    local inst; inst="$(manifest_get "$1" INSTALLER install.sh)"
+    [[ -n $inst && $inst != /* && $inst != *..* ]] || return 1
+    echo "$inst"
+}
+installer_file() { # repo_dir -> absolute path of the installer, or fail
+    local inst p d
+    inst="$(installer_name "$1")" || return 1
+    [[ ! -L "$1/$inst" ]] || return 1
+    p="$(realpath -e -- "$1/$inst" 2>/dev/null)" || return 1
+    d="$(realpath -e -- "$1" 2>/dev/null)" || return 1
+    [[ $p == "$d"/* && -f $p ]] || return 1
+    echo "$p"
+}
+
 run_installer() { # scope repo_dir action [purge]
     local scope="$1" dir="$2" action="$3" purge="${4:-0}"
-    local inst; inst="$(manifest_get "$dir" INSTALLER install.sh)"
+    local inst ipath; inst="$(manifest_get "$dir" INSTALLER install.sh)"
     # One unusable app must not abort the run: with --all that would mean the
     # first broken repo stops every app after it from being updated.
-    [[ -f "$dir/$inst" ]] || { warn "installer '$inst' not found in $dir"; return 1; }
+    ipath="$(installer_file "$dir")" || {
+        warn "installer '$inst' is missing, a symlink, or outside $dir — not running it"
+        return 1; }
     local gui; gui="$(effective_gui "$dir")"
     # --purge has to reach the app. The README promises it "also drops its
     # config", but kiwi only ever removed the URL from its own list and called
@@ -1033,6 +1208,7 @@ run_installer() { # scope repo_dir action [purge]
     # legitimately clones something of its own.
     ( cd "$dir" &&
       env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 \
+          -u GIT_CONFIG_KEY_1 -u GIT_CONFIG_VALUE_1 -u GIT_CONFIG_KEY_2 -u GIT_CONFIG_VALUE_2 \
           -u GIT_ALLOW_PROTOCOL \
           KIWI_SCOPE="$scope" \
           KIWI_ACTION="$action" \
@@ -1041,7 +1217,7 @@ run_installer() { # scope repo_dir action [purge]
           KIWI_GUI="$gui" \
           KIWI_PURGE="$purge" \
           PATH="$(installer_path "$scope")" \
-          bash "./$inst" "${args[@]}" 9>&- )
+          bash "$ipath" "${args[@]}" 9>&- )
 }
 
 # Every failure path RETURNS, and none of them die. This runs inside $(...),
@@ -1087,8 +1263,13 @@ sync_repo() { # scope url opts -> clones + checks out the target ref, echoes rep
         warn "$(dir_name "$url"): source changed, repointing the cached clone at $url"
         git -C "$dir" remote set-url origin -- "$url" || return 1
     fi
-    IFS=$'\t' read -r sha _ <<<"$target"
+    local tref
+    IFS=$'\t' read -r sha tref <<<"$target"
     git_net -C "$dir" fetch --quiet --tags origin || { warn "fetch failed: $url"; return 1; }
+    # root checks the release before it is even checked out (H4); 2 = refused
+    if [[ $scope == system && $EUID -eq 0 ]]; then
+        release_trusted "$dir" "$url" "$tref" "$sha" || return 2
+    fi
     checkout_target "$dir" "$sha" || { warn "cannot check out $sha in $dir"; return 1; }
     echo "$dir"
 }
@@ -1132,6 +1313,150 @@ install_one() { # scope url opts
     info "${c_grn}$(app_name "$scope" "$url") ${action%e}ed${c_off} (${scope}, $(manifest_get "$dir" VERSION "?"))"
 }
 
+# Root never moves an app to an OLDER release unless root's own list pins it
+# there (M1). With catalogs no longer choosing refs, what is left is the remote
+# itself: delete the newest tag and "latest" becomes an old, vulnerable one.
+release_not_older() { # dir url opts -> fails if the target release is older than the installed one
+    local re='^v?[0-9]+(\.[0-9]+){0,3}$' cur t tsha tref
+    [[ "$(entry_opt "${3:-}" local 0)" == 1 && -n "$(entry_opt "${3:-}" ref "")" ]] && return 0
+    cur="$(git -C "$1" tag --points-at "$(marker_sha "$1")" 2>/dev/null | grep -E "$re" | sort -V | tail -1 || true)"
+    [[ -n $cur ]] || return 0
+    t="$(remote_target "$2" "${3:-}" || true)"
+    [[ -n $t ]] || return 0                  # sync_repo reports the unreachable remote
+    IFS=$'\t' read -r tsha tref <<<"$t"
+    [[ $tref =~ $re ]] || return 0
+    ! ver_lt "${tref#v}" "${cur#v}"
+}
+
+# ---------------------------------------------------------------------------
+# Signed releases (FIXPLAN-2.4 H4). Whoever could push a tag to an app with a
+# system half — or take over its account, or a CI token — had root on every
+# machine with the system scope within hours, with nobody involved. Root now
+# pins one SSH signing key per app (trust on first use, at an authenticated
+# moment) and checks every release against it:
+#   - passwordless updates (the wrapper passes --signed-only) need a version
+#     tag signed by the pinned key; anything else waits for a password;
+#   - with a password, an unsigned app still installs and updates, loudly;
+#   - a tag signed by another key, or an unsigned tag of an app whose releases
+#     were signed, is refused either way until `kiwi trust --system <app>`.
+# The key is the one inside the tag's SSH signature (git tag -s with
+# gpg.format=ssh); git verify-tag then checks it against the pinned file.
+# ---------------------------------------------------------------------------
+SIGNERS_DIR="$SYS_CONFIG_DIR/signers"
+SIGNED_ONLY=0
+KEY_RE='^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)$'
+
+# the public key a tag is signed with, "type base64", read out of its SSHSIG
+# blob: "SSHSIG", uint32 version, string publickey, … (PROTOCOL.sshsig)
+tag_signer() { # dir tag
+    local b64 bytes=() len kl kt i
+    b64="$(git -C "$1" cat-file tag "refs/tags/$2" 2>/dev/null |
+           sed -n '/^-----BEGIN SSH SIGNATURE-----$/,/^-----END SSH SIGNATURE-----$/{/^-----/d;p;}' |
+           tr -d '\n')"
+    [[ -n $b64 ]] || return 1
+    read -r -a bytes < <(base64 -d <<<"$b64" 2>/dev/null | od -An -v -tu1 | tr '\n' ' ')
+    (( ${#bytes[@]} > 18 )) || return 1
+    [[ "${bytes[*]:0:6}" == "83 83 72 83 73 71" ]] || return 1          # SSHSIG
+    len=$(( (bytes[10] << 24) | (bytes[11] << 16) | (bytes[12] << 8) | bytes[13] ))
+    (( len > 4 && 14 + len <= ${#bytes[@]} )) || return 1
+    kl=$(( (bytes[14] << 24) | (bytes[15] << 16) | (bytes[16] << 8) | bytes[17] ))
+    (( kl > 0 && kl <= len - 4 )) || return 1
+    local fmt
+    printf -v fmt '\\%03o' "${bytes[@]:18:kl}"; printf -v kt "$fmt"       # printf repeats its format per byte
+    [[ $kt =~ $KEY_RE ]] || return 1
+    printf -v fmt '\\x%02x' "${bytes[@]:14:len}"
+    printf '%s %s\n' "$kt" "$(printf "$fmt" | base64 -w0)"
+}
+
+key_fp() { # "type base64" -> its SHA256 fingerprint, for people
+    ssh-keygen -lf - <<<"$1" 2>/dev/null | awk '{print $2}'
+}
+
+pin_signer() { # name "type base64" why
+    mkdir -p "$SIGNERS_DIR"; chmod 755 "$SIGNERS_DIR"
+    printf '%s namespaces="git" %s\n' "$1" "$2" > "$SIGNERS_DIR/$1.tmp" &&
+        chmod 644 "$SIGNERS_DIR/$1.tmp" && mv -f "$SIGNERS_DIR/$1.tmp" "$SIGNERS_DIR/$1"
+    # >&2: this runs inside sync_repo, whose stdout is the clone's path
+    info "$1: trusting releases signed by $(key_fp "$2") ($3)" >&2
+}
+
+# a release root will not verify: refused without a password, allowed (and
+# said) with one
+unverified() { # name reason
+    if (( SIGNED_ONLY )); then
+        warn "$1: not updated without a password — $2"
+        return 1
+    fi
+    warn "$1: $2 — kiwi cannot verify it. Going ahead because you authenticated;"
+    warn "  it will not be updated without a password until its releases are signed."
+    return 0
+}
+
+release_trusted() { # dir url tref sha -> may root check out <sha>?
+    local dir="$1" url="$2" tref="$3" sha="$4" name f key cur ckey
+    name="$(dir_name "$url")"; f="$SIGNERS_DIR/$name"
+    local re='^v?[0-9]+(\.[0-9]+){0,3}$'
+    if [[ ! $tref =~ $re ]] || [[ "$(git -C "$dir" cat-file -t "refs/tags/$tref" 2>/dev/null)" != tag ]] ||
+       [[ "$(git -C "$dir" rev-parse -q --verify "refs/tags/$tref^{commit}" 2>/dev/null)" != "$sha" ]]; then
+        [[ -s $f ]] && { warn "$name: $tref is not a signed release tag, and its releases are signed — refusing"; return 1; }
+        unverified "$name" "$tref is not a release tag"; return
+    fi
+    if ! command -v ssh-keygen >/dev/null 2>&1; then
+        [[ -s $f ]] && { warn "$name: ssh-keygen is missing, so its signed releases cannot be checked — refusing"; return 1; }
+        unverified "$name" "ssh-keygen is missing"; return
+    fi
+    if ! key="$(tag_signer "$dir" "$tref")"; then
+        [[ -s $f ]] && { warn "$name: $tref is not signed, but its releases are — refusing (kiwi trust --system $name if you know why)"; return 1; }
+        unverified "$name" "$tref is not signed"; return
+    fi
+    if [[ ! -s $f ]]; then
+        # Trust on first use. From the release already installed if it is
+        # signed: that code already runs as root, so trusting its signer adds
+        # nothing — and it is how machines from before 2.4 get their pins.
+        # Otherwise only with a password: then the key in this release.
+        # After `kiwi trust` the admin asked for a new key: never the old one.
+        cur=""
+        [[ -e $f.reset ]] ||
+            cur="$(git -C "$dir" tag --points-at "$(marker_sha "$dir")" 2>/dev/null | grep -E "$re" | sort -V | tail -1 || true)"
+        if [[ -n $cur ]] && ckey="$(tag_signer "$dir" "$cur")"; then
+            pin_signer "$name" "$ckey" "the key of the installed $cur"
+        elif (( SIGNED_ONLY )); then
+            warn "$name: no signing key pinned yet — not updated without a password"
+            return 1
+        else
+            pin_signer "$name" "$key" "the release being installed, authenticated"
+            rm -f "$f.reset"
+        fi
+    fi
+    if git -C "$dir" -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$f" \
+           verify-tag -- "$tref" >/dev/null 2>&1; then
+        return 0
+    fi
+    warn "$name: $tref is signed by $(key_fp "$key"), not by the key root trusts for it"
+    warn "  ($(key_fp "$(cut -d' ' -f3- "$f")")) — refusing. If the project changed keys on purpose:"
+    warn "  kiwi trust --system $name, then update it with your password."
+    return 1
+}
+
+cmd_trust() { # --system <app>: forget the pinned key; the next authenticated install/update pins anew
+    [[ $SCOPE_FILTER == system ]] || die "usage: kiwi trust --system <app>   (signing keys are pinned for the system scope)"
+    [[ $# -eq 1 ]] || die "usage: kiwi trust --system <app>"
+    if [[ $EUID -ne 0 ]]; then
+        local rk; rk="$(root_kiwi)" || return 1
+        as_root "$rk" trust --system -- "$1"
+        return
+    fi
+    local line url; line="$(resolve "$1")" || die "unknown app: $1"
+    IFS=$'\t' read -r url _ <<<"$line"
+    local f; f="$SIGNERS_DIR/$(dir_name "$url")"
+    [[ -f $f ]] || { info "$1: no signing key pinned"; return 0; }
+    info "$1: forgetting the pinned key $(key_fp "$(cut -d' ' -f3- "$f")")"
+    # the marker says: pin from the next release, not from the installed one
+    : > "$f.reset"; chmod 644 "$f.reset"
+    rm -f "$f"
+    info "  the next install or update with your password pins the key of the release it installs"
+}
+
 update_one() { # scope url opts   (appends to global UPDATED array)
     local scope="$1" url="$2" opts="${3:-}"
     local name; name="$(app_name "$scope" "$url")"
@@ -1145,7 +1470,16 @@ update_one() { # scope url opts   (appends to global UPDATED array)
     # already sat on the target, so the next run saw HEAD == target and never
     # applied the update that had not actually run.
     local before; before="$(marker_sha "$dir")"
-    if ! sync_repo "$scope" "$url" "$opts" >/dev/null; then
+    if [[ $scope == system ]] && ! release_not_older "$dir" "$url" "$opts"; then
+        warn "$name: the newest release offered is older than the installed one — not downgrading"
+        warn "  (a release tag was removed or moved upstream; to go back on purpose, pin it:"
+        warn "   kiwi pin --system $name <tag>)"
+        return 0
+    fi
+    local src=0
+    sync_repo "$scope" "$url" "$opts" >/dev/null || src=$?
+    (( src == 2 )) && return 1        # release_trusted said why
+    if (( src )); then
         # Not "up to date": nothing was checked. HEAD had simply not moved
         # because ls-remote or fetch failed.
         warn "$name: could not check for updates"
@@ -1218,8 +1552,20 @@ collect_targets() { # all|names...
             list+=("$line")
         done
     fi
+    # An update only ever acts on what is installed, so it has no business
+    # cloning anything else (FIXPLAN-2.4 M7/Q4). It used to sync metadata for
+    # every entry of every catalog first: as root, on every timer run, that is
+    # git network and pack parsing against any host a catalog names; as the
+    # user, a slow first `kiwi update` that cloned apps nobody installed.
+    local only_installed=0 skipped=0
+    [[ $CMD == update || $CMD == self-update ]] && only_installed=1
     for line in "${list[@]}"; do
         IFS=$'\t' read -r url opts <<<"$line"
+        if (( only_installed )) && ! is_installed_any "$url"; then
+            (( ALL_MODE )) || log "${c_dim}skipping $(dir_name "$url") (not installed)${c_off}"
+            skipped=$((skipped+1))
+            continue
+        fi
         dir="$(sync_meta "$url" "$opts")" || { warn "cannot reach $url"; continue; }
         scs="$(effective_scopes "$dir" "$opts" "$url")"
         [[ -z $scs ]] && continue
@@ -1234,7 +1580,17 @@ collect_targets() { # all|names...
         # `update --all --system` on machines that legitimately have no system
         # apps, and dying there marked the unit failed every six hours.
         [[ $1 == --all ]] && { log "nothing to do"; exit 0; }
+        # named, but none installed: as before, "skipping …", not a failure
+        (( skipped )) && exit 0
         die "no apps matched (see 'kiwi list')"
+    fi
+    # an update asks every target's remote: ask them all at once first (Q1)
+    if [[ $CMD == update || $CMD == self-update ]]; then
+        local -A seen_u=(); local pu pre=()
+        for pu in "${T_URL[@]}"; do
+            [[ -n ${seen_u[$pu]:-} ]] || { seen_u[$pu]=1; pre+=("$pu"); }
+        done
+        prefetch_remotes "${pre[@]}"
     fi
 }
 
@@ -1279,7 +1635,13 @@ dry_run_plan() { # verb
             if [[ ${#DEPS_MISSING[@]} -gt 0 ]]; then row missing "${DEPS_MISSING[*]}"; fi
         fi
         [[ $verb == uninstall ]] && row purge "$([[ ${PURGE:-0} == 1 ]] && echo yes || echo no)"
-        [[ $sc == system && $EUID -ne 0 ]] && row note "needs root — would escalate"
+        if [[ $sc == system && $EUID -ne 0 ]]; then
+            if [[ $verb == install ]] && ! root_will_know "$url"; then
+                row note "root does not list this source — register it first: kiwi add --system $url"
+            else
+                row note "needs root — would escalate"
+            fi
+        fi
     done
     # explicitly: the loop's status is its last [[ ]], false for any user-scope
     # target, and under set -e that made `install --dry-run` exit 1
@@ -1287,7 +1649,7 @@ dry_run_plan() { # verb
 }
 
 dispatch() { # verb extra_flag
-    local verb="$1" i had_user=0 sys_names=() rc_pre=0 from_urls=()
+    local verb="$1" i had_user=0 sys_names=() rc_pre=0
     for i in "${!T_URL[@]}"; do
         [[ ${T_SCOPE[$i]} == user ]] && had_user=1
         [[ ${T_SCOPE[$i]} == system && $EUID -ne 0 ]] || continue
@@ -1310,8 +1672,25 @@ dispatch() { # verb extra_flag
         # to `kiwi catalog add --system` first; and when no system scope existed
         # at all it refused too, where root_kiwi below sets one up with one
         # password. Both were the opposite of "install root parts with ease".
-        if [[ $verb == install ]] && ! root_knows "${T_URL[$i]}"; then
-            from_urls+=("${T_URL[$i]}")
+        if [[ $verb == install ]] && ! root_will_know "${T_URL[$i]}"; then
+            # Root installs only sources it already lists (FIXPLAN-2.4 M4, D4).
+            # The user side — which the user can write — used to hand the URL
+            # over with --from, and root recorded whatever it was given, then
+            # updated it without a password from then on. Registering a source
+            # for root is now its own explicit, password-gated step that names
+            # the URL. Say so here rather than ask for a password root refuses.
+            local nm; nm="$(app_name system "${T_URL[$i]}")"
+            warn "$nm: its root half was not installed — root does not list this source:"
+            warn "    ${T_URL[$i]}"
+            if [[ ${T_URL[$i]} == https://* ]]; then
+                warn "  to let root install and update it, register it (asks for your password):"
+                warn "    kiwi add --system ${T_URL[$i]}"
+                warn "  then run: kiwi install $nm"
+            else
+                warn "  root takes only https:// URLs or local repos root owns all the way up (H1)."
+            fi
+            rc_pre=1
+            continue
         fi
         sys_names+=("$(app_name system "${T_URL[$i]}")")
     done
@@ -1380,19 +1759,29 @@ dispatch() { # verb extra_flag
     if [[ ${#sys_names[@]} -gt 0 ]]; then
         # Say what root is for before asking for it. "Needs your password" with
         # no reason is how people learn to type it without reading.
-        local i2 d2 why
+        # And WHERE from, and what else comes along as root (M4): the
+        # password prompt shows none of it.
+        local i2 d2 why nm2 dl2 also
         for i2 in "${!T_URL[@]}"; do
             [[ ${T_SCOPE[$i2]} == system ]] || continue
+            nm2="$(app_name system "${T_URL[$i2]}")"
+            [[ " ${sys_names[*]} " == *" $nm2 "* ]] || continue
             d2="$(meta_dir)/$(dir_name "${T_URL[$i2]}")"
             why="$(manifest_get "$d2" ROOT_REASON "")"
-            [[ -n $why ]] && info "  ${c_bold}$(app_name system "${T_URL[$i2]}")${c_off} needs root: $why"
+            info "  ${c_bold}$nm2${c_off} from ${T_URL[$i2]} ($(entry_origin "${T_URL[$i2]}"))"
+            [[ -n $why ]] && info "    needs root: $why"
+            if [[ $verb == install ]]; then
+                plan_deps system "${T_URL[$i2]}" "$(manifest_get "$d2" DEPENDS "")"
+                also=()
+                for dl2 in ${DEP_APPS[@]+"${DEP_APPS[@]}"}; do also+=("$(dir_name "${dl2%%$'\t'*}")"); done
+                (( ${#also[@]} )) && info "    also installs as root: ${also[*]}"
+            fi
         done
         info "escalating for system apps: ${sys_names[*]}"
         # Capture first. root_kiwi dies when it cannot provide a root-owned
         # copy, and inside $(...) that exit leaves only the subshell — the
         # caller went on to run `pkexec "" update --system …`.
         local rk; rk="$(root_kiwi)" || return 1
-        local u; for u in ${from_urls[@]+"${from_urls[@]}"}; do extra+=(--from "$u"); done
         as_root "$rk" "$verb" --system "${sys_names[@]}" "${extra[@]+"${extra[@]}"}" 9>&- || rc=1
     fi
 
@@ -1524,9 +1913,25 @@ cmd_list() {
     done
     (( check )) && sync_catalogs
     (( nosync )) || sync_all_meta
+    if (( check )); then
+        # every remote this listing will ask about, asked in parallel first
+        local pu pre=()
+        while IFS=$'\t' read -r pu _; do
+            [[ -z $pu ]] && continue
+            if is_installed_any "$pu" || [[ -d "$(meta_dir)/$(dir_name "$pu")/.git" ]]; then pre+=("$pu"); fi
+        done < <(app_entries)
+        prefetch_remotes ${pre[@]+"${pre[@]}"}
+    fi
 
     local url opts dir name comp comp_full ver desc scs lbl status target tsha tref sc
     local found=0 inst miss any_root=0 inst_scs pin_ref
+    # where each entry comes from, read once rather than once per row (Q3)
+    local -A orig=() origl=(); local osrc ou okey origin
+    while IFS=$'\t' read -r osrc ou _; do
+        [[ -z $ou ]] && continue
+        okey="${ou%/}"; okey="${okey%.git}"
+        [[ -n ${orig[$okey]+x} ]] || orig[$okey]="$osrc"
+    done < <(app_entries_raw)
     (( porcelain )) || printf '%s%-20s %-12s %-22s %-9s %-17s %s%s\n' \
         "$c_bold" NAME SCOPES COMPONENTS VERSION STATUS DESCRIPTION "$c_off"
     while IFS=$'\t' read -r url opts; do
@@ -1536,12 +1941,18 @@ cmd_list() {
         # read the details out of the clone the app was installed from, so the
         # version shown is the version running
         dir="$(installed_dir "$url")"
-        name="$(manifest_name "$dir" "$(dir_name "$url")")"
-        comp="$(manifest_get "$dir" COMPONENTS "$(manifest_get "$dir" TYPE "?")")"
-        ver="$(manifest_get "$dir" VERSION "-")"
+        manifest_load "$dir"
+        name="${MF[NAME]:-}"
+        if [[ ! $name =~ $NAME_RE ]]; then
+            [[ -n $name ]] && warn "ignoring unusable NAME '$name' in $dir/$MANIFEST"
+            name="$(dir_name "$url")"
+            [[ $name =~ $NAME_RE ]] || name=""
+        fi
+        comp="${MF[COMPONENTS]:-${MF[TYPE]:-?}}"
+        ver="${MF[VERSION]:--}"
         comp_full="$comp"
         (( ${#comp} > 22 )) && comp="${comp:0:21}…"
-        desc="$(manifest_get "$dir" DESCRIPTION "")"
+        desc="${MF[DESCRIPTION]:-}"
         scs="$(effective_scopes "$dir" "$opts" "$url")"
         [[ -z $scs ]] && scs="$(entry_opt "$opts" scope user)"
         lbl="$(scope_label $scs)"
@@ -1588,13 +1999,22 @@ cmd_list() {
             # APPEND new fields only — the GUI indexes by position.
             # 15: the app's own icon (manifest ICON=, repo-relative) — each app
             # ships its own; the GUI draws it from the clone at field 11
-            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            # 16: where the entry comes from ("your list", "system list",
+            # "catalog NAME"); 17: for an app with a system half, 1 if root
+            # lists this URL (it can install it), 0 if it must be registered
+            # first (D4); empty otherwise
+            okey="${url%/}"; okey="${okey%.git}"; osrc="${orig[$okey]:-}"
+            [[ -n ${origl[$osrc]+x} ]] || origl[$osrc]="$(origin_label "$osrc")"
+            origin="${origl[$osrc]}"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
                 "$name" "$scs" "$comp_full" "$status" "$ver" "$url" "$desc" "${tref:-}" \
-                "$(manifest_get "$dir" CATEGORY "")" \
-                "$(manifest_get "$dir" TAGS "")" "$dir" \
-                "$(manifest_get "$dir" ROOT_REASON "")" \
+                "${MF[CATEGORY]:-}" \
+                "${MF[TAGS]:-}" "$dir" \
+                "${MF[ROOT_REASON]:-}" \
                 "$inst_scs" "$pin_ref" \
-                "$(manifest_get "$dir" ICON "")"
+                "${MF[ICON]:-}" \
+                "$origin" \
+                "$([[ $scs == *system* ]] && { root_will_know "$url" && echo 1 || echo 0; } || true)"
         else
             local col=""
             [[ $status == update-available ]] && col="$c_ylw"
@@ -1682,6 +2102,22 @@ entry_sources() { # url
     while IFS=$'\t' read -r src u o; do
         [[ -n $u && "$(norm_url "$u")" == "$want" ]] && printf '%s\n' "$src"
     done < <(app_entries_raw)
+}
+
+# where the entry for <url> comes from, said for a person: "your list",
+# "system list", or "catalog <NAME>" — shown before root is asked for (M4)
+entry_origin() { # url
+    origin_label "$(entry_sources "$1" | head -1)"
+}
+origin_label() { # list file -> "your list" | "system list" | "catalog NAME"
+    local src="$1"
+    case "$src" in
+        "") echo "" ;;
+        "$USER_LIST") echo "your list" ;;
+        "$SYS_LIST")  echo "system list" ;;
+        */apps.list)  echo "catalog $(catalog_meta "$(dirname "$src")" NAME "$(basename "$(dirname "$src")")")" ;;
+        *)            echo "$src" ;;
+    esac
 }
 
 # the kiwi app a DEPENDS word names, looked up only where that is allowed
@@ -1775,13 +2211,14 @@ cmd_info() { # [--porcelain] [--installer] name
         IFS=$'\t' read -r url opts <<<"$line"
         dir="$(sync_meta "$url" "$opts")" || die "cannot reach $url"
         scs="$(effective_scopes "$dir" "$opts" "$url")"
-        local inst; inst="$(manifest_get "$dir" INSTALLER install.sh)"
-        [[ -f "$dir/$inst" ]] || die "there is no installer '$inst' in $dir"
+        local inst ipath; inst="$(manifest_get "$dir" INSTALLER install.sh)"
+        ipath="$(installer_file "$dir")" ||
+            die "installer '$inst' is missing, a symlink, or outside $dir — kiwi would not run it"
         info "$inst from $url"
         [[ $scs == *system* ]] &&
             info "${c_ylw}this app declares the system scope, so kiwi runs this as root${c_off}"
         log ""
-        cat "$dir/$inst"
+        safe_text < "$ipath"
         return 0
     fi
 
@@ -1811,6 +2248,14 @@ cmd_info() { # [--porcelain] [--installer] name
         for dl in ${DEP_APPS[@]+"${DEP_APPS[@]}"}; do inst_first+=("$(dir_name "${dl%%$'\t'*}")"); done
         printf 'depends_missing=%s\n' "$(echo ${DEPS_MISSING[@]+"${DEPS_MISSING[@]}"} ${DEP_ELSEWHERE[@]+"${DEP_ELSEWHERE[@]}"})"
         printf 'depends_installs=%s\n' "${inst_first[*]:-}"
+        # what installing the system half would ALSO install as root (M4)
+        local sys_first=()
+        if [[ $scs == *system* ]]; then
+            plan_deps system "$url" "$deps"
+            for dl in ${DEP_APPS[@]+"${DEP_APPS[@]}"}; do sys_first+=("$(dir_name "${dl%%$'\t'*}")"); done
+        fi
+        printf 'depends_installs_system=%s\n' "${sys_first[*]:-}"
+        printf 'origin=%s\n'      "$(entry_origin "$url")"
         printf 'icon=%s\n'        "$(manifest_get "$dir" ICON "")"
         printf 'screenshots=%s\n' "$(manifest_get "$dir" SCREENSHOTS "")"
         printf 'about=%s\n'       "$(manifest_get "$dir" ABOUT README.md)"
@@ -1985,17 +2430,19 @@ cmd_diff() {
         fi
         log ""
         log "${c_bold}commits${c_off}"
-        git -C "$dir" log --oneline --no-decorate "$from..$tsha" 2>/dev/null | sed 's/^/  /'
+        # commit subjects, file names and the diff are the app author's bytes
+        git -C "$dir" log --no-color --oneline --no-decorate "$from..$tsha" 2>/dev/null | safe_text | sed 's/^/  /'
         log ""
         log "${c_bold}files${c_off}"
-        git -C "$dir" diff --stat "$from" "$tsha" 2>/dev/null | sed 's/^/  /'
-        inst="$(manifest_get "$dir" INSTALLER install.sh)"
+        git -C "$dir" -c core.quotePath=true diff --no-color --stat "$from" "$tsha" 2>/dev/null | safe_text | sed 's/^/  /'
+        inst="$(installer_name "$dir")" || {
+            warn "unusable INSTALLER in $dir — kiwi would not run it"; continue; }
         log ""
         if git -C "$dir" diff --quiet "$from" "$tsha" -- "$inst" 2>/dev/null; then
             log "${c_dim}$inst is unchanged${c_off}"
         else
             log "${c_ylw}$inst changes — this is the script that runs on update${c_off}"
-            git -C "$dir" diff "$from" "$tsha" -- "$inst" 2>/dev/null | sed 's/^/  /'
+            git -C "$dir" diff --no-color "$from" "$tsha" -- "$inst" 2>/dev/null | safe_text | sed 's/^/  /'
         fi
     done
     (( n )) || die "$app is not installed, so there is nothing to compare.
@@ -2004,7 +2451,11 @@ cmd_diff() {
 
 cmd_check() {
     sync_catalogs
-    local url opts sc n=0 target tsha tref
+    local url opts sc n=0 target tsha tref pre=()
+    while IFS=$'\t' read -r url opts; do
+        [[ -n $url ]] && is_installed_any "$url" && pre+=("$url")
+    done < <(app_entries)
+    prefetch_remotes ${pre[@]+"${pre[@]}"}
     while IFS=$'\t' read -r url opts; do
         [[ -z $url ]] && continue
         # only installed apps are worth a network round trip
@@ -2044,6 +2495,11 @@ cmd_doctor() {
         if command -v "$f" >/dev/null 2>&1; then _good "$f"
         else _bad "$f is missing — kiwi needs git, coreutils, util-linux and awk"; fi
     done
+    # git's SSH signature check (H4): without it root cannot verify a release,
+    # so system halves only update with a password
+    if command -v ssh-keygen >/dev/null 2>&1; then _good "ssh-keygen (release signatures)"
+    elif [[ -x $ROOT_KIWI ]]; then _bad "ssh-keygen is missing — root cannot check release signatures (install openssh-clients)"
+    fi
 
     info "versions"
     _good "this copy is $KIWI_VERSION ($0)"
@@ -2110,6 +2566,19 @@ $(root_skew_advice "$have")"
             _good "$f (mode $mode)"
         fi
     done
+
+    # H1: entries in root's own list that root now skips. They were followed
+    # before 2.4, so someone may rely on one without knowing it stopped.
+    if [[ -r $SYS_LIST ]]; then
+        local surl
+        while read -r surl _; do
+            [[ -z ${surl:-} || $surl == \#* ]] && continue
+            valid_url "$surl" || continue          # check_lists reports those
+            root_usable "$surl" && continue
+            _bad "root ignores '$surl' in $SYS_LIST: a local repo root does not own
+  all the way up. Use its https:// URL, or clone it somewhere root-owned and list that."
+        done < "$SYS_LIST"
+    fi
 
     info "clones"
     # Everything the user side knows about a system app is read out of
@@ -2203,8 +2672,7 @@ cmd_add() {
     done
     [[ -n $url ]] || die "usage: kiwi add <git-url> [--system]"
     valid_url "$url" || die "not a usable git url: '$url'
-expected https://…, http://… or an absolute path to a local repo."
-    [[ $url == http://* ]] && warn "http:// is not encrypted; anyone on the path can change what you install"
+expected https://… or an absolute path to a local repo (http:// is refused: anyone on the path could change what you install)."
     local scope=user f
     (( system )) && scope=system
     # There is no useful root "user" list: `kiwi add <url>` from a root shell
@@ -2216,6 +2684,9 @@ expected https://…, http://… or an absolute path to a local repo."
     fi
     f="$(list_file "$scope")"
     if [[ $scope == system && $EUID -ne 0 ]]; then
+        # the one step that decides what root may install (D4): name it
+        info "registering for root: $url"
+        info "  root will run this repo's installer, and update it without asking again"
         local rk; rk="$(root_kiwi)" || return 1
         as_root "$rk" add --system "$url"
         return
@@ -2231,6 +2702,9 @@ catalog_meta() { # dir key default
     local v=""
     [[ -f "$1/catalog.manifest" ]] && \
         v="$(grep -E "^$2=" "$1/catalog.manifest" 2>/dev/null | head -1 | cut -d= -f2-)"
+    # cleaned like manifest_get: printed to the terminal and as porcelain fields
+    v="${v//$'\t'/ }"
+    v="${v//[[:cntrl:]]/}"
     echo "${v:-$3}"
 }
 
@@ -2241,8 +2715,7 @@ cmd_catalog() { # add <url> | list      (--system routes to the system file)
             local url="${1:-}"
             [[ -n $url ]] || die "usage: kiwi catalog add <git-url> [--system]"
             valid_url "$url" || die "not a usable git url: '$url'
-expected https://…, http://… or an absolute path to a local repo."
-            [[ $url == http://* ]] && warn "http:// is not encrypted; anyone on the path can change what you install"
+expected https://… or an absolute path to a local repo (http:// is refused: anyone on the path could change what you install)."
             # root reads only the system file (catalog_urls), so as root that
             # is the one to write — the user file under /root was never read
             local f="$USER_CATALOGS"
@@ -2350,6 +2823,7 @@ kiwi $KIWI_VERSION — install and update open-source apps from git catalogs
   kiwi sync                  refresh catalogs now
   kiwi self-update           update kiwi itself
   kiwi doctor                check this install for the things that go wrong quietly
+  kiwi trust --system <app>  forget the signing key pinned for a system app
 
 Options: --user / --system (limit to one scope), --cli-only / --gui,
          --purge, --force, --dry-run, --quiet, --notify, --version
@@ -2378,7 +2852,7 @@ PURGE=0
 PORCELAIN=0
 DRY_RUN=0
 GUI_CHOICE=""      # ""=auto/keep, 0=cli-only, 1=with-gui (install/update)
-FROM_URLS=()       # install --from <url>: root records the URL it is installing
+FROM_URLS=()       # install --from <url>: from kiwi <= 2.3; since 2.4 only checked, never recorded
 DEP_APPS=(); DEP_ELSEWHERE=(); DEPS_MISSING=()   # plan_deps results
 ARGS=()
 CMD=""
@@ -2399,6 +2873,8 @@ while [[ $# -gt 0 ]]; do
         --quiet)    QUIET=1 ;;
         --notify)   NOTIFY=1 ;;
         --force)    FORCE=1 ;;
+        # the root wrapper's runs: only releases signed by the pinned key (H4)
+        --signed-only) SIGNED_ONLY=1 ;;
         --purge)    PURGE=1 ;;
         --porcelain) PORCELAIN=1 ;;
         --dry-run)  DRY_RUN=1 ;;
@@ -2420,9 +2896,18 @@ done
 
 command -v git >/dev/null 2>&1 || die "git is required (rpm-ostree install git)"
 
+# the per-run ls-remote cache (Q1). As root never under $TMPDIR: a directory
+# the user can write is one where the cache could be swapped (L1).
+case "$CMD" in
+    list|check|install|update|self-update|diff|pin|info|show)
+        if [[ $EUID -eq 0 ]]; then LSR_DIR="$(mktemp -d /tmp/kiwi-lsr.XXXXXX)" || LSR_DIR=""
+        else LSR_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kiwi-lsr.XXXXXX")" || LSR_DIR=""; fi
+        [[ -n $LSR_DIR ]] && trap 'rm -rf "$LSR_DIR"' EXIT ;;
+esac
+
 # once per invocation, for the commands that resolve or list apps
 case "$CMD" in
-    list|search|info|show|check|install|update|uninstall|self-update|pin|unpin|diff|doctor)
+    list|search|info|show|check|install|update|uninstall|self-update|pin|unpin|diff|doctor|trust)
         check_lists ;;
 esac
 
@@ -2442,25 +2927,25 @@ case "$CMD" in
     # still means "everything already installed", which is a safe default.
     install)     [[ ${#ARGS[@]} -gt 0 ]] ||
                      die "usage: kiwi install <app>... | --all   (--all installs every listed app)"
-                 # Root resolves names against its OWN lists. An install is
-                 # always authenticated, so when the user side hands over the
-                 # URL it showed the user (--from), root records it first: an
-                 # admin typing a password for "install this repo as root" is
-                 # exactly the decision the root list exists to record.
-                 # Passwordless updates later still touch only what it names.
-                 if [[ $EUID -eq 0 && ${#FROM_URLS[@]} -gt 0 ]]; then
-                     mkdir -p "$(dirname "$SYS_LIST")"; touch "$SYS_LIST"
-                     for from_url in "${FROM_URLS[@]}"; do
-                         valid_url "$from_url" || die "not a usable git url: '$from_url'"
-                         list_has "$SYS_LIST" "$from_url" ||
-                             { echo "$from_url" >> "$SYS_LIST"; info "registered $from_url for root"; }
+                 # Root resolves names against its OWN lists, and installs
+                 # only sources they name (D4). --from is what kiwi up to
+                 # 2.3 sent to have root record a URL; it is still accepted
+                 # from an older user-side kiwi, but only as a check that
+                 # root already lists that URL — it records nothing.
+                 sync_catalogs
+                 if [[ $EUID -eq 0 ]]; then
+                     for from_url in ${FROM_URLS[@]+"${FROM_URLS[@]}"}; do
+                         valid_url "$from_url" && root_knows "$from_url" ||
+                             die "root installs only sources it already lists: '$from_url'
+register it first (kiwi add --system <url>, https:// only), then install by name"
                      done
                  fi
-                 sync_catalogs; collect_targets "${ARGS[@]}"; dispatch install ;;
+                 collect_targets "${ARGS[@]}"; dispatch install ;;
     update)      sync_catalogs; collect_targets "${ARGS[@]:---all}"; dispatch update ;;
     uninstall)   [[ ${#ARGS[@]} -gt 0 ]] || die "usage: kiwi uninstall <name...>"
                  collect_targets "${ARGS[@]}"; dispatch uninstall ;;
     pin)         cmd_pin ${ARGS[@]+"${ARGS[@]}"} ;;
+    trust)       cmd_trust ${ARGS[@]+"${ARGS[@]}"} ;;
     unpin)       cmd_unpin ${ARGS[@]+"${ARGS[@]}"} ;;
     diff)        cmd_diff ${ARGS[@]+"${ARGS[@]}"} ;;
     doctor)      cmd_doctor ;;

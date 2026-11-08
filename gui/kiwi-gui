@@ -10,6 +10,7 @@ All data comes from the CLI (`kiwi list --porcelain`, `kiwi info --porcelain`),
 which stays the single source of truth. Images are read from the app's own
 cloned repo, so nothing here fetches from the network.
 """
+import functools
 import os
 import re
 import shlex
@@ -22,7 +23,8 @@ import threading
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, Gio, GLib, GObject, Gdk, Pango  # noqa: E402
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gtk, Adw, Gio, GLib, GObject, Gdk, GdkPixbuf, Pango  # noqa: E402
 
 APP_ID = "eu.kiwinetwork.KiwiUpdater"
 
@@ -393,22 +395,118 @@ def app_icon_file(app):
         return None
 
 
-def tile(app, big=False):
+# Screenshots are files from the app's repo, i.e. from someone else
+# (FIXPLAN-2.4 M8): same rules as the icon — known image types, a size cap on
+# disk, and the dimensions read from the header before anything is decoded,
+# because a 1 KB image that claims to be 60000 x 60000 px decodes to gigabytes.
+SHOT_TYPES = (".png", ".jpg", ".jpeg", ".webp")
+SHOT_MAX_BYTES = 4 * 1024 * 1024
+SHOT_MAX_PX = 4096
+
+
+def shot_file(repo_dir, rel):
+    p = repo_path(repo_dir, rel)
+    if not p or not p.lower().endswith(SHOT_TYPES) or not os.path.isfile(p):
+        return None
+    try:
+        if os.path.getsize(p) > SHOT_MAX_BYTES:
+            return None
+        fmt, w, h = GdkPixbuf.Pixbuf.get_file_info(p)
+    except (OSError, GLib.Error, TypeError, ValueError):
+        return None
+    if fmt is None or not (0 < w <= SHOT_MAX_PX and 0 < h <= SHOT_MAX_PX):
+        return None
+    return p
+
+
+_shot_cache = {}            # (path, mtime) -> Gdk.Texture; a few, they are big
+_SHOT_CACHE_MAX = 6
+
+
+def picture_async(path):
+    """A Gtk.Picture whose image is decoded off the main thread, so opening
+    an app with large screenshots does not freeze the window."""
+    pic = Gtk.Picture()
+    try:
+        key = (path, os.stat(path).st_mtime_ns)
+    except OSError:
+        return pic
+    tex = _shot_cache.get(key)
+    if tex is not None:
+        pic.set_paintable(tex)
+        return pic
+
+    def worker():
+        try:
+            t = Gdk.Texture.new_from_filename(path)
+        except GLib.Error:
+            return
+
+        def done():
+            while len(_shot_cache) >= _SHOT_CACHE_MAX:
+                _shot_cache.pop(next(iter(_shot_cache)))
+            _shot_cache[key] = t
+            pic.set_paintable(t)
+            return False
+        GLib.idle_add(done)
+
+    threading.Thread(target=worker, daemon=True).start()
+    return pic
+
+
+# An app's own icon, decoded once per (file, mtime, size) and kept (U2). The
+# list is rebuilt after every install, pin and catalog change; each rebuild
+# used to stat, open and rasterise every icon again on the main thread, and
+# they visibly blinked. Called from the refresh worker thread for the list
+# (GdkPixbuf and Gdk.MemoryTexture are safe there), on demand for the rest.
+_tex_cache = {}
+
+
+def icon_texture(path, px, scale=1):
+    try:
+        key = (path, os.stat(path).st_mtime_ns, px * scale)
+    except OSError:
+        return None
+    t = _tex_cache.get(key)
+    if t is None:
+        try:
+            pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, px * scale, px * scale, True)
+            fmt = (Gdk.MemoryFormat.R8G8B8A8 if pb.get_has_alpha()
+                   else Gdk.MemoryFormat.R8G8B8)
+            t = Gdk.MemoryTexture.new(pb.get_width(), pb.get_height(), fmt,
+                                      pb.read_pixel_bytes(), pb.get_rowstride())
+        except (GLib.Error, TypeError, ValueError):
+            return None
+        _tex_cache[key] = t
+    return t
+
+
+def tile(app, big=False, scale=1):
     """The app's own icon when it ships one; otherwise a tinted rounded tile
-    with a themed glyph centred inside it.
+    with a themed glyph centred inside it. Both in the same tile, so every
+    app's icon has the same shape and sits in the same place (U2).
 
     Each app owns its icon (ICON= in its manifest, the file in its repo); kiwi
-    only shows it. Through a FileIcon, so GTK's icon loader renders the SVG at
-    the requested size instead of scaling a 128 px bitmap down — crisp at the
-    46 px of a list row."""
-    own = app_icon_file(app)
-    if own:
-        img = Gtk.Image.new_from_gicon(Gio.FileIcon.new(Gio.File.new_for_path(own)))
-        img.set_pixel_size(96 if big else 46)
-        img.set_halign(Gtk.Align.START)
+    only shows it, rendered at the device scale so an SVG stays crisp."""
+    px = 96 if big else 46
+    tex = getattr(app, "tex", None) if not big else None
+    if tex is None:
+        own = app_icon_file(app)
+        if own:
+            tex = icon_texture(own, px, scale)
+    if tex is not None:
+        img = Gtk.Image.new_from_paintable(tex)
+        img.set_pixel_size(px)
+        img.set_halign(Gtk.Align.CENTER)
         img.set_valign(Gtk.Align.CENTER)
-        img.set_hexpand(False)
-        return img
+        box = Gtk.Box()
+        box.append(img)
+        box.add_css_class("kiwi-bigtile" if big else "kiwi-tile")
+        box.set_overflow(Gtk.Overflow.HIDDEN)      # the tile's rounded corners
+        box.set_halign(Gtk.Align.START)
+        box.set_valign(Gtk.Align.CENTER)
+        box.set_hexpand(False)
+        return box
 
     # The image needs to expand and centre itself: a plain Gtk.Box lays its
     # child out at the start, so the icon sits in the corner of the tile and
@@ -462,13 +560,32 @@ class Card(Gtk.Widget):
         Gtk.Widget.do_dispose(self)
 
 
+def parse_porcelain(text):
+    """`kiwi list --porcelain` -> [(line, fields dict)]. Field positions are
+    the CLI's contract: append-only, never reordered."""
+    rows = []
+    for line in text.splitlines():
+        p = line.split("\t")
+        if len(p) < 7:
+            continue
+        f = lambda i: p[i] if len(p) > i else ""  # noqa: E731
+        rows.append((line, dict(
+            name=p[0], scopes=p[1], comp=p[2], status=p[3], ver=p[4],
+            url=p[5], desc=p[6], tref=f(7), category=f(8), tags=f(9),
+            repo_dir=f(10), root_reason=f(11), installed_scopes=f(12),
+            pinned=f(13), icon=f(14), origin=f(15), root_known=f(16))))
+    return rows
+
+
 class App(GObject.Object):
     """One app, as the CLI described it."""
     __gtype_name__ = "KiwiApp"
 
-    def __init__(self, d):
+    def __init__(self, d, line="", tex=None):
         super().__init__()
         self.d = d
+        self.line = line        # the porcelain line it was built from (U2 diff)
+        self.tex = tex          # its own icon, decoded off the main thread
 
     def __getitem__(self, k):
         return self.d.get(k, "")
@@ -549,7 +666,7 @@ class ShotDialog(Adw.Dialog):
         self.car = Adw.Carousel(allow_scroll_wheel=True, spacing=24,
                                 hexpand=True, vexpand=True)
         for path in paths:
-            pic = Gtk.Picture.new_for_filename(path)
+            pic = picture_async(path)
             pic.set_content_fit(Gtk.ContentFit.CONTAIN)
             pic.set_can_shrink(True)
             pic.add_css_class("kiwi-shot")
@@ -597,7 +714,7 @@ class ShotDialog(Adw.Dialog):
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
                       halign=Gtk.Align.CENTER)
         for i, path in enumerate(self.paths):
-            pic = Gtk.Picture.new_for_filename(path)
+            pic = picture_async(path)
             pic.set_content_fit(Gtk.ContentFit.COVER)
             pic.set_size_request(104, 62)
             pic.add_css_class("kiwi-shot")
@@ -690,7 +807,7 @@ class DetailDialog(Adw.Dialog):
     def _build_header(self):
         a = self.app
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18)
-        self.big_icon = tile(a, big=True)
+        self.big_icon = tile(a, big=True, scale=self.win.get_scale_factor())
         self.big_icon.set_valign(Gtk.Align.START)
         row.append(self.big_icon)
 
@@ -759,7 +876,7 @@ class DetailDialog(Adw.Dialog):
     def _pin(self, ref):
         name = self.app["name"]
         self.close()
-        self.win.run_cli(["pin", name, ref] if ref else ["unpin", name])
+        self.win.run_cli(["pin", "--", name, ref] if ref else ["unpin", "--", name])
 
     # ---- what is about to run -------------------------------------------
     def _inspect_group(self, info):
@@ -773,13 +890,13 @@ class DetailDialog(Adw.Dialog):
 
         e = Adw.ExpanderRow(title="Installer",
                             subtitle=esc(info.get("installer") or "install.sh"))
-        self._lazy_text(e, [self.win.kiwi, "info", "--installer", name])
+        self._lazy_text(e, [self.win.kiwi, "info", "--installer", "--", name])
         g.add(e)
 
         if self.app["status"] == "update-available":
             e2 = Adw.ExpanderRow(title="What this update changes",
                                  subtitle="commits, files, and the installer's own diff")
-            self._lazy_text(e2, [self.win.kiwi, "diff", name])
+            self._lazy_text(e2, [self.win.kiwi, "diff", "--", name])
             g.add(e2)
         return g
 
@@ -824,7 +941,7 @@ class DetailDialog(Adw.Dialog):
 
     def _load(self):
         try:
-            out = subprocess.run([self.win.kiwi, "info", "--porcelain", self.app["name"]],
+            out = subprocess.run([self.win.kiwi, "info", "--porcelain", "--", self.app["name"]],
                                  capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120).stdout
         except Exception as e:  # noqa: BLE001
             out = ""
@@ -839,7 +956,7 @@ class DetailDialog(Adw.Dialog):
         self.box.remove(self._placeholder)
         rd = info.get("repo_dir", "")
 
-        shots = [repo_path(rd, p) for p in info.get("screenshots", "").split()]
+        shots = [shot_file(rd, p) for p in info.get("screenshots", "").split()]
         shots = [p for p in shots if p]
         if shots:
             # spacing, so two screenshots stop touching; and each one opens a
@@ -848,7 +965,7 @@ class DetailDialog(Adw.Dialog):
             car = Adw.Carousel(allow_scroll_wheel=False, spacing=14)
             car.set_size_request(-1, 320)
             for i, p in enumerate(shots):
-                pic = Gtk.Picture.new_for_filename(p)
+                pic = picture_async(p)
                 pic.set_content_fit(Gtk.ContentFit.CONTAIN)
                 pic.add_css_class("kiwi-shot")
                 btn = Gtk.Button(child=pic, tooltip_text="Open full size")
@@ -868,12 +985,17 @@ class DetailDialog(Adw.Dialog):
             if info.get(key):
                 facts.add(Adw.ActionRow(title=label, subtitle=esc(info[key])))
                 got = True
-        if info.get("homepage"):
-            r = Adw.ActionRow(title="Homepage", subtitle=esc(info["homepage"]),
-                              activatable=True)
-            r.add_suffix(Gtk.Image(icon_name=ui_icon("adw-external-link-symbolic", "external-link", "go-jump")))
-            r.connect("activated", lambda *_: Gtk.UriLauncher(
-                uri=info["homepage"]).launch(self.win, None, None, None))
+        hp = info.get("homepage", "")
+        if hp:
+            # Only a web page is opened. HOMEPAGE=file:///… or another scheme
+            # would hand the app author's choice of URI to whatever handler the
+            # desktop has for it; anything else is shown as text (M8).
+            web = bool(re.match(r"^https://[^\s]+$", hp))
+            r = Adw.ActionRow(title="Homepage", subtitle=esc(hp), activatable=web)
+            if web:
+                r.add_suffix(Gtk.Image(icon_name=ui_icon("adw-external-link-symbolic", "external-link", "go-jump")))
+                r.connect("activated", lambda *_, u=hp: Gtk.UriLauncher(
+                    uri=u).launch(self.win, None, None, None))
             facts.add(r)
             got = True
         if got:
@@ -947,7 +1069,12 @@ class DetailDialog(Adw.Dialog):
         about = repo_path(rd, info.get("about", ""))
         if about:
             try:
-                text = open(about, encoding="utf-8", errors="replace").read()
+                # capped: the README is the app author's file, and a huge one
+                # would sit in memory and in the layout (M8)
+                with open(about, encoding="utf-8", errors="replace") as f:
+                    text = f.read(65536)
+                    if f.read(1):
+                        text += "\n\n*(truncated — the full README is in the repository)*\n"
             except OSError:
                 text = ""
             if text.strip():
@@ -1064,7 +1191,7 @@ class CatalogDialog(Adw.Dialog):
         if not url:
             return
         self.entry.set_text("")
-        self.win.run_catalog(["catalog", "add", url], self)
+        self.win.run_catalog(["catalog", "add", "--", url], self)
 
     def _remove(self, url, name):
         dlg = Adw.AlertDialog(
@@ -1075,7 +1202,7 @@ class CatalogDialog(Adw.Dialog):
         dlg.add_response("remove", "Remove")
         dlg.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
         dlg.connect("response", lambda _d, r: r == "remove"
-                    and self.win.run_catalog(["catalog", "remove", url], self))
+                    and self.win.run_catalog(["catalog", "remove", "--", url], self))
         dlg.present(self)
 
 
@@ -1146,7 +1273,19 @@ class Window(Adw.ApplicationWindow):
         super().__init__(application=app, title="Kiwi Apps")
         self.set_icon_name(APP_ID)
         self.kiwi = kiwi
-        self.busy = False
+        self.busy = False        # something runs: an action or a refresh (UI state)
+        # U1: clicks made while something runs are queued, never dropped. kiwi
+        # takes the scope lock, so two at once would make the second wait and
+        # fail; and nothing may start during `list --check`, which runs git in
+        # the same clones.
+        self.queue = []          # pending jobs, see _enqueue
+        self.acting = False      # a queued job is running
+        self.refreshing = False  # list --check is running
+        self._refresh_wanted = False
+        self._active_names = []  # the names the running action is about
+        self._btns = {}          # app name -> its action buttons (both views)
+        self._bound = None       # which view is bound to the model (U2)
+        self._unbound = Gio.ListStore(item_type=App)   # what the hidden view shows
         self._pulse = None
         self.set_default_size(980, 800)
         self.set_size_request(360, 420)
@@ -1155,15 +1294,17 @@ class Window(Adw.ApplicationWindow):
         self.store = Gio.ListStore(item_type=App)
         self.filtered = Gtk.FilterListModel(
             model=self.store, filter=Gtk.CustomFilter.new(self._match))
-        self.sorted = Gtk.SortListModel(
-            model=self.filtered, sorter=Gtk.CustomSorter.new(self._compare))
+        # The store itself is kept in display order (populate, _resort). A
+        # Gtk.SortListModel on top reported a one-row change as a change to
+        # every row before it, and the views rebuilt all of those (U2).
+        self.sorted = self.filtered
 
         header = Adw.HeaderBar()
         self.title = Adw.WindowTitle(title="Kiwi Apps", subtitle="")
         header.set_title_widget(self.title)
         self.btn_refresh = Gtk.Button(icon_name=ui_icon("view-refresh-symbolic", "view-refresh"),
                                       tooltip_text="Refresh and check for updates")
-        self.btn_refresh.connect("clicked", lambda *_: self.refresh())
+        self.btn_refresh.connect("clicked", lambda *_: self.refresh(check_only=True))
         header.pack_start(self.btn_refresh)
         self.btn_updateall = Gtk.Button(label="Update All")
         self.btn_updateall.add_css_class("suggested-action")
@@ -1255,13 +1396,12 @@ class Window(Adw.ApplicationWindow):
             selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
             min_children_per_line=1, max_children_per_line=8,
             row_spacing=12, column_spacing=12, valign=Gtk.Align.START)
-        self.gridbox.bind_model(self.sorted, self._make_card)
+        # bound in _bind_views: only the visible one (U2)
         self.gridbox.connect("child-activated",
                              lambda _fb, ch: self._open(ch.get_child().app))
 
         self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         self.listbox.add_css_class("boxed-list")
-        self.listbox.bind_model(self.sorted, self._make_row)
         self.listbox.connect("row-activated", self._on_row_activated)
         self.listbox.set_header_func(self._header)
 
@@ -1331,11 +1471,33 @@ class Window(Adw.ApplicationWindow):
         bp.connect("apply", lambda *_: self._set_narrow(True))
         bp.connect("unapply", lambda *_: self._set_narrow(False))
         self.add_breakpoint(bp)
+        self._bind_views()
+        # 4. a different icon theme can have different icons (U2)
+        settings = Gtk.Settings.get_default()
+        if settings is not None:
+            settings.connect("notify::gtk-icon-theme-name", lambda *_: _icon_cache.clear())
 
         self.refresh()
 
+    def _bind_views(self):
+        """Only the visible view holds widgets (U2). Both used to be bound to
+        the same model, so every card AND every row was built, and every icon
+        drawn twice, for a view nobody could see."""
+        want = "rows" if self.narrow else "grid"
+        if self._bound == want:
+            return
+        # an empty model, not None: PyGObject will not pass a NULL widget func
+        if want == "grid":
+            self.listbox.bind_model(self._unbound, self._make_row)
+            self.gridbox.bind_model(self.sorted, self._make_card)
+        else:
+            self.gridbox.bind_model(self._unbound, self._make_card)
+            self.listbox.bind_model(self.sorted, self._make_row)
+        self._bound = want
+
     def _set_narrow(self, narrow):
         self.narrow = narrow
+        self._bind_views()
         self.sort_label.set_visible(not narrow)
         self.viewstack.set_visible_child_name("rows" if narrow else "grid")
         # the toolbar has to sit in the same column as the content, or the
@@ -1392,7 +1554,8 @@ class Window(Adw.ApplicationWindow):
         GLib.idle_add(self._set_narrow, self.narrow)
 
     def _resort(self):
-        self.sorted.get_sorter().changed(Gtk.SorterChange.DIFFERENT)
+        items = sorted(self._all(), key=functools.cmp_to_key(self._compare))
+        self.store.splice(0, self.store.get_n_items(), items)
         self.listbox.invalidate_headers()
 
     def _update_empty(self):
@@ -1416,6 +1579,8 @@ class Window(Adw.ApplicationWindow):
         """The one thing you can do to this app right now."""
         st = app["status"]
         btn = Gtk.Button(valign=Gtk.Align.CENTER, halign=Gtk.Align.END)
+        if (st in ("update-available", "partial") or not app.is_installed):
+            self._btns.setdefault(app["name"], []).append(btn)
         if st == "update-available":
             btn.set_label("Update")
             btn.add_css_class("suggested-action")
@@ -1434,6 +1599,11 @@ class Window(Adw.ApplicationWindow):
                 btn.set_icon_name(ui_icon("go-next-symbolic", "go-next"))
             btn.add_css_class("flat")
             btn.connect("clicked", lambda *_: self._open(app))
+        # what to go back to when a kept card's job is over (U1 + U2)
+        btn.kiwi_label = btn.get_label()
+        btn.kiwi_suggested = btn.has_css_class("suggested-action")
+        if app["name"] in self._pending_names():
+            self._mark_btn(btn, "Running…" if app["name"] in self._active_names else "Queued")
         return btn
 
     # A card is a fixed-width tile; the grid decides how many fit. Height comes
@@ -1448,7 +1618,7 @@ class Window(Adw.ApplicationWindow):
         card.add_css_class("kiwi-card")
 
         head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        head.append(tile(app))
+        head.append(tile(app, scale=self.get_scale_factor()))
         text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1,
                        hexpand=True, halign=Gtk.Align.FILL,
                        valign=Gtk.Align.CENTER)
@@ -1513,7 +1683,7 @@ class Window(Adw.ApplicationWindow):
         row.set_subtitle(GLib.markup_escape_text(app["desc"] or app["comp"]))
         row.set_subtitle_lines(1)
         row.app = app
-        row.add_prefix(tile(app))
+        row.add_prefix(tile(app, scale=self.get_scale_factor()))
 
         row.optional = []
         for p in scope_pills(app):
@@ -1574,44 +1744,100 @@ class Window(Adw.ApplicationWindow):
     def _open_doctor(self):
         DoctorDialog(self).present(self)
 
-    def refresh(self):
-        if self.busy:
-            return
-        self.set_busy(True, "Checking for updates…")
+    def refresh(self, check_only=False):
+        """Re-read the listing — once, after whatever is queued has run.
 
-        def worker():
+        Two steps (FIXPLAN-2.4 Q2): `list --no-sync` first, which only reads
+        local files and takes well under a second, so the window shows what
+        is installed at once; then `list --check`, which asks every remote,
+        and whose answer is applied as a diff (U2) — only the cards whose
+        status changed move. The Refresh button skips the first step."""
+        if self.acting or self.queue:
+            self._refresh_wanted = True
+            return
+        if self.refreshing:
+            return
+        self._refresh_wanted = False
+        self.refreshing = True
+        self.set_busy(True, "Checking for updates…")
+        scale = self.get_scale_factor()
+
+        def listing(flag):
             try:
-                out = subprocess.run([self.kiwi, "list", "--porcelain", "--check"],
-                                     capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=600).stdout
+                out = subprocess.run([self.kiwi, "list", "--porcelain", flag],
+                                     capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                                     timeout=600).stdout
             except Exception as e:  # noqa: BLE001
                 out = ""
                 GLib.idle_add(self.append_log, "refresh failed: %s\n" % e)
-            GLib.idle_add(self.populate, out)
+            rows = parse_porcelain(out)
+            texs = {}
+            for line, d in rows:
+                own = app_icon_file(d)
+                if own:
+                    texs[line] = icon_texture(own, 46, scale)
+            return rows, texs
+
+        def worker():
+            if not check_only:
+                rows, texs = listing("--no-sync")
+                if rows:
+                    GLib.idle_add(self.populate, rows, texs, True)
+            rows, texs = listing("--check")
+            GLib.idle_add(self.populate, rows, texs)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def populate(self, porcelain):
-        self.store.remove_all()
-        cats, updates = set(), 0
-        for line in porcelain.splitlines():
-            p = line.split("\t")
-            if len(p) < 7:
+    def populate(self, rows, texs=None, partial=False):
+        """Bring the store in line with a fresh listing, touching only what
+        changed (U2). Rows whose porcelain line is the same keep their App
+        object, so their cards and rows — icon, scroll position, a "Queued"
+        label — survive; only the changed run in the middle is spliced."""
+        texs = texs or {}
+        rows = sorted(rows, key=functools.cmp_to_key(lambda x, y: self._compare(x[1], y[1])))
+        # One small edit per difference: a row whose line is unchanged stays
+        # put (its widget too), a row that moved is moved, a changed one is
+        # replaced in place. A single wide splice would rebuild every card it
+        # covered, and a sort by status moves rows on most refreshes.
+        new_set = {line for line, _ in rows}
+        for k in range(self.store.get_n_items() - 1, -1, -1):   # gone or changed: out first
+            if self.store.get_item(k).line not in new_set:
+                self.store.remove(k)
+        i = 0
+        for line, d in rows:
+            n = self.store.get_n_items()
+            cur = self.store.get_item(i) if i < n else None
+            if cur is not None and cur.line == line:
+                i += 1
                 continue
-            d = dict(name=p[0], scopes=p[1], comp=p[2], status=p[3], ver=p[4],
-                     url=p[5], desc=p[6],
-                     tref=p[7] if len(p) > 7 else "",
-                     category=p[8] if len(p) > 8 else "",
-                     tags=p[9] if len(p) > 9 else "",
-                     repo_dir=p[10] if len(p) > 10 else "",
-                     root_reason=p[11] if len(p) > 11 else "",
-                     installed_scopes=p[12] if len(p) > 12 else "",
-                     pinned=p[13] if len(p) > 13 else "",
-                     icon=p[14] if len(p) > 14 else "")
-            if d["status"] == "update-available":
-                updates += 1
-            if d["category"]:
-                cats.add(d["category"])
-            self.store.append(App(d))
+            j = next((k for k in range(i + 1, n)
+                      if self.store.get_item(k).line == line), None)
+            if j is not None:
+                obj = self.store.get_item(j)
+                self.store.remove(j)
+                self.store.insert(i, obj)
+            else:
+                self.store.insert(i, App(d, line, texs.get(line)))
+            i += 1
+        n = self.store.get_n_items()
+        if n > i:
+            self.store.splice(i, n - i, [])
+        # drop buttons whose card or row is gone; a kept one whose job is over
+        # (failed, so its row did not change) gets its own label back
+        self._btns = {n: [b for b in bs if b.get_root() is not None]
+                      for n, bs in self._btns.items()}
+        pending = self._pending_names()
+        for n, bs in self._btns.items():
+            if n in pending:
+                continue
+            for b in bs:
+                if not b.get_sensitive() and getattr(b, "kiwi_label", None):
+                    b.set_label(b.kiwi_label)
+                    b.set_sensitive(True)
+                    if b.kiwi_suggested:
+                        b.add_css_class("suggested-action")
+        cats = {a["category"] for a in self._all() if a["category"]}
+        updates = sum(1 for a in self._all() if a["status"] == "update-available")
 
         self._build_chips(sorted(cats))
 
@@ -1630,10 +1856,16 @@ class Window(Adw.ApplicationWindow):
             self.hero_text.set_label("Everything is up to date")
         self.hero_sub.set_label(
             "%d app%s available · %d installed" % (n, "" if n == 1 else "s", inst))
-        self.set_busy(False, "")
-        self.title.set_subtitle("%d app%s" % (n, "" if n == 1 else "s"))
         self._refilter()
         self._set_narrow(self.narrow)
+        if partial:              # the local half: the remotes are still being asked
+            self.title.set_subtitle("Checking for updates…")
+            return False
+        self.refreshing = False
+        self.set_busy(False, "")
+        self.title.set_subtitle("%d app%s" % (n, "" if n == 1 else "s"))
+        if self.queue:           # clicked while the listing was being checked
+            self._next_job()
         return False
 
     def _build_chips(self, cats):
@@ -1665,26 +1897,75 @@ class Window(Adw.ApplicationWindow):
 
     def _confirm_root(self, verb, names, root_apps):
         """Installing an app that declares the system scope runs its installer
-        as root. Say that, and say why, while it is still a decision — not at
-        the password prompt, by which point the choice has been made."""
-        parts = []
-        for a in root_apps:
-            parts.append("<b>%s</b>\n%s" % (
-                esc(a["name"]),
-                esc(a["root_reason"]
-                    or "installs files and services outside your home directory")))
-        dlg = Adw.AlertDialog(
-            heading="Install with root access?",
-            body="\n\n".join(parts) + "\n\nYou will be asked to authenticate.")
+        as root. Say that, why, WHERE FROM, and what else comes along as root
+        (FIXPLAN-2.4 M4) — while it is still a decision, not at the password
+        prompt, which shows none of it. The extra apps come from
+        `kiwi info --porcelain`, so they are looked up off the main thread."""
+        self.title.set_subtitle("Checking what runs as root…")
+        apps = [(a["name"], a["url"], a["origin"], a["root_known"], a["root_reason"])
+                for a in root_apps]
+
+        def worker():
+            also = {}
+            for name, *_ in apps:
+                try:
+                    out = subprocess.run([self.kiwi, "info", "--porcelain", "--", name],
+                                         capture_output=True, text=True,
+                                         stdin=subprocess.DEVNULL, timeout=120).stdout
+                except Exception:  # noqa: BLE001
+                    out = ""
+                for line in out.splitlines():
+                    if line.startswith("depends_installs_system="):
+                        also[name] = line.split("=", 1)[1].split()
+            GLib.idle_add(self._show_confirm_root, verb, names, apps, also)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_confirm_root(self, verb, names, apps, also):
+        parts, unknown = [], []
+        for name, url, origin, known, reason in apps:
+            t = "<b>%s</b>\n%s\n<small>from %s%s</small>" % (
+                esc(name),
+                esc(reason or "installs files and services outside your home directory"),
+                esc(url), (" (%s)" % esc(origin)) if origin else "")
+            if also.get(name):
+                t += "\n<small>also installs as root: %s</small>" % esc(", ".join(also[name]))
+            if known == "0":
+                t += "\n<small>root does not list this source yet</small>"
+                unknown.append(url)
+            parts.append(t)
+        if unknown:
+            # D4: root installs only sources it lists. Registering one is its
+            # own step, and it names the URL — so is this button.
+            tail = ("\n\nRoot installs only sources it has been told about. "
+                    "Registering lets root install and update %s; you will be asked "
+                    "to authenticate for that, and again for the install."
+                    % ("it" if len(unknown) == 1 else "them"))
+            go = ("register", "Register and Install")
+        else:
+            tail = "\n\nYou will be asked to authenticate."
+            go = ("install", "Install")
+        dlg = Adw.AlertDialog(heading="Install with root access?",
+                              body="\n\n".join(parts) + tail)
         dlg.set_body_use_markup(True)
         dlg.add_response("cancel", "Cancel")
-        dlg.add_response("install", "Install")
-        dlg.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
+        dlg.add_response(*go)
+        dlg.set_response_appearance(go[0], Adw.ResponseAppearance.SUGGESTED)
         dlg.set_default_response("cancel")
         dlg.set_close_response("cancel")
-        dlg.connect("response", lambda _d, r: r == "install"
-                    and self.run_action(verb, names, confirmed=True))
+
+        def on_response(_d, r):
+            if r == "register":
+                for u in unknown:
+                    self.run_cli(["add", "--system", "--", u])
+            if r in ("register", "install"):
+                self.run_action(verb, names, confirmed=True)
+        dlg.connect("response", on_response)
+        if not self.busy:
+            n = self.store.get_n_items()
+            self.title.set_subtitle("%d app%s" % (n, "" if n == 1 else "s"))
         dlg.present(self)
+        return False
 
     def _confirm_uninstall(self, names):
         """Removing a catalog asks first; removing an actual app did not —
@@ -1712,7 +1993,7 @@ class Window(Adw.ApplicationWindow):
         dlg.present(self)
 
     def run_action(self, verb, names, confirmed=False, purge=False):
-        if self.busy or not names:
+        if not names:
             return
         if verb == "uninstall" and not confirmed:
             self._confirm_uninstall(names)
@@ -1724,19 +2005,91 @@ class Window(Adw.ApplicationWindow):
             if root_apps:
                 self._confirm_root(verb, names, root_apps)
                 return
-        self.set_busy(True, "%s %d app(s)…" % (verb.capitalize(), len(names)))
-        self._spawn([self.kiwi, verb] + (["--purge"] if purge else []) + list(names),
-                    lambda rc: self.after_action(rc, verb))
+        self._mark_queued(names)     # _next_job relabels them "Running…" if they start now
+        self._enqueue(dict(kind="action", verb=verb, names=list(names), purge=purge),
+                      "%s %s" % (verb, ", ".join(names)))
 
     def run_catalog(self, args, dialog):
         """Catalog changes alter where every app comes from, so the whole
         listing is rebuilt afterwards."""
-        self._spawn([self.kiwi] + list(args),
-                    lambda rc: self._after_catalog(rc, dialog))
+        self._enqueue(dict(kind="cli", args=list(args),
+                           after=lambda rc: self._after_catalog(rc, dialog)),
+                      " ".join(args[:2]))
 
     def run_cli(self, args):
         """Any other state-changing CLI call — pin, unpin — same treatment."""
-        self._spawn([self.kiwi] + list(args), self._after_cli)
+        self._enqueue(dict(kind="cli", args=list(args), after=self._after_cli),
+                      args[0])
+
+    # ---- the job queue (U1) -------------------------------------------
+    def _enqueue(self, job, what):
+        self.queue.append(job)
+        if self.acting or self.refreshing:
+            self.toast("Queued: %s" % what)
+            return
+        self._next_job()
+
+    def _next_job(self):
+        if self.acting or self.refreshing:
+            return False
+        if not self.queue:
+            self._active_names = []
+            self.set_busy(False, "")
+            if self._refresh_wanted:
+                self.refresh()   # once, after the whole batch
+            return False
+        job = self.queue.pop(0)
+        if job["kind"] == "action":
+            verb, purge, names = job["verb"], job["purge"], list(job["names"])
+            # Fold the queued jobs of the same kind into one call: one lock,
+            # one root confirmation already given, and one password prompt —
+            # dispatch hands every system half to a single as_root.
+            while (self.queue and self.queue[0]["kind"] == "action"
+                   and self.queue[0]["verb"] == verb and self.queue[0]["purge"] == purge):
+                names += [n for n in self.queue.pop(0)["names"] if n not in names]
+            self._active_names = names
+            self._mark_queued(names, "Running…")
+            # "--": a name is data from a catalog and must never read as an option.
+            # A repo called --all.git used to make Install run `kiwi install --all`.
+            argv = [self.kiwi, verb] + (["--purge"] if purge else []) + ["--"] + names
+            label = "%s %s…" % (verb.capitalize(), ", ".join(names))
+            after = (lambda rc, v=verb: self.toast(
+                "%s finished" % v.capitalize() if rc == 0
+                else "%s failed — see the output" % v.capitalize()))
+        else:
+            self._active_names = []
+            argv = [self.kiwi] + job["args"]
+            label = "Working…"
+            after = job["after"]
+        self.acting = True
+        self.set_busy(True, label)
+        self._spawn(argv, lambda rc: self._job_done(rc, after))
+        return False
+
+    def _job_done(self, rc, after):
+        self.acting = False
+        after(rc)
+        self._refresh_wanted = True
+        return self._next_job()
+
+    def _pending_names(self):
+        names = set(self._active_names)
+        for j in self.queue:
+            if j["kind"] == "action":
+                names.update(j["names"])
+        return names
+
+    @staticmethod
+    def _mark_btn(btn, label):
+        btn.set_label(label)
+        btn.remove_css_class("suggested-action")
+        btn.set_sensitive(False)
+
+    def _mark_queued(self, names, label="Queued"):
+        """A click has to visibly do something, even when it only queues."""
+        for n in names:
+            for btn in self._btns.get(n, ()):
+                self._mark_btn(btn, label)
 
     def _spawn(self, cmd, done):
         """Run a kiwi command, streaming its output into the log pane.
@@ -1765,24 +2118,14 @@ class Window(Adw.ApplicationWindow):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    # the refresh after these runs once the queue is empty (_job_done)
     def _after_cli(self, rc):
         self.toast("Done" if rc == 0 else "Failed — see the output")
-        self.refresh()
-        return False
 
     def _after_catalog(self, rc, dialog):
         self.toast("Catalogs updated" if rc == 0 else "Catalog change failed")
         if dialog is not None:
             dialog.reload()
-        self.refresh()
-        return False
-
-    def after_action(self, rc, verb):
-        self.set_busy(False, "")
-        self.toast("%s finished" % verb.capitalize() if rc == 0
-                   else "%s failed — see the output" % verb.capitalize())
-        self.refresh()
-        return False
 
     def set_busy(self, busy, msg):
         self.busy = busy

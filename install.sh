@@ -47,6 +47,11 @@ done
 
 # the official catalog, preregistered on every install
 DEFAULT_CATALOG="https://github.com/derlocke-ng/kiwi-catalog.git"
+# where root's kiwi comes from and updates itself from (FIXPLAN-2.4 M5) —
+# decided here, never read out of the checkout this script happens to run from.
+# A root-owned /etc/kiwi-updater/self-url can name another source (a fork, or
+# the test suite's fixture); nothing in the environment can.
+CANONICAL_URL="https://github.com/derlocke-ng/kiwi-updater.git"
 
 # GUI parts are skipped on headless machines (no GTK4 stack), with
 # --cli-only / KIWI_GUI=0 as explicit overrides. Not based on $DISPLAY —
@@ -109,8 +114,103 @@ list_has() { # file url
     return 1
 }
 
+# --- root's own source (M5) ---------------------------------------------------
+# a local path root may follow: it and every parent root-owned, nobody else can write
+root_owned_chain() { # path or file:// url
+    local p st owner mode
+    p="$(realpath -e -- "${1#file://}" 2>/dev/null)" || return 1
+    while :; do
+        st="$(stat -c '%u %a' -- "$p" 2>/dev/null)" || return 1
+        read -r owner mode <<<"$st"
+        [[ $owner == 0 ]] && (( (8#$mode & 8#022) == 0 )) || return 1
+        [[ $p == / ]] && return 0
+        p="$(dirname -- "$p")"
+    done
+}
+
+self_url() {
+    local f="$SYS_CONF/self-url" u=""
+    if [[ -f $f ]] && root_owned_chain "$f"; then
+        u="$(grep -Ev '^[[:space:]]*(#|$)' "$f" | head -1 || true)"; u="${u%%[[:space:]]*}"
+    fi
+    [[ -n $u ]] || u="$CANONICAL_URL"
+    if [[ $u != https://* ]] && ! root_owned_chain "$u"; then
+        echo "error: $f names '$u' — neither https:// nor a local repo root owns all the way up" >&2
+        exit 1
+    fi
+    echo "$u"
+}
+
+# git as root against remote data, as kiwi does it: no credentials, https or
+# local only, no hooks, every received object checked
+rgit() {
+    GIT_TERMINAL_PROMPT=0 GIT_ALLOW_PROTOCOL=https:file \
+        git -c credential.helper= -c core.hooksPath=/dev/null -c transfer.fsckObjects=true "$@"
+}
+
+latest_release() { # clone -> its newest version tag (same rule as kiwi), or nothing
+    git -C "$1" tag -l | grep -E '^v?[0-9]+(\.[0-9]+){0,3}$' | sort -V | tail -1 || true
+}
+
+ROOT_CLONE="$SYS_DATA/repos/kiwi-updater"
+
+# Is this script root's own clone, which only root can write?
+running_from_root_clone() {
+    [[ "$(realpath "$SRC")" == "$(realpath -m "$ROOT_CLONE")" ]] && root_owned_chain "$SRC" &&
+        [[ -z "$(find "$SRC" \( ! -uid 0 -o -perm -0002 \) -print -quit 2>/dev/null)" ]]
+}
+
+# The bootstrap runs THIS file as root from the user's checkout — the one
+# documented exception, because no root-owned copy exists yet. It used to
+# install bin/kiwi, the wrapper and the polkit rule from that checkout, and
+# register the checkout's origin as root's self-update source: whatever
+# controlled the account at that moment decided, permanently, what root runs
+# and where it updates from. Now this copy only fetches kiwi's own source as
+# root, checks out its latest release, and hands over to the install.sh in it.
+root_from_own_clone() {
+    local url tag
+    mkdir -p "$SYS_DATA/repos"; chmod 755 "$SYS_DATA" "$SYS_DATA/repos"
+    if [[ -d $ROOT_CLONE/.git ]]; then
+        root_owned_chain "$ROOT_CLONE" ||
+            { echo "error: $ROOT_CLONE is not root-owned all the way up — refusing to use it" >&2; exit 1; }
+        url="$(git -C "$ROOT_CLONE" remote get-url origin 2>/dev/null || true)"
+        rgit -C "$ROOT_CLONE" fetch --quiet --tags origin
+    else
+        url="$(self_url)"
+        rm -rf "$ROOT_CLONE"
+        rgit clone --quiet -- "$url" "$ROOT_CLONE"
+    fi
+    tag="$(latest_release "$ROOT_CLONE")"
+    [[ -z $tag ]] || rgit -C "$ROOT_CLONE" -c advice.detachedHead=false checkout --quiet "$tag"
+    chmod -R a+rX "$ROOT_CLONE"
+    say "installing the system scope from $url${tag:+ ($tag)} — not from $SRC"
+    exec bash "$ROOT_CLONE/install.sh" "$ACTION" ${SYSTEM_MODE:+--with-system=$SYSTEM_MODE}
+}
+
+has_self_entry() { # list-file -> is any entry a repo called kiwi-updater?
+    local u
+    [[ -r $1 ]] || return 1
+    while read -r u _; do
+        [[ -z ${u:-} || $u == \#* ]] && continue
+        u="${u%/}"; u="${u%.git}"; [[ ${u##*/} == kiwi-updater ]] && return 0
+    done < "$1"
+    return 1
+}
+
 register_self() { # list-file repos-dir
-    local url; url="$(origin_url)"
+    local url
+    if [[ $EUID -eq 0 ]]; then
+        # Root's self-update source is root's decision (M5): kept if root's
+        # list already names one, otherwise the canonical URL (or self-url).
+        if has_self_entry "$1"; then
+            [[ -d "$2/kiwi-updater/.git" ]] && git -C "$2/kiwi-updater" rev-parse HEAD > "$2/kiwi-updater/.kiwi-installed"
+            say "self-update source kept (root's list already names it)"
+            return 0
+        fi
+        url="$(self_url)"
+    else
+        url="$(origin_url)"
+    fi
     if [[ -z $url ]]; then
         say "note: no git origin found — self-update not registered"
         return 0
@@ -118,7 +218,7 @@ register_self() { # list-file repos-dir
     list_has "$1" "$url" || echo "$url" >> "$1"
     local d="$2/kiwi-updater"
     if [[ "$(realpath "$SRC")" != "$(realpath -m "$d")" && ! -d "$d/.git" ]]; then
-        git clone --quiet "$url" "$d"
+        if [[ $EUID -eq 0 ]]; then rgit clone --quiet -- "$url" "$d"; else git clone --quiet "$url" "$d"; fi
     fi
     [[ -d "$d/.git" ]] && git -C "$d" rev-parse HEAD > "$d/.kiwi-installed"
     say "self-update registered ($url)"
@@ -330,7 +430,12 @@ case "$ACTION" in install|update|uninstall) ;; *)
 esac
 
 if [[ $EUID -eq 0 ]]; then
-    # invoked as root (the system service, or the bootstrap below)
+    # invoked as root (the system service, or the bootstrap below). Root
+    # installs kiwi only from its own clone (M5); from anywhere else this
+    # script just fetches that and hands over.
+    if [[ $ACTION != uninstall ]] && ! running_from_root_clone; then
+        root_from_own_clone
+    fi
     "root_$ACTION"
 elif (( WITH_SYSTEM )) && [[ $ACTION == install ]]; then
     user_install

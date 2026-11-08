@@ -368,6 +368,8 @@ remote desktop sessions can report as non-local.
   usual collision is the background timer; if it still cannot get the lock it
   names the host and pid holding it. Every network git call is bounded by
   `KIWI_NET_TIMEOUT` (180s) so a stalled fetch cannot hold the lock forever.
+  Both are read only by the user-side kiwi: root ignores every `KIWI_*`
+  tuning variable in its environment and uses the defaults.
 - The GUI is a thin layer over `kiwi list --porcelain` — the CLI is the single
   source of truth. It shows which scopes an app is actually installed in, can
   pin and unpin, and shows an app's installer and an update's diff before you

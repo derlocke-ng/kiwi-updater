@@ -42,6 +42,13 @@ behaviour someone may rely on; those say so.
   as root on every background run (git network and pack parsing as root
   against any host a catalog names), and as a slow first `kiwi update` on a new
   machine. Not-installed apps are now skipped before anything is fetched.
+- **Root reads no `KIWI_*` tuning from its environment** (L1). Under
+  `sudo -E` or an `env_keep` rule, `KIWI_FETCH_JOBS='PATH[$(cmd)]'` was
+  command execution: bash evaluates array subscripts in arithmetic. Root now
+  unsets `KIWI_NET_TIMEOUT`, `KIWI_FETCH_JOBS`, `KIWI_LOCK_WAIT`, `KIWI_GUI` and
+  `KIWI_DEP_STACK` (only `KIWI_UNATTENDED`, which can only suppress prompts,
+  is kept), and every numeric setting is checked to be a plain number before
+  use, as any user too.
 - **Tab completion no longer runs code from a catalog** (H2). `compgen -W`
   expands its word list, so an entry like `https://…/$(cmd).git` — whose
   basename becomes the app's name when the repo has no usable `NAME` — ran

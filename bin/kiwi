@@ -143,7 +143,17 @@ if [[ $EUID -eq 0 ]]; then
     USER_CATALOGS="$USER_CONFIG_DIR/catalogs.list"
     USER_REPOS="$USER_DATA_DIR/repos"
     USER_PREFIX=/root/.local
+    # Nor any tuning (FIXPLAN-2.4 L1). pkexec and systemd clean the
+    # environment; `sudo -E` or an env_keep entry does not, and
+    # KIWI_FETCH_JOBS='PATH[$(cmd)]' was command execution in an arithmetic
+    # context. KIWI_UNATTENDED stays: it only ever suppresses prompts.
+    unset KIWI_NET_TIMEOUT KIWI_FETCH_JOBS KIWI_LOCK_WAIT KIWI_GUI KIWI_DEP_STACK
 fi
+
+# a number from the environment, or the default — never evaluated as an expression
+env_num() { # value default
+    if [[ ${1:-} =~ ^[0-9]+$ ]]; then echo "$1"; else echo "$2"; fi
+}
 
 MANIFEST="kiwi.manifest"
 LS_REMOTE_TIMEOUT=10
@@ -151,7 +161,7 @@ LS_REMOTE_TIMEOUT=10
 # link hangs the background timer, and because that run holds the scope lock,
 # every later kiwi command fails with "another instance is already running"
 # until the machine is rebooted. Observed in the field; this is the fix.
-NET_TIMEOUT="${KIWI_NET_TIMEOUT:-180}"
+NET_TIMEOUT="$(env_num "${KIWI_NET_TIMEOUT:-}" 180)"
 
 # kiwi only ever reads PUBLIC repos — never prompt for credentials
 # (no terminal prompt, no askpass popup, no keyring credential helper)
@@ -512,7 +522,8 @@ effective_scopes() { # dir opts url
 # catalog of fifty tools strictly one after another is the slowest part of a
 # first `kiwi list` by a wide margin.
 sync_all_meta() {
-    local url opts line todo=() running=0 max="${KIWI_FETCH_JOBS:-4}"
+    local url opts line todo=() running=0 max
+    max="$(env_num "${KIWI_FETCH_JOBS:-}" 4)"; (( max > 0 )) || max=4
     while IFS=$'\t' read -r url opts; do
         [[ -z $url ]] && continue
         [[ -d "$(meta_dir)/$(dir_name "$url")/.git" ]] && continue
@@ -1000,7 +1011,8 @@ acquire_lock() { # scope
     # Wait a little before giving up. The overwhelmingly common collision is the
     # background update timer firing while you type a command, and that is over
     # in seconds — failing instantly turns a non-event into an error.
-    if ! flock -w "${KIWI_LOCK_WAIT:-20}" 9; then
+    local wait_s; wait_s="$(env_num "${KIWI_LOCK_WAIT:-}" 20)"
+    if ! flock -w "$wait_s" 9; then
         local who host
         who="$(head -1 "$lock" 2>/dev/null || true)"
         host="${who%% *}"
@@ -1011,7 +1023,7 @@ Wait for that run to finish, or raise KIWI_LOCK_WAIT."
         fi
         die "another kiwi is already running ($1 scope)${who:+: $who}.
 The background update timer may have it; it normally finishes in seconds.
-Retry, or raise KIWI_LOCK_WAIT (currently ${KIWI_LOCK_WAIT:-20}s)."
+Retry, or raise KIWI_LOCK_WAIT (currently ${wait_s}s)."
     fi
 
     # record who holds it, so the next caller can say something useful

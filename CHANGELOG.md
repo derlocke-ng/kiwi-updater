@@ -40,6 +40,17 @@ behaviour someone may rely on; those say so.
   a visible `^[` and other control characters as `?`; catalog names and
   descriptions are cleaned like manifest values.
 
+### GUI
+
+- **You can install several apps in a row** (U1). While anything ran, every
+  other Install/Update/Uninstall click was silently dropped — from the detail
+  view the dialog even closed first — and after each action a full
+  `list --check` blocked the next click for 10–20 s. Clicks are now queued:
+  the button says "Queued", then "Running…"; queued jobs of the same kind run
+  as one `kiwi install -- a b c` (one lock, one password prompt); pin, unpin
+  and catalog changes wait their turn instead of colliding with the lock; and
+  the listing refreshes once, after the whole batch.
+
 ## 2.3.2 — 2026-10-29
 
 - **DEPENDS examples follow the kiwi-proxy split.** The provider plugins now

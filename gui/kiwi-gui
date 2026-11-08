@@ -1146,7 +1146,17 @@ class Window(Adw.ApplicationWindow):
         super().__init__(application=app, title="Kiwi Apps")
         self.set_icon_name(APP_ID)
         self.kiwi = kiwi
-        self.busy = False
+        self.busy = False        # something runs: an action or a refresh (UI state)
+        # U1: clicks made while something runs are queued, never dropped. kiwi
+        # takes the scope lock, so two at once would make the second wait and
+        # fail; and nothing may start during `list --check`, which runs git in
+        # the same clones.
+        self.queue = []          # pending jobs, see _enqueue
+        self.acting = False      # a queued job is running
+        self.refreshing = False  # list --check is running
+        self._refresh_wanted = False
+        self._active_names = []  # the names the running action is about
+        self._btns = {}          # app name -> its action buttons (both views)
         self._pulse = None
         self.set_default_size(980, 800)
         self.set_size_request(360, 420)
@@ -1416,6 +1426,8 @@ class Window(Adw.ApplicationWindow):
         """The one thing you can do to this app right now."""
         st = app["status"]
         btn = Gtk.Button(valign=Gtk.Align.CENTER, halign=Gtk.Align.END)
+        if (st in ("update-available", "partial") or not app.is_installed):
+            self._btns.setdefault(app["name"], []).append(btn)
         if st == "update-available":
             btn.set_label("Update")
             btn.add_css_class("suggested-action")
@@ -1434,6 +1446,8 @@ class Window(Adw.ApplicationWindow):
                 btn.set_icon_name(ui_icon("go-next-symbolic", "go-next"))
             btn.add_css_class("flat")
             btn.connect("clicked", lambda *_: self._open(app))
+        if app["name"] in self._pending_names():
+            self._mark_btn(btn, "Running…" if app["name"] in self._active_names else "Queued")
         return btn
 
     # A card is a fixed-width tile; the grid decides how many fit. Height comes
@@ -1575,8 +1589,14 @@ class Window(Adw.ApplicationWindow):
         DoctorDialog(self).present(self)
 
     def refresh(self):
-        if self.busy:
+        """Re-read the listing — once, after whatever is queued has run."""
+        if self.acting or self.queue:
+            self._refresh_wanted = True
             return
+        if self.refreshing:
+            return
+        self._refresh_wanted = False
+        self.refreshing = True
         self.set_busy(True, "Checking for updates…")
 
         def worker():
@@ -1591,6 +1611,7 @@ class Window(Adw.ApplicationWindow):
         threading.Thread(target=worker, daemon=True).start()
 
     def populate(self, porcelain):
+        self._btns = {}          # every card and row is rebuilt below
         self.store.remove_all()
         cats, updates = set(), 0
         for line in porcelain.splitlines():
@@ -1630,10 +1651,13 @@ class Window(Adw.ApplicationWindow):
             self.hero_text.set_label("Everything is up to date")
         self.hero_sub.set_label(
             "%d app%s available · %d installed" % (n, "" if n == 1 else "s", inst))
+        self.refreshing = False
         self.set_busy(False, "")
         self.title.set_subtitle("%d app%s" % (n, "" if n == 1 else "s"))
         self._refilter()
         self._set_narrow(self.narrow)
+        if self.queue:           # clicked while the listing was being checked
+            self._next_job()
         return False
 
     def _build_chips(self, cats):
@@ -1712,7 +1736,7 @@ class Window(Adw.ApplicationWindow):
         dlg.present(self)
 
     def run_action(self, verb, names, confirmed=False, purge=False):
-        if self.busy or not names:
+        if not names:
             return
         if verb == "uninstall" and not confirmed:
             self._confirm_uninstall(names)
@@ -1724,21 +1748,91 @@ class Window(Adw.ApplicationWindow):
             if root_apps:
                 self._confirm_root(verb, names, root_apps)
                 return
-        self.set_busy(True, "%s %d app(s)…" % (verb.capitalize(), len(names)))
-        # "--": a name is data from a catalog and must never read as an option.
-        # A repo called --all.git used to make Install run `kiwi install --all`.
-        self._spawn([self.kiwi, verb] + (["--purge"] if purge else []) + ["--"] + list(names),
-                    lambda rc: self.after_action(rc, verb))
+        self._mark_queued(names)     # _next_job relabels them "Running…" if they start now
+        self._enqueue(dict(kind="action", verb=verb, names=list(names), purge=purge),
+                      "%s %s" % (verb, ", ".join(names)))
 
     def run_catalog(self, args, dialog):
         """Catalog changes alter where every app comes from, so the whole
         listing is rebuilt afterwards."""
-        self._spawn([self.kiwi] + list(args),
-                    lambda rc: self._after_catalog(rc, dialog))
+        self._enqueue(dict(kind="cli", args=list(args),
+                           after=lambda rc: self._after_catalog(rc, dialog)),
+                      " ".join(args[:2]))
 
     def run_cli(self, args):
         """Any other state-changing CLI call — pin, unpin — same treatment."""
-        self._spawn([self.kiwi] + list(args), self._after_cli)
+        self._enqueue(dict(kind="cli", args=list(args), after=self._after_cli),
+                      args[0])
+
+    # ---- the job queue (U1) -------------------------------------------
+    def _enqueue(self, job, what):
+        self.queue.append(job)
+        if self.acting or self.refreshing:
+            self.toast("Queued: %s" % what)
+            return
+        self._next_job()
+
+    def _next_job(self):
+        if self.acting or self.refreshing:
+            return False
+        if not self.queue:
+            self._active_names = []
+            self.set_busy(False, "")
+            if self._refresh_wanted:
+                self.refresh()   # once, after the whole batch
+            return False
+        job = self.queue.pop(0)
+        if job["kind"] == "action":
+            verb, purge, names = job["verb"], job["purge"], list(job["names"])
+            # Fold the queued jobs of the same kind into one call: one lock,
+            # one root confirmation already given, and one password prompt —
+            # dispatch hands every system half to a single as_root.
+            while (self.queue and self.queue[0]["kind"] == "action"
+                   and self.queue[0]["verb"] == verb and self.queue[0]["purge"] == purge):
+                names += [n for n in self.queue.pop(0)["names"] if n not in names]
+            self._active_names = names
+            self._mark_queued(names, "Running…")
+            # "--": a name is data from a catalog and must never read as an option.
+            # A repo called --all.git used to make Install run `kiwi install --all`.
+            argv = [self.kiwi, verb] + (["--purge"] if purge else []) + ["--"] + names
+            label = "%s %s…" % (verb.capitalize(), ", ".join(names))
+            after = (lambda rc, v=verb: self.toast(
+                "%s finished" % v.capitalize() if rc == 0
+                else "%s failed — see the output" % v.capitalize()))
+        else:
+            self._active_names = []
+            argv = [self.kiwi] + job["args"]
+            label = "Working…"
+            after = job["after"]
+        self.acting = True
+        self.set_busy(True, label)
+        self._spawn(argv, lambda rc: self._job_done(rc, after))
+        return False
+
+    def _job_done(self, rc, after):
+        self.acting = False
+        after(rc)
+        self._refresh_wanted = True
+        return self._next_job()
+
+    def _pending_names(self):
+        names = set(self._active_names)
+        for j in self.queue:
+            if j["kind"] == "action":
+                names.update(j["names"])
+        return names
+
+    @staticmethod
+    def _mark_btn(btn, label):
+        btn.set_label(label)
+        btn.remove_css_class("suggested-action")
+        btn.set_sensitive(False)
+
+    def _mark_queued(self, names, label="Queued"):
+        """A click has to visibly do something, even when it only queues."""
+        for n in names:
+            for btn in self._btns.get(n, ()):
+                self._mark_btn(btn, label)
 
     def _spawn(self, cmd, done):
         """Run a kiwi command, streaming its output into the log pane.
@@ -1767,24 +1861,14 @@ class Window(Adw.ApplicationWindow):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    # the refresh after these runs once the queue is empty (_job_done)
     def _after_cli(self, rc):
         self.toast("Done" if rc == 0 else "Failed — see the output")
-        self.refresh()
-        return False
 
     def _after_catalog(self, rc, dialog):
         self.toast("Catalogs updated" if rc == 0 else "Catalog change failed")
         if dialog is not None:
             dialog.reload()
-        self.refresh()
-        return False
-
-    def after_action(self, rc, verb):
-        self.set_busy(False, "")
-        self.toast("%s finished" % verb.capitalize() if rc == 0
-                   else "%s failed — see the output" % verb.capitalize())
-        self.refresh()
-        return False
 
     def set_busy(self, busy, msg):
         self.busy = busy

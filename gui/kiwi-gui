@@ -1304,7 +1304,7 @@ class Window(Adw.ApplicationWindow):
         header.set_title_widget(self.title)
         self.btn_refresh = Gtk.Button(icon_name=ui_icon("view-refresh-symbolic", "view-refresh"),
                                       tooltip_text="Refresh and check for updates")
-        self.btn_refresh.connect("clicked", lambda *_: self.refresh())
+        self.btn_refresh.connect("clicked", lambda *_: self.refresh(check_only=True))
         header.pack_start(self.btn_refresh)
         self.btn_updateall = Gtk.Button(label="Update All")
         self.btn_updateall.add_css_class("suggested-action")
@@ -1744,8 +1744,14 @@ class Window(Adw.ApplicationWindow):
     def _open_doctor(self):
         DoctorDialog(self).present(self)
 
-    def refresh(self):
-        """Re-read the listing — once, after whatever is queued has run."""
+    def refresh(self, check_only=False):
+        """Re-read the listing — once, after whatever is queued has run.
+
+        Two steps (FIXPLAN-2.4 Q2): `list --no-sync` first, which only reads
+        local files and takes well under a second, so the window shows what
+        is installed at once; then `list --check`, which asks every remote,
+        and whose answer is applied as a diff (U2) — only the cards whose
+        status changed move. The Refresh button skips the first step."""
         if self.acting or self.queue:
             self._refresh_wanted = True
             return
@@ -1756,10 +1762,11 @@ class Window(Adw.ApplicationWindow):
         self.set_busy(True, "Checking for updates…")
         scale = self.get_scale_factor()
 
-        def worker():
+        def listing(flag):
             try:
-                out = subprocess.run([self.kiwi, "list", "--porcelain", "--check"],
-                                     capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=600).stdout
+                out = subprocess.run([self.kiwi, "list", "--porcelain", flag],
+                                     capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                                     timeout=600).stdout
             except Exception as e:  # noqa: BLE001
                 out = ""
                 GLib.idle_add(self.append_log, "refresh failed: %s\n" % e)
@@ -1769,11 +1776,19 @@ class Window(Adw.ApplicationWindow):
                 own = app_icon_file(d)
                 if own:
                     texs[line] = icon_texture(own, 46, scale)
+            return rows, texs
+
+        def worker():
+            if not check_only:
+                rows, texs = listing("--no-sync")
+                if rows:
+                    GLib.idle_add(self.populate, rows, texs, True)
+            rows, texs = listing("--check")
             GLib.idle_add(self.populate, rows, texs)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def populate(self, rows, texs=None):
+    def populate(self, rows, texs=None, partial=False):
         """Bring the store in line with a fresh listing, touching only what
         changed (U2). Rows whose porcelain line is the same keep their App
         object, so their cards and rows — icon, scroll position, a "Queued"
@@ -1841,11 +1856,14 @@ class Window(Adw.ApplicationWindow):
             self.hero_text.set_label("Everything is up to date")
         self.hero_sub.set_label(
             "%d app%s available · %d installed" % (n, "" if n == 1 else "s", inst))
+        self._refilter()
+        self._set_narrow(self.narrow)
+        if partial:              # the local half: the remotes are still being asked
+            self.title.set_subtitle("Checking for updates…")
+            return False
         self.refreshing = False
         self.set_busy(False, "")
         self.title.set_subtitle("%d app%s" % (n, "" if n == 1 else "s"))
-        self._refilter()
-        self._set_narrow(self.narrow)
         if self.queue:           # clicked while the listing was being checked
             self._next_job()
         return False

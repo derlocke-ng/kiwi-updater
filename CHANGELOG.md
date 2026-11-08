@@ -141,6 +141,11 @@ behaviour someone may rely on; those say so.
   a refresh changes only the cards whose app changed; only the visible view
   is built; and an app's own icon sits in the same rounded tile as the
   fallback glyph, so every icon has the same shape and place.
+- **The window shows your apps at once** (Q2). It waited for
+  `kiwi list --check` — a round trip to every remote — before showing
+  anything. It now shows the local state first (`list --no-sync`, well under a
+  second) and fills in update status when the check returns; offline, the list
+  still appears immediately. The Refresh button only re-runs the check.
 
 ## 2.3.2 — 2026-10-29
 

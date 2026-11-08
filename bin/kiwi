@@ -920,9 +920,50 @@ local_head() { # repo_dir
 }
 
 # resolve the commit an app should be at: ref= pin > branch= > latest tag > HEAD
+# One `git ls-remote` per URL per run (FIXPLAN-2.4 Q1). remote_target is asked
+# about the same URL from refresh_meta, the status check, scope_target_sha and
+# sync_repo — two or three network round trips per app, strictly one after
+# another. The cache is a directory, not a variable, because most callers run
+# inside $(...). A failure is cached too: an unreachable remote costs one
+# timeout, not three.
+LSR_DIR=""
+ls_remote() { # url -> its `git ls-remote` output
+    if [[ -z $LSR_DIR || ! -d $LSR_DIR ]]; then
+        timeout "$LS_REMOTE_TIMEOUT" git ls-remote --quiet -- "$1" 2>/dev/null
+        return
+    fi
+    local k="${1//%/%25}"; k="${k//\//%2F}"           # reversible, so no two URLs share a file
+    if (( ${#k} > 200 )); then k="$(printf '%s' "$1" | sha1sum)"; k="${k%% *}"; fi
+    k="$LSR_DIR/$k"
+    [[ -f $k.fail ]] && return 1
+    if [[ ! -f $k ]]; then
+        # named once, here: a redirection is expanded in the forked child,
+        # where $BASHPID is already another number
+        local tmp="$k.$BASHPID"
+        if timeout "$LS_REMOTE_TIMEOUT" git ls-remote --quiet -- "$1" > "$tmp" 2>/dev/null; then
+            mv -f "$tmp" "$k"
+        else
+            rm -f "$tmp"; : > "$k.fail"; return 1
+        fi
+    fi
+    local o; o="$(<"$k")"; printf '%s\n' "$o"
+}
+
+# warm that cache for many URLs at once, a few at a time
+prefetch_remotes() { # url...
+    local u running=0 max
+    max="$(env_num "${KIWI_FETCH_JOBS:-}" 4)"; (( max > 0 )) || max=4
+    for u in "$@"; do
+        ( ls_remote "$u" >/dev/null ) &
+        running=$((running+1))
+        if (( running >= max )); then wait -n 2>/dev/null || true; running=$((running-1)); fi
+    done
+    wait
+}
+
 remote_target() { # url opts -> "sha<TAB>refname"; empty output on failure
     local url="$1" opts="${2:-}" out sha="" ref branch tag
-    out="$(timeout "$LS_REMOTE_TIMEOUT" git ls-remote --quiet -- "$url" 2>/dev/null)" || return 1
+    out="$(ls_remote "$url")" || return 1
     [[ -n $out ]] || return 1
     ref="$(entry_opt "$opts" ref "")"
     branch="$(entry_opt "$opts" branch "")"
@@ -1383,6 +1424,14 @@ collect_targets() { # all|names...
         (( skipped )) && exit 0
         die "no apps matched (see 'kiwi list')"
     fi
+    # an update asks every target's remote: ask them all at once first (Q1)
+    if [[ $CMD == update || $CMD == self-update ]]; then
+        local -A seen_u=(); local pu pre=()
+        for pu in "${T_URL[@]}"; do
+            [[ -n ${seen_u[$pu]:-} ]] || { seen_u[$pu]=1; pre+=("$pu"); }
+        done
+        prefetch_remotes "${pre[@]}"
+    fi
 }
 
 # --dry-run: say exactly what would happen and change nothing. Deliberately
@@ -1704,6 +1753,15 @@ cmd_list() {
     done
     (( check )) && sync_catalogs
     (( nosync )) || sync_all_meta
+    if (( check )); then
+        # every remote this listing will ask about, asked in parallel first
+        local pu pre=()
+        while IFS=$'\t' read -r pu _; do
+            [[ -z $pu ]] && continue
+            if is_installed_any "$pu" || [[ -d "$(meta_dir)/$(dir_name "$pu")/.git" ]]; then pre+=("$pu"); fi
+        done < <(app_entries)
+        prefetch_remotes ${pre[@]+"${pre[@]}"}
+    fi
 
     local url opts dir name comp comp_full ver desc scs lbl status target tsha tref sc
     local found=0 inst miss any_root=0 inst_scs pin_ref
@@ -2214,7 +2272,11 @@ cmd_diff() {
 
 cmd_check() {
     sync_catalogs
-    local url opts sc n=0 target tsha tref
+    local url opts sc n=0 target tsha tref pre=()
+    while IFS=$'\t' read -r url opts; do
+        [[ -n $url ]] && is_installed_any "$url" && pre+=("$url")
+    done < <(app_entries)
+    prefetch_remotes ${pre[@]+"${pre[@]}"}
     while IFS=$'\t' read -r url opts; do
         [[ -z $url ]] && continue
         # only installed apps are worth a network round trip
@@ -2646,6 +2708,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 command -v git >/dev/null 2>&1 || die "git is required (rpm-ostree install git)"
+
+# the per-run ls-remote cache (Q1). As root never under $TMPDIR: a directory
+# the user can write is one where the cache could be swapped (L1).
+case "$CMD" in
+    list|check|install|update|self-update|diff|pin|info|show)
+        if [[ $EUID -eq 0 ]]; then LSR_DIR="$(mktemp -d /tmp/kiwi-lsr.XXXXXX)" || LSR_DIR=""
+        else LSR_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kiwi-lsr.XXXXXX")" || LSR_DIR=""; fi
+        [[ -n $LSR_DIR ]] && trap 'rm -rf "$LSR_DIR"' EXIT ;;
+esac
 
 # once per invocation, for the commands that resolve or list apps
 case "$CMD" in

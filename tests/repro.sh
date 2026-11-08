@@ -996,11 +996,14 @@ t_P34() { # a self-update that replaced both copies does not report the fresh ro
     # now". Reproduced exactly: old code in memory (bash -c), new file at $0.
     install -Dm755 $K /usr/local/bin/kiwi
     install -Dm755 $K $TH/.local/bin/kiwi; chown -R $T $TH/.local
-    local old; old="$(sed 's/^KIWI_VERSION=.*/KIWI_VERSION=0.0.1/' $K)"
+    # the old code in a file and SOURCED, with $0 still the path on disk: a
+    # `bash -c "$old"` stopped working once bin/kiwi outgrew the kernel's
+    # 128 KiB limit for one argument
+    sed 's/^KIWI_VERSION=.*/KIWI_VERSION=0.0.1/' $K > /tmp/kt-old-kiwi; chmod 644 /tmp/kt-old-kiwi
     mkapp a skewapp user
     ku add $GITROOT/a/skewapp.git >/dev/null; ku install skewapp >/dev/null 2>&1
     local out; out="$(runuser -u $T -- env -i HOME=$TH USER=$T PATH=$STUBS:/usr/bin:/bin KIWI_LOCK_WAIT=3 \
-        bash -c "$old" $TH/.local/bin/kiwi update skewapp </dev/null 2>&1)"
+        bash -c 'source /tmp/kt-old-kiwi "$@"' $TH/.local/bin/kiwi update skewapp </dev/null 2>&1)"
     f() { ! grep -q 'root-owned copy of kiwi is' <<<"$out" && grep -q 'skewapp' <<<"$out"; }
     check P34 "no false version-skew warning from the old process that just updated both copies" f
 }

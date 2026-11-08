@@ -78,6 +78,12 @@ behaviour someone may rely on; those say so.
   (or the one in a root-owned `/etc/kiwi-updater/self-url`). *Changes
   behaviour:* running `install.sh --with-system` from a development checkout
   installs the latest *release* as root, not your working tree.
+- **Checking for updates asks each remote once, in parallel** (Q1).
+  `kiwi list --check`, `kiwi check` and `kiwi update` asked the same remote
+  two or three times per app, strictly one after another — the wait behind
+  the GUI's refresh. Each run now asks every remote once, a few at a time
+  (`KIWI_FETCH_JOBS`, default 4), and remembers the answer for the rest of
+  the run; an unreachable remote costs one timeout instead of three.
 - **Tab completion no longer runs code from a catalog** (H2). `compgen -W`
   expands its word list, so an entry like `https://…/$(cmd).git` — whose
   basename becomes the app's name when the repo has no usable `NAME` — ran

@@ -8,6 +8,19 @@ history actually lives.
 Security release from the 2.3.2 audit (`FIXPLAN-2.4.md`). Some entries change
 behaviour someone may rely on; those say so.
 
+- **Root updates without a password only to signed releases** (H4).
+  Whoever could push a tag to an app with a system half — or take over its
+  account, or a CI token — had root on every machine with the system scope
+  within hours. Root now pins one SSH signing key per system app (trust on
+  first use: at your authenticated install, or from the release already
+  installed on machines from before 2.4) and checks every release before it is
+  checked out. Passwordless updates need a version tag signed by that key; an
+  unsigned release, a branch or `HEAD` waits for your password and says it
+  could not be verified; a release signed by another key is refused either
+  way until `kiwi trust --system <app>`. Needs `ssh-keygen` (openssh-clients,
+  in the Fedora Atomic images). *Changes behaviour:* system apps whose
+  releases are not signed no longer update in the background — kiwi-updater's
+  own releases are signed from 2.4.0 on.
 - **Root no longer follows a local repo it does not own** (H1). *Migration:*
   if you ran `kiwi add --system /home/…/repo` (or root ever recorded a local
   path for you), root now skips that entry — `kiwi doctor` lists it. Use the

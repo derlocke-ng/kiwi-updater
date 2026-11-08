@@ -12,11 +12,12 @@
 # Run it in a throwaway container, never on your real machine:
 #
 #   podman run --rm -v "$PWD":/src:ro,Z fedora:latest bash -c \
-#     'dnf -y -q install git-core gawk util-linux shadow-utils procps-ng python3 openssl >/dev/null && bash /src/tests/repro.sh'
+#     'dnf -y -q install git-core gawk util-linux shadow-utils procps-ng python3 openssl openssh-clients >/dev/null && bash /src/tests/repro.sh'
 #
 # gawk matters: fedora:latest ships no awk, and without it remote_target fails
 # on every app, so checks "pass" because nothing can be reached at all.
-# openssl makes S1's https test server (kiwi refuses http:// since 2.4).
+# openssl makes S1's https test server (kiwi refuses http:// since 2.4);
+# openssh-clients is git's SSH signature check, which root relies on (H4).
 #
 #   bash tests/repro.sh F1 F6      # run only some checks (F9 runs as part of F8)
 set -uo pipefail
@@ -26,7 +27,7 @@ if [[ ! -f /run/.containerenv && ! -f /.dockerenv && ${KIWI_REPRO_FORCE:-0} != 1
     exit 2
 fi
 [[ $EUID -eq 0 ]] || { echo "must run as root (inside the container)" >&2; exit 2; }
-for c in git awk sed grep flock timeout runuser useradd pkill openssl; do
+for c in git awk sed grep flock timeout runuser useradd pkill openssl ssh-keygen; do
     command -v "$c" >/dev/null || { echo "missing: $c (the suite would report false passes without it)" >&2; exit 2; }
 done
 
@@ -91,6 +92,26 @@ mkcat() { # owner name url...
       printf 'NAME=%s\nDESCRIPTION=test catalog\n' "$n" > catalog.manifest &&
       git add -A && git commit -qm cat && git clone -q --bare . $GITROOT/"$o"/"$n".git )
     chown -R $T $GITROOT/"$o"
+}
+# Two release-signing keys (H4), made once per run and kept outside /tmp/kt-*,
+# which reset() clears: KEYA is "the project's" key, KEYB someone else's.
+KEYS=/opt/kiwi-keys; KEYA=$KEYS/a; KEYB=$KEYS/b
+if [[ ! -f $KEYA ]]; then
+    mkdir -p $KEYS
+    ssh-keygen -q -t ed25519 -N '' -C kt-a -f $KEYA; ssh-keygen -q -t ed25519 -N '' -C kt-b -f $KEYB
+fi
+# resign owner name tag key -> replace an app's (mkapp) tag with a signed one
+resign() {
+    ( cd /tmp/kt-work-"$1"-"$2" &&
+      git -c gpg.format=ssh -c user.signingkey="$4" tag -f -s "$3" -m "$3" "$3^{commit}" >/dev/null &&
+      git push -q -f origin "refs/tags/$3" )
+}
+# release_signed owner name tag key -> like release, with an SSH-signed tag
+release_signed() {
+    ( cd /tmp/kt-work-"$1"-"$2" && sed -i "s/^VERSION=.*/VERSION=${3#v}/" kiwi.manifest &&
+      git commit -qam "release $3" &&
+      git -c gpg.format=ssh -c user.signingkey="$4" tag -s "$3" -m "$3" &&
+      git push -q origin HEAD --tags )
 }
 # rootfix owner name -> prints the path of a root-owned copy of $GITROOT/owner/name.git
 # Root follows a local path only if it and every parent are root-owned (H1).
@@ -851,6 +872,7 @@ printf "#!/bin/sh\necho probe-ok\n" > "$KIWI_PREFIX/bin/pathprobe-$KIWI_SCOPE"
 chmod +x "$KIWI_PREFIX/bin/pathprobe-$KIWI_SCOPE"
 pathprobe-$KIWI_SCOPE'
     mkapp a pathprobe "user system" "$body"
+    resign a pathprobe v1.0.0 $KEYA            # the wrapper updates signed releases only (H4)
     local u; u="$(rootfix a pathprobe)"
     mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
     echo "$u" > /etc/kiwi-updater/apps.list
@@ -859,7 +881,7 @@ pathprobe-$KIWI_SCOPE'
     kr install --system pathprobe >/dev/null 2>&1; local rs=$?
     install -Dm755 $K /usr/local/bin/kiwi
     install -Dm755 $W/data/kiwi-system-update /usr/local/libexec/kiwi-system-update
-    release a pathprobe v1.1.0; rootfix a pathprobe >/dev/null
+    release_signed a pathprobe v1.1.0 $KEYA; rootfix a pathprobe >/dev/null
     env -i HOME=/root USER=root PATH=/usr/sbin:/usr/bin:/sbin:/bin:/root/bin \
         bash /usr/local/libexec/kiwi-system-update pathprobe >/dev/null 2>&1
     local want got
@@ -1269,10 +1291,49 @@ t_Q4() { # a plain 'kiwi update' with nothing installed fetches nothing
     check Q4 "'kiwi update' with none of 5 catalog apps installed makes no clone (made: $made)" f
 }
 
+t_H4() { # root updates without a password only to releases signed by the key it pinned
+    mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
+    install -Dm755 $K /usr/local/bin/kiwi
+    install -Dm755 $W/data/kiwi-system-update /usr/local/libexec/kiwi-system-update
+    wrap() { env -i HOME=/root USER=root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+                 bash /usr/local/libexec/kiwi-system-update "$1" >/dev/null 2>&1; }
+    at() { head -1 /var/lib/kiwi-updater/repos/$1/.kiwi-installed 2>/dev/null; }
+    is() { [[ "$(at "$1")" == "$(git -C /tmp/kt-work-a-"$1" rev-parse "$2^{commit}")" ]] && echo "$2" || echo "not-$2"; }
+    local r=()
+    # (a) unsigned: installs with a password; the wrapper does not update it, a password does
+    mkapp a h4u system; rootfix a h4u >> /etc/kiwi-updater/apps.list
+    kr install --system h4u >/dev/null 2>&1
+    release a h4u v1.1.0; rootfix a h4u >/dev/null
+    wrap h4u;                          r+=("unsigned/wrapper=$(is h4u v1.0.0)")
+    kr update --system h4u >/dev/null 2>&1; r+=("unsigned/password=$(is h4u v1.1.0)")
+    # (b) signed by the project's key: pinned at install, the wrapper updates it
+    mkapp a h4s system; resign a h4s v1.0.0 $KEYA; rootfix a h4s >> /etc/kiwi-updater/apps.list
+    kr install --system h4s >/dev/null 2>&1
+    local pinned=no; [[ -s /etc/kiwi-updater/signers/h4s ]] && pinned=yes; r+=("pinned=$pinned")
+    release_signed a h4s v1.1.0 $KEYA; rootfix a h4s >/dev/null
+    wrap h4s;                          r+=("signed/wrapper=$(is h4s v1.1.0)")
+    # (c) signed by another key: refused with or without a password, until `kiwi trust`
+    release_signed a h4s v1.2.0 $KEYB; rootfix a h4s >/dev/null
+    wrap h4s;                          r+=("otherkey/wrapper=$(is h4s v1.1.0)")
+    kr update --system h4s >/dev/null 2>&1; r+=("otherkey/password=$(is h4s v1.1.0)")
+    kr trust --system h4s >/dev/null 2>&1
+    kr update --system h4s >/dev/null 2>&1; r+=("trusted-again=$(is h4s v1.2.0)")
+    # (d) an unsigned tag of an app whose releases are signed: refused, password or not
+    release a h4s v1.3.0; rootfix a h4s >/dev/null
+    kr update --system h4s >/dev/null 2>&1; r+=("unsigned-after-signed=$(is h4s v1.2.0)")
+    # (e) installed before 2.4 (no pin): the wrapper pins the installed release's key
+    mkapp a h4m system; resign a h4m v1.0.0 $KEYA; rootfix a h4m >> /etc/kiwi-updater/apps.list
+    kr install --system h4m >/dev/null 2>&1; rm -f /etc/kiwi-updater/signers/h4m
+    release_signed a h4m v1.1.0 $KEYA; rootfix a h4m >/dev/null
+    wrap h4m;                          r+=("migration=$(is h4m v1.1.0)")
+    f() { [[ ${r[*]} != *=not-* && " ${r[*]} " == *" pinned=yes "* ]]; }
+    check H4 "signed releases: ${r[*]}" f
+}
+
 for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
          P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P17 P18 P19 P20 P22 P23 P25 \
          P27 P28 P29 P30 P31 P32 P33 P34 P35 P36 P37 \
-         H1 H2 H3 M1 M2 M3 M6 M7 L1 Q1 Q4; do run $t; done
+         H1 H2 H3 M1 M2 M3 M6 M7 L1 Q1 Q4 H4; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

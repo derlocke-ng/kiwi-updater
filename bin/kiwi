@@ -1263,8 +1263,13 @@ sync_repo() { # scope url opts -> clones + checks out the target ref, echoes rep
         warn "$(dir_name "$url"): source changed, repointing the cached clone at $url"
         git -C "$dir" remote set-url origin -- "$url" || return 1
     fi
-    IFS=$'\t' read -r sha _ <<<"$target"
+    local tref
+    IFS=$'\t' read -r sha tref <<<"$target"
     git_net -C "$dir" fetch --quiet --tags origin || { warn "fetch failed: $url"; return 1; }
+    # root checks the release before it is even checked out (H4); 2 = refused
+    if [[ $scope == system && $EUID -eq 0 ]]; then
+        release_trusted "$dir" "$url" "$tref" "$sha" || return 2
+    fi
     checkout_target "$dir" "$sha" || { warn "cannot check out $sha in $dir"; return 1; }
     echo "$dir"
 }
@@ -1323,6 +1328,135 @@ release_not_older() { # dir url opts -> fails if the target release is older tha
     ! ver_lt "${tref#v}" "${cur#v}"
 }
 
+# ---------------------------------------------------------------------------
+# Signed releases (FIXPLAN-2.4 H4). Whoever could push a tag to an app with a
+# system half — or take over its account, or a CI token — had root on every
+# machine with the system scope within hours, with nobody involved. Root now
+# pins one SSH signing key per app (trust on first use, at an authenticated
+# moment) and checks every release against it:
+#   - passwordless updates (the wrapper passes --signed-only) need a version
+#     tag signed by the pinned key; anything else waits for a password;
+#   - with a password, an unsigned app still installs and updates, loudly;
+#   - a tag signed by another key, or an unsigned tag of an app whose releases
+#     were signed, is refused either way until `kiwi trust --system <app>`.
+# The key is the one inside the tag's SSH signature (git tag -s with
+# gpg.format=ssh); git verify-tag then checks it against the pinned file.
+# ---------------------------------------------------------------------------
+SIGNERS_DIR="$SYS_CONFIG_DIR/signers"
+SIGNED_ONLY=0
+KEY_RE='^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)$'
+
+# the public key a tag is signed with, "type base64", read out of its SSHSIG
+# blob: "SSHSIG", uint32 version, string publickey, … (PROTOCOL.sshsig)
+tag_signer() { # dir tag
+    local b64 bytes=() len kl kt i
+    b64="$(git -C "$1" cat-file tag "refs/tags/$2" 2>/dev/null |
+           sed -n '/^-----BEGIN SSH SIGNATURE-----$/,/^-----END SSH SIGNATURE-----$/{/^-----/d;p;}' |
+           tr -d '\n')"
+    [[ -n $b64 ]] || return 1
+    read -r -a bytes < <(base64 -d <<<"$b64" 2>/dev/null | od -An -v -tu1 | tr '\n' ' ')
+    (( ${#bytes[@]} > 18 )) || return 1
+    [[ "${bytes[*]:0:6}" == "83 83 72 83 73 71" ]] || return 1          # SSHSIG
+    len=$(( (bytes[10] << 24) | (bytes[11] << 16) | (bytes[12] << 8) | bytes[13] ))
+    (( len > 4 && 14 + len <= ${#bytes[@]} )) || return 1
+    kl=$(( (bytes[14] << 24) | (bytes[15] << 16) | (bytes[16] << 8) | bytes[17] ))
+    (( kl > 0 && kl <= len - 4 )) || return 1
+    local fmt
+    printf -v fmt '\\%03o' "${bytes[@]:18:kl}"; printf -v kt "$fmt"       # printf repeats its format per byte
+    [[ $kt =~ $KEY_RE ]] || return 1
+    printf -v fmt '\\x%02x' "${bytes[@]:14:len}"
+    printf '%s %s\n' "$kt" "$(printf "$fmt" | base64 -w0)"
+}
+
+key_fp() { # "type base64" -> its SHA256 fingerprint, for people
+    ssh-keygen -lf - <<<"$1" 2>/dev/null | awk '{print $2}'
+}
+
+pin_signer() { # name "type base64" why
+    mkdir -p "$SIGNERS_DIR"; chmod 755 "$SIGNERS_DIR"
+    printf '%s namespaces="git" %s\n' "$1" "$2" > "$SIGNERS_DIR/$1.tmp" &&
+        chmod 644 "$SIGNERS_DIR/$1.tmp" && mv -f "$SIGNERS_DIR/$1.tmp" "$SIGNERS_DIR/$1"
+    # >&2: this runs inside sync_repo, whose stdout is the clone's path
+    info "$1: trusting releases signed by $(key_fp "$2") ($3)" >&2
+}
+
+# a release root will not verify: refused without a password, allowed (and
+# said) with one
+unverified() { # name reason
+    if (( SIGNED_ONLY )); then
+        warn "$1: not updated without a password — $2"
+        return 1
+    fi
+    warn "$1: $2 — kiwi cannot verify it. Going ahead because you authenticated;"
+    warn "  it will not be updated without a password until its releases are signed."
+    return 0
+}
+
+release_trusted() { # dir url tref sha -> may root check out <sha>?
+    local dir="$1" url="$2" tref="$3" sha="$4" name f key cur ckey
+    name="$(dir_name "$url")"; f="$SIGNERS_DIR/$name"
+    local re='^v?[0-9]+(\.[0-9]+){0,3}$'
+    if [[ ! $tref =~ $re ]] || [[ "$(git -C "$dir" cat-file -t "refs/tags/$tref" 2>/dev/null)" != tag ]] ||
+       [[ "$(git -C "$dir" rev-parse -q --verify "refs/tags/$tref^{commit}" 2>/dev/null)" != "$sha" ]]; then
+        [[ -s $f ]] && { warn "$name: $tref is not a signed release tag, and its releases are signed — refusing"; return 1; }
+        unverified "$name" "$tref is not a release tag"; return
+    fi
+    if ! command -v ssh-keygen >/dev/null 2>&1; then
+        [[ -s $f ]] && { warn "$name: ssh-keygen is missing, so its signed releases cannot be checked — refusing"; return 1; }
+        unverified "$name" "ssh-keygen is missing"; return
+    fi
+    if ! key="$(tag_signer "$dir" "$tref")"; then
+        [[ -s $f ]] && { warn "$name: $tref is not signed, but its releases are — refusing (kiwi trust --system $name if you know why)"; return 1; }
+        unverified "$name" "$tref is not signed"; return
+    fi
+    if [[ ! -s $f ]]; then
+        # Trust on first use. From the release already installed if it is
+        # signed: that code already runs as root, so trusting its signer adds
+        # nothing — and it is how machines from before 2.4 get their pins.
+        # Otherwise only with a password: then the key in this release.
+        # After `kiwi trust` the admin asked for a new key: never the old one.
+        cur=""
+        [[ -e $f.reset ]] ||
+            cur="$(git -C "$dir" tag --points-at "$(marker_sha "$dir")" 2>/dev/null | grep -E "$re" | sort -V | tail -1 || true)"
+        if [[ -n $cur ]] && ckey="$(tag_signer "$dir" "$cur")"; then
+            pin_signer "$name" "$ckey" "the key of the installed $cur"
+        elif (( SIGNED_ONLY )); then
+            warn "$name: no signing key pinned yet — not updated without a password"
+            return 1
+        else
+            pin_signer "$name" "$key" "the release being installed, authenticated"
+            rm -f "$f.reset"
+        fi
+    fi
+    if git -C "$dir" -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$f" \
+           verify-tag -- "$tref" >/dev/null 2>&1; then
+        return 0
+    fi
+    warn "$name: $tref is signed by $(key_fp "$key"), not by the key root trusts for it"
+    warn "  ($(key_fp "$(cut -d' ' -f3- "$f")")) — refusing. If the project changed keys on purpose:"
+    warn "  kiwi trust --system $name, then update it with your password."
+    return 1
+}
+
+cmd_trust() { # --system <app>: forget the pinned key; the next authenticated install/update pins anew
+    [[ $SCOPE_FILTER == system ]] || die "usage: kiwi trust --system <app>   (signing keys are pinned for the system scope)"
+    [[ $# -eq 1 ]] || die "usage: kiwi trust --system <app>"
+    if [[ $EUID -ne 0 ]]; then
+        local rk; rk="$(root_kiwi)" || return 1
+        as_root "$rk" trust --system -- "$1"
+        return
+    fi
+    local line url; line="$(resolve "$1")" || die "unknown app: $1"
+    IFS=$'\t' read -r url _ <<<"$line"
+    local f; f="$SIGNERS_DIR/$(dir_name "$url")"
+    [[ -f $f ]] || { info "$1: no signing key pinned"; return 0; }
+    info "$1: forgetting the pinned key $(key_fp "$(cut -d' ' -f3- "$f")")"
+    # the marker says: pin from the next release, not from the installed one
+    : > "$f.reset"; chmod 644 "$f.reset"
+    rm -f "$f"
+    info "  the next install or update with your password pins the key of the release it installs"
+}
+
 update_one() { # scope url opts   (appends to global UPDATED array)
     local scope="$1" url="$2" opts="${3:-}"
     local name; name="$(app_name "$scope" "$url")"
@@ -1342,7 +1476,10 @@ update_one() { # scope url opts   (appends to global UPDATED array)
         warn "   kiwi pin --system $name <tag>)"
         return 0
     fi
-    if ! sync_repo "$scope" "$url" "$opts" >/dev/null; then
+    local src=0
+    sync_repo "$scope" "$url" "$opts" >/dev/null || src=$?
+    (( src == 2 )) && return 1        # release_trusted said why
+    if (( src )); then
         # Not "up to date": nothing was checked. HEAD had simply not moved
         # because ls-remote or fetch failed.
         warn "$name: could not check for updates"
@@ -2358,6 +2495,11 @@ cmd_doctor() {
         if command -v "$f" >/dev/null 2>&1; then _good "$f"
         else _bad "$f is missing — kiwi needs git, coreutils, util-linux and awk"; fi
     done
+    # git's SSH signature check (H4): without it root cannot verify a release,
+    # so system halves only update with a password
+    if command -v ssh-keygen >/dev/null 2>&1; then _good "ssh-keygen (release signatures)"
+    elif [[ -x $ROOT_KIWI ]]; then _bad "ssh-keygen is missing — root cannot check release signatures (install openssh-clients)"
+    fi
 
     info "versions"
     _good "this copy is $KIWI_VERSION ($0)"
@@ -2681,6 +2823,7 @@ kiwi $KIWI_VERSION — install and update open-source apps from git catalogs
   kiwi sync                  refresh catalogs now
   kiwi self-update           update kiwi itself
   kiwi doctor                check this install for the things that go wrong quietly
+  kiwi trust --system <app>  forget the signing key pinned for a system app
 
 Options: --user / --system (limit to one scope), --cli-only / --gui,
          --purge, --force, --dry-run, --quiet, --notify, --version
@@ -2730,6 +2873,8 @@ while [[ $# -gt 0 ]]; do
         --quiet)    QUIET=1 ;;
         --notify)   NOTIFY=1 ;;
         --force)    FORCE=1 ;;
+        # the root wrapper's runs: only releases signed by the pinned key (H4)
+        --signed-only) SIGNED_ONLY=1 ;;
         --purge)    PURGE=1 ;;
         --porcelain) PORCELAIN=1 ;;
         --dry-run)  DRY_RUN=1 ;;
@@ -2762,7 +2907,7 @@ esac
 
 # once per invocation, for the commands that resolve or list apps
 case "$CMD" in
-    list|search|info|show|check|install|update|uninstall|self-update|pin|unpin|diff|doctor)
+    list|search|info|show|check|install|update|uninstall|self-update|pin|unpin|diff|doctor|trust)
         check_lists ;;
 esac
 
@@ -2800,6 +2945,7 @@ register it first (kiwi add --system <url>, https:// only), then install by name
     uninstall)   [[ ${#ARGS[@]} -gt 0 ]] || die "usage: kiwi uninstall <name...>"
                  collect_targets "${ARGS[@]}"; dispatch uninstall ;;
     pin)         cmd_pin ${ARGS[@]+"${ARGS[@]}"} ;;
+    trust)       cmd_trust ${ARGS[@]+"${ARGS[@]}"} ;;
     unpin)       cmd_unpin ${ARGS[@]+"${ARGS[@]}"} ;;
     diff)        cmd_diff ${ARGS[@]+"${ARGS[@]}"} ;;
     doctor)      cmd_doctor ;;

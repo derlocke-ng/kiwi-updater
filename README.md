@@ -336,7 +336,7 @@ In `manual` mode the timer leaves system halves for your next interactive
 | | needs root | asks for a password |
 |---|---|---|
 | anything in the user scope | no | no |
-| **updating** a system app | yes | **no** — your own update timer does it through one fixed-purpose helper that polkit grants to `wheel` users (with `--with-system=manual`: yes, every time) |
+| **updating** a system app | yes | **no**, for a release signed by the key root pinned for it — your own update timer does it through one fixed-purpose helper that polkit grants to `wheel` users (with `--with-system=manual`, or for an unsigned release: yes) |
 | **installing** a system app | yes | yes |
 | **uninstalling** a system app | yes | yes |
 
@@ -364,6 +364,33 @@ With no names it updates every one of them.
 
 The rule requires an **active** session in `wheel`, not a local one: VM and
 remote desktop sessions can report as non-local.
+
+### Signed releases
+
+A passwordless update runs new code as root that nobody looked at, so it only
+happens for a release root can check. Root pins one SSH signing key per system
+app, in `/etc/kiwi-updater/signers/<app>` — trust on first use, taken from the
+release you installed with your password (or, on a machine from before 2.4,
+from the release already installed). From then on:
+
+- a version tag signed by that key updates without a password;
+- an unsigned release, an app that follows a branch, or one without release
+  tags updates only when you type your password, and kiwi says it could not
+  verify it;
+- a release signed by any other key — or an unsigned one, once an app's
+  releases were signed — is refused, password or not. If the project really
+  changed its key: `kiwi trust --system <app>`, then update it with your
+  password, which pins the new key.
+
+This needs `ssh-keygen` (openssh-clients), which git uses to check SSH
+signatures; `kiwi doctor` says if it is missing.
+
+**App authors:** sign your release tags with an SSH key and push them —
+`git tag -s v1.2.0 -m v1.2.0` with `git config gpg.format ssh` and
+`user.signingkey` pointing at the key (ideally on a hardware token). Keep the
+key off CI: a release workflow that can sign would make its token the key.
+`templates/release.yml` publishes a GitHub Release only for a tag that is
+signed by a key listed in the repo's `.github/allowed_signers`.
 
 ## Notes
 

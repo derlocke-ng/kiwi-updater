@@ -37,6 +37,11 @@ behaviour someone may rely on; those say so.
   change at any time — and made `kiwi diff` review a different file from the
   one that ran. The installer must now be a regular file inside the clone;
   otherwise install, update, `info --installer` and `diff` refuse it.
+- **`kiwi update` only touches what is installed** (M7, Q4). It cloned every
+  repo every catalog listed before checking whether any of it was installed —
+  as root on every background run (git network and pack parsing as root
+  against any host a catalog names), and as a slow first `kiwi update` on a new
+  machine. Not-installed apps are now skipped before anything is fetched.
 - **Tab completion no longer runs code from a catalog** (H2). `compgen -W`
   expands its word list, so an entry like `https://…/$(cmd).git` — whose
   basename becomes the app's name when the repo has no usable `NAME` — ran

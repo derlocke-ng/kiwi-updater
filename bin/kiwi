@@ -1314,8 +1314,20 @@ collect_targets() { # all|names...
             list+=("$line")
         done
     fi
+    # An update only ever acts on what is installed, so it has no business
+    # cloning anything else (FIXPLAN-2.4 M7/Q4). It used to sync metadata for
+    # every entry of every catalog first: as root, on every timer run, that is
+    # git network and pack parsing against any host a catalog names; as the
+    # user, a slow first `kiwi update` that cloned apps nobody installed.
+    local only_installed=0 skipped=0
+    [[ $CMD == update || $CMD == self-update ]] && only_installed=1
     for line in "${list[@]}"; do
         IFS=$'\t' read -r url opts <<<"$line"
+        if (( only_installed )) && ! is_installed_any "$url"; then
+            (( ALL_MODE )) || log "${c_dim}skipping $(dir_name "$url") (not installed)${c_off}"
+            skipped=$((skipped+1))
+            continue
+        fi
         dir="$(sync_meta "$url" "$opts")" || { warn "cannot reach $url"; continue; }
         scs="$(effective_scopes "$dir" "$opts" "$url")"
         [[ -z $scs ]] && continue
@@ -1330,6 +1342,8 @@ collect_targets() { # all|names...
         # `update --all --system` on machines that legitimately have no system
         # apps, and dying there marked the unit failed every six hours.
         [[ $1 == --all ]] && { log "nothing to do"; exit 0; }
+        # named, but none installed: as before, "skipping …", not a failure
+        (( skipped )) && exit 0
         die "no apps matched (see 'kiwi list')"
     fi
 }

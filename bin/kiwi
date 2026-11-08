@@ -337,9 +337,23 @@ app_entries_raw() {
         list_trusted "${c}apps.list" || continue
         while read -r url opts; do
             [[ -z ${url:-} ]] && continue
+            # As root, a catalog says WHICH repos, never which version: with
+            # ref=/branch= honoured, a compromised catalog could move what root
+            # runs to an old, vulnerable release or to any branch on the next
+            # passwordless update (FIXPLAN-2.4 M1). Root's own list still pins.
+            [[ $EUID -eq 0 ]] && opts="$(strip_ref_opts "${opts:-}")"
             printf '%s\t%s\t%s\n' "${c}apps.list" "$url" "${opts:-}"
         done < <(grep -Ev '^[[:space:]]*(#|$)' "${c}apps.list" 2>/dev/null || true)
     done
+}
+
+strip_ref_opts() { # opts -> the same without ref= and branch=
+    local w out=()
+    split_words "${1:-}"
+    for w in ${WORDS[@]+"${WORDS[@]}"}; do
+        [[ $w == ref=* || $w == branch=* ]] || out+=("$w")
+    done
+    printf '%s' "${out[*]:-}"
 }
 
 # every app we know about, deduped by repo name, regardless of scope:
@@ -568,6 +582,8 @@ scope_target_sha() { # scope url row_opts row_sha
     local f so t sha
     f="$(list_file "$1")"
     if list_has "$f" "$2"; then so="$(entry_opts "$f" "$2")"; else so="${3:-}"; fi
+    # root ignores a catalog's ref=/branch= (M1); so must this view of root's half
+    [[ $1 == system ]] && ! list_has "$f" "$2" && so="$(strip_ref_opts "${so:-}")"
     if [[ "$(entry_opt "${so:-}" ref "")" == "$(entry_opt "${3:-}" ref "")" &&
           "$(entry_opt "${so:-}" branch "")" == "$(entry_opt "${3:-}" branch "")" ]]; then
         echo "$4"; return 0
@@ -1170,6 +1186,21 @@ install_one() { # scope url opts
     info "${c_grn}$(app_name "$scope" "$url") ${action%e}ed${c_off} (${scope}, $(manifest_get "$dir" VERSION "?"))"
 }
 
+# Root never moves an app to an OLDER release unless root's own list pins it
+# there (M1). With catalogs no longer choosing refs, what is left is the remote
+# itself: delete the newest tag and "latest" becomes an old, vulnerable one.
+release_not_older() { # dir url opts -> fails if the target release is older than the installed one
+    local re='^v?[0-9]+(\.[0-9]+){0,3}$' cur t tsha tref
+    [[ "$(entry_opt "${3:-}" local 0)" == 1 && -n "$(entry_opt "${3:-}" ref "")" ]] && return 0
+    cur="$(git -C "$1" tag --points-at "$(marker_sha "$1")" 2>/dev/null | grep -E "$re" | sort -V | tail -1 || true)"
+    [[ -n $cur ]] || return 0
+    t="$(remote_target "$2" "${3:-}" || true)"
+    [[ -n $t ]] || return 0                  # sync_repo reports the unreachable remote
+    IFS=$'\t' read -r tsha tref <<<"$t"
+    [[ $tref =~ $re ]] || return 0
+    ! ver_lt "${tref#v}" "${cur#v}"
+}
+
 update_one() { # scope url opts   (appends to global UPDATED array)
     local scope="$1" url="$2" opts="${3:-}"
     local name; name="$(app_name "$scope" "$url")"
@@ -1183,6 +1214,12 @@ update_one() { # scope url opts   (appends to global UPDATED array)
     # already sat on the target, so the next run saw HEAD == target and never
     # applied the update that had not actually run.
     local before; before="$(marker_sha "$dir")"
+    if [[ $scope == system ]] && ! release_not_older "$dir" "$url" "$opts"; then
+        warn "$name: the newest release offered is older than the installed one — not downgrading"
+        warn "  (a release tag was removed or moved upstream; to go back on purpose, pin it:"
+        warn "   kiwi pin --system $name <tag>)"
+        return 0
+    fi
     if ! sync_repo "$scope" "$url" "$opts" >/dev/null; then
         # Not "up to date": nothing was checked. HEAD had simply not moved
         # because ls-remote or fetch failed.

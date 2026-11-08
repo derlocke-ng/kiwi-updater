@@ -1088,8 +1088,14 @@ t_M1() { # a catalog must not choose an older ref, or a branch, for what root in
     catset "$app branch=main"
     kr update --all --system >/dev/null 2>&1
     got_branch="$(head -1 $m 2>/dev/null)"
-    f() { [[ -n $want && $got_ref == "$want" && $got_branch == "$want" ]]; }
-    check M1 "root stays on v1.1.0 when its catalog says ref=v1.0.0 ($([[ $got_ref == "$want" ]] && echo stayed || echo moved)) or branch=main ($([[ $got_branch == "$want" ]] && echo stayed || echo moved))" f
+    # and the remote itself: deleting the newest tag must not roll root back
+    catset "$app"
+    git -C "$app" tag -d v1.1.0 >/dev/null
+    kr update --all --system >/dev/null 2>&1
+    local got_deleted; got_deleted="$(head -1 $m 2>/dev/null)"
+    st() { [[ $1 == "$want" ]] && echo stayed || echo moved; }
+    f() { [[ -n $want && $got_ref == "$want" && $got_branch == "$want" && $got_deleted == "$want" ]]; }
+    check M1 "root stays on v1.1.0 when its catalog says ref=v1.0.0 ($(st "$got_ref")), branch=main ($(st "$got_branch")), or v1.1.0 is deleted upstream ($(st "$got_deleted"))" f
 }
 
 t_M2() { # https only — root (invariant 7) and, per D2, the user too

@@ -21,6 +21,16 @@ behaviour someone may rely on; those say so.
   `kiwi install --system --from` accepts only `https://` URLs, and the user
   side no longer asks for a password to hand root a local path it would refuse;
   it says why instead.
+- **A catalog can no longer pick an old version, or a branch, for root** (M1).
+  For a system app root installed from a catalog, the catalog's `ref=` or
+  `branch=` decided what root's next passwordless update checked out — a
+  compromised catalog could "update" it to an old, vulnerable release or to
+  any branch. As root, catalog entries now say only *which* repo; they always
+  follow its latest release. Root also refuses to move an app to an older
+  release than the one installed (as when the newest tag is deleted upstream)
+  unless root's own list pins it (`kiwi pin --system <app> <tag>`). *Changes
+  behaviour:* `ref=`/`branch=` in a catalog now only apply to user-scope
+  installs.
 - **Tab completion no longer runs code from a catalog** (H2). `compgen -W`
   expands its word list, so an entry like `https://…/$(cmd).git` — whose
   basename becomes the app's name when the repo has no usable `NAME` — ran

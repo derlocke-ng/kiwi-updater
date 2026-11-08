@@ -46,6 +46,10 @@ git config --system safe.directory '*'
 git config --system user.email t@example.com
 git config --system user.name tester
 git config --system init.defaultBranch main
+# https://kiwi.test/<owner>/<name>.git is $GITROOT/<owner>/<name>.git: kiwi sees
+# an https URL (root takes nothing else from the user side since H1), git
+# fetches from the local fixture. .test is reserved, so nothing real is shadowed.
+git config --system "url.$GITROOT/.insteadOf" https://kiwi.test/
 rm -rf $W && mkdir -p $W $STUBS && cp -r "$SRC"/. $W/ && rm -rf $W/.git && chmod -R a+rX $W
 
 stub_systemctl() { printf '#!/bin/sh\nexit %s\n' "${1:-0}" > $STUBS/systemctl; chmod +x $STUBS/systemctl; }
@@ -274,19 +278,31 @@ t_F15() { # list files are matched by exact URL, not by substring
 }
 
 t_F16() { # do not ask for a password and then say "unknown app"
-    mkapp a rootsvc "user system"
-    mkcat c usercat $GITROOT/a/rootsvc.git
-    ku catalog add $GITROOT/c/usercat.git >/dev/null 2>&1       # user-level only
-    mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater
-    install -Dm755 $K /usr/local/bin/kiwi
-    : > $ESC
-    ku install rootsvc >/dev/null 2>&1
     # 2.0: an install is always authenticated, so instead of refusing, the URL
     # the user was shown goes along (--from) and root records it. What must
     # NOT happen is an escalation by name alone, which is the "password, then
     # unknown app" the finding was about.
-    f() { grep -q -- "install --system.*--from $GITROOT/a/rootsvc.git" $ESC; }
-    check F16 "a system app root cannot resolve is handed over by URL, not by name alone" f
+    # 2.4 (H1): root records only https URLs that way. A local path is not
+    # escalated at all — no password for work root would refuse.
+    mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater
+    install -Dm755 $K /usr/local/bin/kiwi
+    # (a) https (kiwi.test, see the top): handed over by URL
+    mkapp a hsvc system
+    local hu=https://kiwi.test/a/hsvc.git
+    ulist "$hu"
+    : > $ESC
+    ku install hsvc >/dev/null 2>&1
+    local https_ok=no; grep -q -- "install --system.*hsvc.*--from $hu" $ESC && https_ok=yes
+    # (b) a user-owned local path from a user catalog: no escalation at all
+    mkapp a rootsvc "user system"
+    mkcat c usercat $GITROOT/a/rootsvc.git
+    ulist
+    ku catalog add $GITROOT/c/usercat.git >/dev/null 2>&1       # user-level only
+    : > $ESC
+    local out; out="$(ku install rootsvc 2>&1)"
+    local local_quiet=no; [[ ! -s $ESC ]] && grep -q 'https://' <<<"$out" && local_quiet=yes
+    f() { [[ $https_ok == yes && $local_quiet == yes ]]; }
+    check F16 "root is handed an https URL, never a name alone (ok=$https_ok); a local path asks for no password and says why (ok=$local_quiet)" f
 }
 
 t_F17() { # installing without a systemd user session must still finish
@@ -713,7 +729,8 @@ t_P22() { # on a user-only machine a dual-scope app installs its user half and s
     # which a real install always has and the harness has to provide
     mkdir -p $TH/.local/share/kiwi-updater/repos && cp -r $W $TH/.local/share/kiwi-updater/repos/kiwi-updater
     chown -R $T $TH/.local
-    ku add $GITROOT/a/halfapp.git >/dev/null
+    # https: since H1 a local path is not handed to root at all (see F16)
+    ku add https://kiwi.test/a/halfapp.git >/dev/null
     : > $ESC
     local out rc; out="$(ku install halfapp 2>&1)"; rc=$?
     # 2.0: the system scope is set up on the spot (one password prompt; the
@@ -1012,8 +1029,10 @@ t_H1() { # a user-owned local repo must never become something root runs
     mkapp a lp system 'touch /tmp/kt-h1-ran'
     mkdir -p /etc/kiwi-updater /var/lib/kiwi-updater/repos
     echo "$GITROOT/a/lp.git" > /etc/kiwi-updater/apps.list
-    local listed m1=no m2=no appended=no
+    local listed m1=no m2=no appended=no doctor=no
     listed="$(kr list --porcelain --no-sync 2>/dev/null | cut -f1)"
+    local doc; doc="$(kr doctor 2>&1)"        # exits 1 here, so not in a pipeline
+    grep -q "root ignores '$GITROOT/a/lp.git'" <<<"$doc" && doctor=yes
     kr install --system lp >/dev/null 2>&1
     [[ -f /var/lib/kiwi-updater/repos/lp/.kiwi-installed ]] && m1=yes
     # the same path handed over by the user side, as the GUI's --from does
@@ -1021,8 +1040,8 @@ t_H1() { # a user-owned local repo must never become something root runs
     kr install --system lp --from "$GITROOT/a/lp.git" >/dev/null 2>&1
     [[ -f /var/lib/kiwi-updater/repos/lp/.kiwi-installed ]] && m2=yes
     grep -q "$GITROOT/a/lp.git" /etc/kiwi-updater/apps.list && appended=yes
-    f() { ! grep -qx lp <<<"$listed" && [[ $m1 == no && $m2 == no && $appended == no ]]; }
-    check H1 "root ignores a user-owned local repo, from its list or --from (via list: installed=$m1; --from: installed=$m2 recorded=$appended)" f
+    f() { ! grep -qx lp <<<"$listed" && [[ $m1 == no && $m2 == no && $appended == no && $doctor == yes ]]; }
+    check H1 "root ignores a user-owned local repo, from its list or --from (via list: installed=$m1; --from: installed=$m2 recorded=$appended; doctor says so: $doctor)" f
 }
 
 t_H2() { # pressing Tab must never run code from a catalog

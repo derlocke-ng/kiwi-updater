@@ -8,6 +8,19 @@ history actually lives.
 Security release from the 2.3.2 audit (`FIXPLAN-2.4.md`). Some entries change
 behaviour someone may rely on; those say so.
 
+- **Root no longer follows a local repo it does not own** (H1). *Migration:*
+  if you ran `kiwi add --system /home/…/repo` (or root ever recorded a local
+  path for you), root now skips that entry — `kiwi doctor` lists it. Use the
+  repo's `https://` URL instead, or `git clone` it into a root-owned directory
+  (for example under `/var/lib`) and `kiwi add --system` that path.
+  Why: once a path like `/home/you/dev/app` was in root's list, any process
+  running as you could commit a new tag there and call the passwordless
+  wrapper — root fetched it and ran the installer, no password, forever.
+  Root now takes a local path, from its own list or a catalog, only if the path
+  and every directory above it are root-owned and not writable by others.
+  `kiwi install --system --from` accepts only `https://` URLs, and the user
+  side no longer asks for a password to hand root a local path it would refuse;
+  it says why instead.
 - **Tab completion no longer runs code from a catalog** (H2). `compgen -W`
   expands its word list, so an entry like `https://…/$(cmd).git` — whose
   basename becomes the app's name when the repo has no usable `NAME` — ran

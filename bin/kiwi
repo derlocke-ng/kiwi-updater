@@ -374,9 +374,11 @@ check_lists() {
             continue
         fi
         if ! entry_ok "$url" "$opts"; then
-            warn "ignoring a local path a catalog names, as root: $src: '$url'"
-            warn "  it is not owned by root, or others can write it. Root takes such a path"
-            warn "  only from $SYS_LIST"
+            warn "ignoring a local path root does not own: $src: '$url'"
+            warn "  root follows a local repo only if it and every directory above it are"
+            warn "  owned by root and not writable by others — whoever can write it would"
+            warn "  decide what runs as root. Use an https:// URL, or clone it somewhere"
+            warn "  root-owned (e.g. under /var/lib) and list that path."
             continue
         fi
         d="$(dir_name "$url")"; u="$(norm_url "$url")"
@@ -657,21 +659,36 @@ valid_url() { # url
     return 0
 }
 
-# A local path in a CATALOG is someone else's choice of a directory on this
-# machine. As a user that is your own risk; as root it would mean that whoever
-# can write that directory has code run as root on the next passwordless
-# update, without the admin ever naming it. So from a catalog, root follows a
-# local path only if root owns it and nobody else can write it — the same test
-# list_trusted applies to the lists. A path in root's own list (local=1) was
-# put there by the admin, with a password, and is taken as it is.
+# A local path is a directory on this machine, and whoever can write it decides
+# what its next commit contains. As a user that is your own risk; as root it
+# meant that anyone who could write it — any process running as you, for a
+# repo in your home — had code run as root on the next passwordless update
+# (FIXPLAN-2.4 H1). So root follows a local path only if the path AND every
+# directory above it are root-owned and not writable by group or other.
+# That holds for every source: catalogs, and root's own list too — an entry an
+# admin added years ago for a repo in their home is exactly the case.
+# Callable as any user (stat only), so the user side can ask before escalating.
+root_owned_chain() { # path or file:// url
+    local p st owner mode
+    p="$(realpath -e -- "${1#file://}" 2>/dev/null)" || return 1
+    while :; do
+        st="$(stat -c '%u %a' -- "$p" 2>/dev/null)" || return 1
+        read -r owner mode <<<"$st"
+        [[ $owner == 0 ]] && (( (8#$mode & 8#022) == 0 )) || return 1
+        [[ $p == / ]] && return 0
+        p="$(dirname -- "$p")"
+    done
+}
+
+# can root use this url at all: https, or a local path root owns all the way up
+root_usable() { # url
+    [[ $1 == https://* ]] || root_owned_chain "$1"
+}
+
 entry_ok() { # url opts
     valid_url "$1" || return 1
-    [[ $EUID -eq 0 && $1 != https://* ]] || return 0
-    [[ "$(entry_opt "${2:-}" local 0)" == 1 ]] && return 0
-    local st owner mode
-    st="$(stat -c '%u %a' "${1#file://}" 2>/dev/null)" || return 1
-    read -r owner mode <<<"$st"
-    [[ $owner == 0 ]] && (( (8#$mode & 8#022) == 0 ))
+    [[ $EUID -eq 0 ]] || return 0
+    root_usable "$1"
 }
 
 list_has() { # file url
@@ -941,7 +958,8 @@ root_url_for() { # dirname -> the url root would resolve it to
 }
 
 root_knows() { # url
-    [[ "$(root_url_for "$(dir_name "$1")" || true)" == "$(norm_url "$1")" ]]
+    [[ "$(root_url_for "$(dir_name "$1")" || true)" == "$(norm_url "$1")" ]] &&
+        root_usable "$1"     # root skips a path it does not own (H1)
 }
 
 acquire_lock() { # scope
@@ -1331,6 +1349,16 @@ dispatch() { # verb extra_flag
         # at all it refused too, where root_kiwi below sets one up with one
         # password. Both were the opposite of "install root parts with ease".
         if [[ $verb == install ]] && ! root_knows "${T_URL[$i]}"; then
+            # Root takes a handed-over URL only over https (H1): a local path
+            # can be rewritten by whoever owns it, after the password was typed.
+            # Say so here instead of asking for a password root would refuse.
+            if [[ ${T_URL[$i]} != https://* ]]; then
+                warn "$(app_name system "${T_URL[$i]}"): its root half was not installed —"
+                warn "  root installs only from https:// URLs or from local repos root owns all the"
+                warn "  way up, and ${T_URL[$i]} is neither."
+                rc_pre=1
+                continue
+            fi
             from_urls+=("${T_URL[$i]}")
         fi
         sys_names+=("$(app_name system "${T_URL[$i]}")")
@@ -2132,6 +2160,19 @@ $(root_skew_advice "$have")"
         fi
     done
 
+    # H1: entries in root's own list that root now skips. They were followed
+    # before 2.4, so someone may rely on one without knowing it stopped.
+    if [[ -r $SYS_LIST ]]; then
+        local surl
+        while read -r surl _; do
+            [[ -z ${surl:-} || $surl == \#* ]] && continue
+            valid_url "$surl" || continue          # check_lists reports those
+            root_usable "$surl" && continue
+            _bad "root ignores '$surl' in $SYS_LIST: a local repo root does not own
+  all the way up. Use its https:// URL, or clone it somewhere root-owned and list that."
+        done < "$SYS_LIST"
+    fi
+
     info "clones"
     # Everything the user side knows about a system app is read out of
     # /var/lib: installed or not, which commit, whether an update is due. A
@@ -2471,9 +2512,16 @@ case "$CMD" in
                  # exactly the decision the root list exists to record.
                  # Passwordless updates later still touch only what it names.
                  if [[ $EUID -eq 0 && ${#FROM_URLS[@]} -gt 0 ]]; then
+                     # https only (H1): --from is composed by the user side,
+                     # which the user can write. A local path from there would
+                     # make whoever owns it the author of root's next update.
+                     for from_url in "${FROM_URLS[@]}"; do
+                         valid_url "$from_url" && [[ $from_url == https://* ]] ||
+                             die "root records only https:// URLs handed over with --from: '$from_url'
+to install a local repo as root, clone it somewhere root-owned and run: kiwi add --system <path>"
+                     done
                      mkdir -p "$(dirname "$SYS_LIST")"; touch "$SYS_LIST"
                      for from_url in "${FROM_URLS[@]}"; do
-                         valid_url "$from_url" || die "not a usable git url: '$from_url'"
                          list_has "$SYS_LIST" "$from_url" ||
                              { echo "$from_url" >> "$SYS_LIST"; info "registered $from_url for root"; }
                      done

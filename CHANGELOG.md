@@ -32,6 +32,13 @@ behaviour someone may rely on; those say so.
   `kiwi catalog add` refuse `http://` instead of warning, and such entries in a
   list or catalog are reported and skipped. *Changes behaviour:* an `http://`
   entry stops working — switch it to `https://`.
+- **What you read before installing is what runs** (M3). `kiwi info
+  --installer` and `kiwi diff` printed the app's bytes raw, so an installer
+  with `ESC[8m` (concealed text), cursor movement or a carriage return could
+  show something other than the code that runs; commit subjects and catalog
+  names reached the terminal raw too. Untrusted text is now shown with ESC as
+  a visible `^[` and other control characters as `?`; catalog names and
+  descriptions are cleaned like manifest values.
 
 ## 2.3.2 — 2026-10-29
 

@@ -193,6 +193,15 @@ c_bold=$'\033[1m'; c_grn=$'\033[32m'; c_ylw=$'\033[33m'; c_red=$'\033[31m'; c_di
 [[ -t 1 ]] || { c_bold=""; c_grn=""; c_ylw=""; c_red=""; c_dim=""; c_off=""; }
 
 log()  { (( QUIET )) || printf '%s\n' "$*"; }
+
+# Show untrusted text without letting it drive the terminal (FIXPLAN-2.4 M3).
+# "Read the installer before you run it" is only worth something if what you
+# read is what runs: ESC[8m conceals text, cursor moves and CR overwrite it.
+# Keeps \t, \n and printable UTF-8; ESC becomes a visible ^[, every other C0
+# control, DEL and the 8-bit C1 controls (UTF-8 C2 80..9F) become ?.
+safe_text() {
+    LC_ALL=C sed 's/\x1b/^[/g; s/\xc2[\x80-\x9f]/?/g; s/[\x00-\x08\x0b-\x1f\x7f]/?/g'
+}
 info() { (( QUIET )) || printf '%s::%s %s\n' "$c_bold" "$c_off" "$*"; }
 warn() { printf '%swarning:%s %s\n' "$c_ylw" "$c_off" "$*" >&2; }
 die()  { printf '%serror:%s %s\n' "$c_red" "$c_off" "$*" >&2; exit 1; }
@@ -1792,7 +1801,7 @@ cmd_info() { # [--porcelain] [--installer] name
         [[ $scs == *system* ]] &&
             info "${c_ylw}this app declares the system scope, so kiwi runs this as root${c_off}"
         log ""
-        cat "$dir/$inst"
+        safe_text < "$dir/$inst"
         return 0
     fi
 
@@ -1996,17 +2005,18 @@ cmd_diff() {
         fi
         log ""
         log "${c_bold}commits${c_off}"
-        git -C "$dir" log --oneline --no-decorate "$from..$tsha" 2>/dev/null | sed 's/^/  /'
+        # commit subjects, file names and the diff are the app author's bytes
+        git -C "$dir" log --no-color --oneline --no-decorate "$from..$tsha" 2>/dev/null | safe_text | sed 's/^/  /'
         log ""
         log "${c_bold}files${c_off}"
-        git -C "$dir" diff --stat "$from" "$tsha" 2>/dev/null | sed 's/^/  /'
+        git -C "$dir" -c core.quotePath=true diff --no-color --stat "$from" "$tsha" 2>/dev/null | safe_text | sed 's/^/  /'
         inst="$(manifest_get "$dir" INSTALLER install.sh)"
         log ""
         if git -C "$dir" diff --quiet "$from" "$tsha" -- "$inst" 2>/dev/null; then
             log "${c_dim}$inst is unchanged${c_off}"
         else
             log "${c_ylw}$inst changes — this is the script that runs on update${c_off}"
-            git -C "$dir" diff "$from" "$tsha" -- "$inst" 2>/dev/null | sed 's/^/  /'
+            git -C "$dir" diff --no-color "$from" "$tsha" -- "$inst" 2>/dev/null | safe_text | sed 's/^/  /'
         fi
     done
     (( n )) || die "$app is not installed, so there is nothing to compare.
@@ -2241,6 +2251,9 @@ catalog_meta() { # dir key default
     local v=""
     [[ -f "$1/catalog.manifest" ]] && \
         v="$(grep -E "^$2=" "$1/catalog.manifest" 2>/dev/null | head -1 | cut -d= -f2-)"
+    # cleaned like manifest_get: printed to the terminal and as porcelain fields
+    v="${v//$'\t'/ }"
+    v="${v//[[:cntrl:]]/}"
     echo "${v:-$3}"
 }
 

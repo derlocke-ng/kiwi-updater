@@ -314,7 +314,13 @@ kiwi manages itself in both scopes at once (each scope follows its own list
 entry, so a pin on one half never silently holds or blocks the other), and
 the one bootstrap exception — `install --with-system` running a user-writable
 script as root once, password-gated — exists because no root-owned copy is
-there yet to do it instead.
+there yet to do it instead. Even then, that script only fetches kiwi as root
+into `/var/lib/kiwi-updater/repos/kiwi-updater`, checks out the latest release
+and hands over to the `install.sh` in that clone: the root-owned kiwi, the
+wrapper and the polkit rule come from root's own clone, and root updates itself
+from `https://github.com/derlocke-ng/kiwi-updater.git` — not from your
+checkout or its `origin`. To have root follow a fork instead, put its https
+URL in a root-owned `/etc/kiwi-updater/self-url` before the bootstrap.
 
 ## Background updates
 

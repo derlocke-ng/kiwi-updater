@@ -67,6 +67,17 @@ behaviour someone may rely on; those say so.
   catalog are unaffected, including on a `--minimal` install, where the first
   one still sets up the system scope with one password. `list --porcelain`
   gains field 16 (where the entry comes from) and 17 (root lists it: 1/0).
+- **Setting up the system scope no longer trusts your checkout** (M5). The
+  bootstrap ran your copy of `install.sh` as root (still the one documented
+  exception), installed root's `bin/kiwi`, wrapper and polkit rule from your
+  checkout, and registered your checkout's `origin` as root's self-update
+  source — so whatever controlled your account at that moment decided,
+  permanently, what root runs. Now that script only clones kiwi as root into
+  `/var/lib/kiwi-updater/repos/kiwi-updater`, checks out the latest release,
+  and hands over to the clone's `install.sh`; root registers the canonical URL
+  (or the one in a root-owned `/etc/kiwi-updater/self-url`). *Changes
+  behaviour:* running `install.sh --with-system` from a development checkout
+  installs the latest *release* as root, not your working tree.
 - **Tab completion no longer runs code from a catalog** (H2). `compgen -W`
   expands its word list, so an entry like `https://…/$(cmd).git` — whose
   basename becomes the app's name when the repo has no usable `NAME` — ran

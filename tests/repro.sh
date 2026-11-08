@@ -103,6 +103,20 @@ rootfix() {
     chown -R root:root "$ROOTGIT/$1/$2.git"; chmod -R go-w "$ROOTGIT/$1/$2.git"
     echo "$ROOTGIT/$1/$2.git"
 }
+# selffix -> a root-owned, release-tagged repo of the tree under test, named
+# in /etc/kiwi-updater/self-url. Since M5 root installs kiwi only from its own
+# clone of that source (by default the real GitHub repo), so without this a
+# root bootstrap in a test would install the published release, not this tree.
+selffix() {
+    local w=/tmp/kt-work-selffix v
+    v="$(sed -n 's/^VERSION=//p' $W/kiwi.manifest | head -1)"
+    rm -rf $w; mkdir -p $w; cp -r $W/. $w/
+    ( cd $w && git init -q && git add -A && git commit -qm self && git tag -a "v$v" -m "v$v" )
+    mkdir -p $ROOTGIT/self; chmod 755 $ROOTGIT $ROOTGIT/self
+    rm -rf $ROOTGIT/self/kiwi-updater.git
+    git clone -q --bare $w $ROOTGIT/self/kiwi-updater.git; chmod -R go-w $ROOTGIT/self/kiwi-updater.git
+    mkdir -p /etc/kiwi-updater; echo "$ROOTGIT/self/kiwi-updater.git" > /etc/kiwi-updater/self-url
+}
 # ulist line... -> the test user's own apps.list, exactly these lines
 ulist() {
     mkdir -p $TH/.config/kiwi-updater
@@ -616,26 +630,27 @@ t_P15() { # a pin value that would corrupt the list file is refused
     check P15 "a pin value with whitespace is refused before touching the list" f
 }
 
-t_P16() { # the root phase of the bootstrap must register self-update even under pkexec
-    # Under pkexec there is no SUDO_UID, so git refused the user-owned checkout
-    # as "dubious ownership", origin_url came back empty, and the root clone
-    # was never created — the root-owned kiwi had nothing to self-update from.
-    # The harness runs root with env -i, which is exactly that environment.
-    # a USER-owned git checkout (the thing under test), cloned from a
-    # root-owned bare repo (so the source itself is not what trips git)
-    local src=$TH/checkout; rm -rf $src $ROOTGIT/self
-    cp -r $W $src && chown -R $T $src
+t_P16() { # the root phase of the bootstrap registers kiwi's own self-update, from root's own source
+    # Under pkexec there is no SUDO_UID; the root phase must still register
+    # self-update (the harness runs root with env -i, which is that environment).
+    # M5: and what it registers and installs is root's choice — self-url here,
+    # the canonical URL otherwise — never the user checkout's origin or files.
+    selffix
+    local src=$TH/checkout; rm -rf $src
+    cp -r $W $src && echo '# USER-CHECKOUT-COPY' >> $src/bin/kiwi && chown -R $T $src
     runuser -u $T -- bash -c "cd $src && git init -q && git add -A && git -c user.email=t@e -c user.name=t commit -qm x"
-    mkdir -p $ROOTGIT/self && chmod 755 $ROOTGIT $ROOTGIT/self &&
-        git clone -q --bare $src $ROOTGIT/self/kiwi-updater.git
-    runuser -u $T -- git -C $src remote add origin $ROOTGIT/self/kiwi-updater.git
+    runuser -u $T -- git -C $src remote add origin https://kiwi.test/elsewhere/kiwi-updater.git
     # GIT_CONFIG_SYSTEM=/dev/null: the harness sets safe.directory='*' globally,
-    # which would hide exactly the refusal this test is about
+    # which would hide a "dubious ownership" refusal of the user's checkout
     env -i HOME=/root PATH=$STUBS:/usr/sbin:/usr/bin:/bin GIT_CONFIG_SYSTEM=/dev/null \
         bash $src/install.sh install >/dev/null 2>&1
-    f() { grep -q 'self/kiwi-updater' /etc/kiwi-updater/apps.list 2>/dev/null &&
-          [[ -f /var/lib/kiwi-updater/repos/kiwi-updater/.kiwi-installed ]]; }
-    check P16 "root bootstrap phase registers kiwi's own self-update without SUDO_UID" f
+    local reg=no own=no marker=no
+    grep -qx "$ROOTGIT/self/kiwi-updater.git" /etc/kiwi-updater/apps.list 2>/dev/null &&
+        ! grep -q elsewhere /etc/kiwi-updater/apps.list && reg=yes
+    [[ -f /usr/local/bin/kiwi ]] && ! grep -q USER-CHECKOUT-COPY /usr/local/bin/kiwi && own=yes
+    [[ -f /var/lib/kiwi-updater/repos/kiwi-updater/.kiwi-installed ]] && marker=yes
+    f() { [[ $reg == yes && $own == yes && $marker == yes ]]; }
+    check P16 "root bootstrap registers root's own source, not the checkout's origin ($reg), installs kiwi from its own clone ($own), marks it ($marker)" f
 }
 
 t_P17() { # an option value from a list must never be glob-expanded
@@ -766,6 +781,7 @@ t_P22() { # on a user-only machine a dual-scope app installs its user half and s
 }
 
 t_P23() { # --with-system=manual: root-owned kiwi and lists, nothing that runs as root unattended
+    selffix                      # root installs from its own clone of this tree (M5)
     local src=$TH/checkout; rm -rf $src; cp -r $W $src; chown -R $T $src
     rootphase() { env -i HOME=/root PATH=$STUBS:/usr/sbin:/usr/bin:/bin bash $src/install.sh install "$@" >/dev/null 2>&1; }
     rootphase --with-system=manual

@@ -96,6 +96,13 @@ behaviour someone may rely on; those say so.
   as one `kiwi install -- a b c` (one lock, one password prompt); pin, unpin
   and catalog changes wait their turn instead of colliding with the lock; and
   the listing refreshes once, after the whole batch.
+- **The detail view handles an app's files more carefully** (M8).
+  Screenshots must be PNG, JPEG or WebP, at most 4 MiB, and at most
+  4096 px a side according to their header — checked before anything is
+  decoded, and decoded off the main thread, so a hostile or merely huge image
+  no longer freezes the window. A README is read up to 64 KiB. The homepage
+  row opens only `https://` links; anything else (`file:///…`, other schemes)
+  is shown as text.
 
 ## 2.3.2 — 2026-10-29
 

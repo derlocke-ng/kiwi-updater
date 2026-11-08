@@ -22,7 +22,8 @@ import threading
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, Gio, GLib, GObject, Gdk, Pango  # noqa: E402
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gtk, Adw, Gio, GLib, GObject, Gdk, GdkPixbuf, Pango  # noqa: E402
 
 APP_ID = "eu.kiwinetwork.KiwiUpdater"
 
@@ -393,6 +394,65 @@ def app_icon_file(app):
         return None
 
 
+# Screenshots are files from the app's repo, i.e. from someone else
+# (FIXPLAN-2.4 M8): same rules as the icon — known image types, a size cap on
+# disk, and the dimensions read from the header before anything is decoded,
+# because a 1 KB image that claims to be 60000 x 60000 px decodes to gigabytes.
+SHOT_TYPES = (".png", ".jpg", ".jpeg", ".webp")
+SHOT_MAX_BYTES = 4 * 1024 * 1024
+SHOT_MAX_PX = 4096
+
+
+def shot_file(repo_dir, rel):
+    p = repo_path(repo_dir, rel)
+    if not p or not p.lower().endswith(SHOT_TYPES) or not os.path.isfile(p):
+        return None
+    try:
+        if os.path.getsize(p) > SHOT_MAX_BYTES:
+            return None
+        fmt, w, h = GdkPixbuf.Pixbuf.get_file_info(p)
+    except (OSError, GLib.Error, TypeError, ValueError):
+        return None
+    if fmt is None or not (0 < w <= SHOT_MAX_PX and 0 < h <= SHOT_MAX_PX):
+        return None
+    return p
+
+
+_shot_cache = {}            # (path, mtime) -> Gdk.Texture; a few, they are big
+_SHOT_CACHE_MAX = 6
+
+
+def picture_async(path):
+    """A Gtk.Picture whose image is decoded off the main thread, so opening
+    an app with large screenshots does not freeze the window."""
+    pic = Gtk.Picture()
+    try:
+        key = (path, os.stat(path).st_mtime_ns)
+    except OSError:
+        return pic
+    tex = _shot_cache.get(key)
+    if tex is not None:
+        pic.set_paintable(tex)
+        return pic
+
+    def worker():
+        try:
+            t = Gdk.Texture.new_from_filename(path)
+        except GLib.Error:
+            return
+
+        def done():
+            while len(_shot_cache) >= _SHOT_CACHE_MAX:
+                _shot_cache.pop(next(iter(_shot_cache)))
+            _shot_cache[key] = t
+            pic.set_paintable(t)
+            return False
+        GLib.idle_add(done)
+
+    threading.Thread(target=worker, daemon=True).start()
+    return pic
+
+
 def tile(app, big=False):
     """The app's own icon when it ships one; otherwise a tinted rounded tile
     with a themed glyph centred inside it.
@@ -549,7 +609,7 @@ class ShotDialog(Adw.Dialog):
         self.car = Adw.Carousel(allow_scroll_wheel=True, spacing=24,
                                 hexpand=True, vexpand=True)
         for path in paths:
-            pic = Gtk.Picture.new_for_filename(path)
+            pic = picture_async(path)
             pic.set_content_fit(Gtk.ContentFit.CONTAIN)
             pic.set_can_shrink(True)
             pic.add_css_class("kiwi-shot")
@@ -597,7 +657,7 @@ class ShotDialog(Adw.Dialog):
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
                       halign=Gtk.Align.CENTER)
         for i, path in enumerate(self.paths):
-            pic = Gtk.Picture.new_for_filename(path)
+            pic = picture_async(path)
             pic.set_content_fit(Gtk.ContentFit.COVER)
             pic.set_size_request(104, 62)
             pic.add_css_class("kiwi-shot")
@@ -839,7 +899,7 @@ class DetailDialog(Adw.Dialog):
         self.box.remove(self._placeholder)
         rd = info.get("repo_dir", "")
 
-        shots = [repo_path(rd, p) for p in info.get("screenshots", "").split()]
+        shots = [shot_file(rd, p) for p in info.get("screenshots", "").split()]
         shots = [p for p in shots if p]
         if shots:
             # spacing, so two screenshots stop touching; and each one opens a
@@ -848,7 +908,7 @@ class DetailDialog(Adw.Dialog):
             car = Adw.Carousel(allow_scroll_wheel=False, spacing=14)
             car.set_size_request(-1, 320)
             for i, p in enumerate(shots):
-                pic = Gtk.Picture.new_for_filename(p)
+                pic = picture_async(p)
                 pic.set_content_fit(Gtk.ContentFit.CONTAIN)
                 pic.add_css_class("kiwi-shot")
                 btn = Gtk.Button(child=pic, tooltip_text="Open full size")
@@ -868,12 +928,17 @@ class DetailDialog(Adw.Dialog):
             if info.get(key):
                 facts.add(Adw.ActionRow(title=label, subtitle=esc(info[key])))
                 got = True
-        if info.get("homepage"):
-            r = Adw.ActionRow(title="Homepage", subtitle=esc(info["homepage"]),
-                              activatable=True)
-            r.add_suffix(Gtk.Image(icon_name=ui_icon("adw-external-link-symbolic", "external-link", "go-jump")))
-            r.connect("activated", lambda *_: Gtk.UriLauncher(
-                uri=info["homepage"]).launch(self.win, None, None, None))
+        hp = info.get("homepage", "")
+        if hp:
+            # Only a web page is opened. HOMEPAGE=file:///… or another scheme
+            # would hand the app author's choice of URI to whatever handler the
+            # desktop has for it; anything else is shown as text (M8).
+            web = bool(re.match(r"^https://[^\s]+$", hp))
+            r = Adw.ActionRow(title="Homepage", subtitle=esc(hp), activatable=web)
+            if web:
+                r.add_suffix(Gtk.Image(icon_name=ui_icon("adw-external-link-symbolic", "external-link", "go-jump")))
+                r.connect("activated", lambda *_, u=hp: Gtk.UriLauncher(
+                    uri=u).launch(self.win, None, None, None))
             facts.add(r)
             got = True
         if got:
@@ -947,7 +1012,12 @@ class DetailDialog(Adw.Dialog):
         about = repo_path(rd, info.get("about", ""))
         if about:
             try:
-                text = open(about, encoding="utf-8", errors="replace").read()
+                # capped: the README is the app author's file, and a huge one
+                # would sit in memory and in the layout (M8)
+                with open(about, encoding="utf-8", errors="replace") as f:
+                    text = f.read(65536)
+                    if f.read(1):
+                        text += "\n\n*(truncated — the full README is in the repository)*\n"
             except OSError:
                 text = ""
             if text.strip():

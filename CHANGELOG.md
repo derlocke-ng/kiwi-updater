@@ -127,6 +127,14 @@ behaviour someone may rely on; those say so.
   no longer freezes the window. A README is read up to 64 KiB. The homepage
   row opens only `https://` links; anything else (`file:///…`, other schemes)
   is shown as text.
+- **Icons no longer blink, and the list no longer jumps** (U2). Every
+  refresh — at startup and after every install, update, pin or catalog
+  change — threw away every card and row and rebuilt them, decoding each icon
+  again on the main thread, twice (the hidden view was built as well), and
+  lost the scroll position. Now icons are decoded in the background and kept;
+  a refresh changes only the cards whose app changed; only the visible view
+  is built; and an app's own icon sits in the same rounded tile as the
+  fallback glyph, so every icon has the same shape and place.
 
 ## 2.3.2 — 2026-10-29
 

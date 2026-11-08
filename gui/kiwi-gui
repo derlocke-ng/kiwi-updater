@@ -10,6 +10,7 @@ All data comes from the CLI (`kiwi list --porcelain`, `kiwi info --porcelain`),
 which stays the single source of truth. Images are read from the app's own
 cloned repo, so nothing here fetches from the network.
 """
+import functools
 import os
 import re
 import shlex
@@ -453,22 +454,59 @@ def picture_async(path):
     return pic
 
 
-def tile(app, big=False):
+# An app's own icon, decoded once per (file, mtime, size) and kept (U2). The
+# list is rebuilt after every install, pin and catalog change; each rebuild
+# used to stat, open and rasterise every icon again on the main thread, and
+# they visibly blinked. Called from the refresh worker thread for the list
+# (GdkPixbuf and Gdk.MemoryTexture are safe there), on demand for the rest.
+_tex_cache = {}
+
+
+def icon_texture(path, px, scale=1):
+    try:
+        key = (path, os.stat(path).st_mtime_ns, px * scale)
+    except OSError:
+        return None
+    t = _tex_cache.get(key)
+    if t is None:
+        try:
+            pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, px * scale, px * scale, True)
+            fmt = (Gdk.MemoryFormat.R8G8B8A8 if pb.get_has_alpha()
+                   else Gdk.MemoryFormat.R8G8B8)
+            t = Gdk.MemoryTexture.new(pb.get_width(), pb.get_height(), fmt,
+                                      pb.read_pixel_bytes(), pb.get_rowstride())
+        except (GLib.Error, TypeError, ValueError):
+            return None
+        _tex_cache[key] = t
+    return t
+
+
+def tile(app, big=False, scale=1):
     """The app's own icon when it ships one; otherwise a tinted rounded tile
-    with a themed glyph centred inside it.
+    with a themed glyph centred inside it. Both in the same tile, so every
+    app's icon has the same shape and sits in the same place (U2).
 
     Each app owns its icon (ICON= in its manifest, the file in its repo); kiwi
-    only shows it. Through a FileIcon, so GTK's icon loader renders the SVG at
-    the requested size instead of scaling a 128 px bitmap down — crisp at the
-    46 px of a list row."""
-    own = app_icon_file(app)
-    if own:
-        img = Gtk.Image.new_from_gicon(Gio.FileIcon.new(Gio.File.new_for_path(own)))
-        img.set_pixel_size(96 if big else 46)
-        img.set_halign(Gtk.Align.START)
+    only shows it, rendered at the device scale so an SVG stays crisp."""
+    px = 96 if big else 46
+    tex = getattr(app, "tex", None) if not big else None
+    if tex is None:
+        own = app_icon_file(app)
+        if own:
+            tex = icon_texture(own, px, scale)
+    if tex is not None:
+        img = Gtk.Image.new_from_paintable(tex)
+        img.set_pixel_size(px)
+        img.set_halign(Gtk.Align.CENTER)
         img.set_valign(Gtk.Align.CENTER)
-        img.set_hexpand(False)
-        return img
+        box = Gtk.Box()
+        box.append(img)
+        box.add_css_class("kiwi-bigtile" if big else "kiwi-tile")
+        box.set_overflow(Gtk.Overflow.HIDDEN)      # the tile's rounded corners
+        box.set_halign(Gtk.Align.START)
+        box.set_valign(Gtk.Align.CENTER)
+        box.set_hexpand(False)
+        return box
 
     # The image needs to expand and centre itself: a plain Gtk.Box lays its
     # child out at the start, so the icon sits in the corner of the tile and
@@ -522,13 +560,32 @@ class Card(Gtk.Widget):
         Gtk.Widget.do_dispose(self)
 
 
+def parse_porcelain(text):
+    """`kiwi list --porcelain` -> [(line, fields dict)]. Field positions are
+    the CLI's contract: append-only, never reordered."""
+    rows = []
+    for line in text.splitlines():
+        p = line.split("\t")
+        if len(p) < 7:
+            continue
+        f = lambda i: p[i] if len(p) > i else ""  # noqa: E731
+        rows.append((line, dict(
+            name=p[0], scopes=p[1], comp=p[2], status=p[3], ver=p[4],
+            url=p[5], desc=p[6], tref=f(7), category=f(8), tags=f(9),
+            repo_dir=f(10), root_reason=f(11), installed_scopes=f(12),
+            pinned=f(13), icon=f(14), origin=f(15), root_known=f(16))))
+    return rows
+
+
 class App(GObject.Object):
     """One app, as the CLI described it."""
     __gtype_name__ = "KiwiApp"
 
-    def __init__(self, d):
+    def __init__(self, d, line="", tex=None):
         super().__init__()
         self.d = d
+        self.line = line        # the porcelain line it was built from (U2 diff)
+        self.tex = tex          # its own icon, decoded off the main thread
 
     def __getitem__(self, k):
         return self.d.get(k, "")
@@ -750,7 +807,7 @@ class DetailDialog(Adw.Dialog):
     def _build_header(self):
         a = self.app
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18)
-        self.big_icon = tile(a, big=True)
+        self.big_icon = tile(a, big=True, scale=self.win.get_scale_factor())
         self.big_icon.set_valign(Gtk.Align.START)
         row.append(self.big_icon)
 
@@ -1227,6 +1284,8 @@ class Window(Adw.ApplicationWindow):
         self._refresh_wanted = False
         self._active_names = []  # the names the running action is about
         self._btns = {}          # app name -> its action buttons (both views)
+        self._bound = None       # which view is bound to the model (U2)
+        self._unbound = Gio.ListStore(item_type=App)   # what the hidden view shows
         self._pulse = None
         self.set_default_size(980, 800)
         self.set_size_request(360, 420)
@@ -1235,8 +1294,10 @@ class Window(Adw.ApplicationWindow):
         self.store = Gio.ListStore(item_type=App)
         self.filtered = Gtk.FilterListModel(
             model=self.store, filter=Gtk.CustomFilter.new(self._match))
-        self.sorted = Gtk.SortListModel(
-            model=self.filtered, sorter=Gtk.CustomSorter.new(self._compare))
+        # The store itself is kept in display order (populate, _resort). A
+        # Gtk.SortListModel on top reported a one-row change as a change to
+        # every row before it, and the views rebuilt all of those (U2).
+        self.sorted = self.filtered
 
         header = Adw.HeaderBar()
         self.title = Adw.WindowTitle(title="Kiwi Apps", subtitle="")
@@ -1335,13 +1396,12 @@ class Window(Adw.ApplicationWindow):
             selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
             min_children_per_line=1, max_children_per_line=8,
             row_spacing=12, column_spacing=12, valign=Gtk.Align.START)
-        self.gridbox.bind_model(self.sorted, self._make_card)
+        # bound in _bind_views: only the visible one (U2)
         self.gridbox.connect("child-activated",
                              lambda _fb, ch: self._open(ch.get_child().app))
 
         self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         self.listbox.add_css_class("boxed-list")
-        self.listbox.bind_model(self.sorted, self._make_row)
         self.listbox.connect("row-activated", self._on_row_activated)
         self.listbox.set_header_func(self._header)
 
@@ -1411,11 +1471,33 @@ class Window(Adw.ApplicationWindow):
         bp.connect("apply", lambda *_: self._set_narrow(True))
         bp.connect("unapply", lambda *_: self._set_narrow(False))
         self.add_breakpoint(bp)
+        self._bind_views()
+        # 4. a different icon theme can have different icons (U2)
+        settings = Gtk.Settings.get_default()
+        if settings is not None:
+            settings.connect("notify::gtk-icon-theme-name", lambda *_: _icon_cache.clear())
 
         self.refresh()
 
+    def _bind_views(self):
+        """Only the visible view holds widgets (U2). Both used to be bound to
+        the same model, so every card AND every row was built, and every icon
+        drawn twice, for a view nobody could see."""
+        want = "rows" if self.narrow else "grid"
+        if self._bound == want:
+            return
+        # an empty model, not None: PyGObject will not pass a NULL widget func
+        if want == "grid":
+            self.listbox.bind_model(self._unbound, self._make_row)
+            self.gridbox.bind_model(self.sorted, self._make_card)
+        else:
+            self.gridbox.bind_model(self._unbound, self._make_card)
+            self.listbox.bind_model(self.sorted, self._make_row)
+        self._bound = want
+
     def _set_narrow(self, narrow):
         self.narrow = narrow
+        self._bind_views()
         self.sort_label.set_visible(not narrow)
         self.viewstack.set_visible_child_name("rows" if narrow else "grid")
         # the toolbar has to sit in the same column as the content, or the
@@ -1472,7 +1554,8 @@ class Window(Adw.ApplicationWindow):
         GLib.idle_add(self._set_narrow, self.narrow)
 
     def _resort(self):
-        self.sorted.get_sorter().changed(Gtk.SorterChange.DIFFERENT)
+        items = sorted(self._all(), key=functools.cmp_to_key(self._compare))
+        self.store.splice(0, self.store.get_n_items(), items)
         self.listbox.invalidate_headers()
 
     def _update_empty(self):
@@ -1516,6 +1599,9 @@ class Window(Adw.ApplicationWindow):
                 btn.set_icon_name(ui_icon("go-next-symbolic", "go-next"))
             btn.add_css_class("flat")
             btn.connect("clicked", lambda *_: self._open(app))
+        # what to go back to when a kept card's job is over (U1 + U2)
+        btn.kiwi_label = btn.get_label()
+        btn.kiwi_suggested = btn.has_css_class("suggested-action")
         if app["name"] in self._pending_names():
             self._mark_btn(btn, "Running…" if app["name"] in self._active_names else "Queued")
         return btn
@@ -1532,7 +1618,7 @@ class Window(Adw.ApplicationWindow):
         card.add_css_class("kiwi-card")
 
         head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        head.append(tile(app))
+        head.append(tile(app, scale=self.get_scale_factor()))
         text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1,
                        hexpand=True, halign=Gtk.Align.FILL,
                        valign=Gtk.Align.CENTER)
@@ -1597,7 +1683,7 @@ class Window(Adw.ApplicationWindow):
         row.set_subtitle(GLib.markup_escape_text(app["desc"] or app["comp"]))
         row.set_subtitle_lines(1)
         row.app = app
-        row.add_prefix(tile(app))
+        row.add_prefix(tile(app, scale=self.get_scale_factor()))
 
         row.optional = []
         for p in scope_pills(app):
@@ -1668,6 +1754,7 @@ class Window(Adw.ApplicationWindow):
         self._refresh_wanted = False
         self.refreshing = True
         self.set_busy(True, "Checking for updates…")
+        scale = self.get_scale_factor()
 
         def worker():
             try:
@@ -1676,35 +1763,66 @@ class Window(Adw.ApplicationWindow):
             except Exception as e:  # noqa: BLE001
                 out = ""
                 GLib.idle_add(self.append_log, "refresh failed: %s\n" % e)
-            GLib.idle_add(self.populate, out)
+            rows = parse_porcelain(out)
+            texs = {}
+            for line, d in rows:
+                own = app_icon_file(d)
+                if own:
+                    texs[line] = icon_texture(own, 46, scale)
+            GLib.idle_add(self.populate, rows, texs)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def populate(self, porcelain):
-        self._btns = {}          # every card and row is rebuilt below
-        self.store.remove_all()
-        cats, updates = set(), 0
-        for line in porcelain.splitlines():
-            p = line.split("\t")
-            if len(p) < 7:
+    def populate(self, rows, texs=None):
+        """Bring the store in line with a fresh listing, touching only what
+        changed (U2). Rows whose porcelain line is the same keep their App
+        object, so their cards and rows — icon, scroll position, a "Queued"
+        label — survive; only the changed run in the middle is spliced."""
+        texs = texs or {}
+        rows = sorted(rows, key=functools.cmp_to_key(lambda x, y: self._compare(x[1], y[1])))
+        # One small edit per difference: a row whose line is unchanged stays
+        # put (its widget too), a row that moved is moved, a changed one is
+        # replaced in place. A single wide splice would rebuild every card it
+        # covered, and a sort by status moves rows on most refreshes.
+        new_set = {line for line, _ in rows}
+        for k in range(self.store.get_n_items() - 1, -1, -1):   # gone or changed: out first
+            if self.store.get_item(k).line not in new_set:
+                self.store.remove(k)
+        i = 0
+        for line, d in rows:
+            n = self.store.get_n_items()
+            cur = self.store.get_item(i) if i < n else None
+            if cur is not None and cur.line == line:
+                i += 1
                 continue
-            d = dict(name=p[0], scopes=p[1], comp=p[2], status=p[3], ver=p[4],
-                     url=p[5], desc=p[6],
-                     tref=p[7] if len(p) > 7 else "",
-                     category=p[8] if len(p) > 8 else "",
-                     tags=p[9] if len(p) > 9 else "",
-                     repo_dir=p[10] if len(p) > 10 else "",
-                     root_reason=p[11] if len(p) > 11 else "",
-                     installed_scopes=p[12] if len(p) > 12 else "",
-                     pinned=p[13] if len(p) > 13 else "",
-                     icon=p[14] if len(p) > 14 else "",
-                     origin=p[15] if len(p) > 15 else "",
-                     root_known=p[16] if len(p) > 16 else "")
-            if d["status"] == "update-available":
-                updates += 1
-            if d["category"]:
-                cats.add(d["category"])
-            self.store.append(App(d))
+            j = next((k for k in range(i + 1, n)
+                      if self.store.get_item(k).line == line), None)
+            if j is not None:
+                obj = self.store.get_item(j)
+                self.store.remove(j)
+                self.store.insert(i, obj)
+            else:
+                self.store.insert(i, App(d, line, texs.get(line)))
+            i += 1
+        n = self.store.get_n_items()
+        if n > i:
+            self.store.splice(i, n - i, [])
+        # drop buttons whose card or row is gone; a kept one whose job is over
+        # (failed, so its row did not change) gets its own label back
+        self._btns = {n: [b for b in bs if b.get_root() is not None]
+                      for n, bs in self._btns.items()}
+        pending = self._pending_names()
+        for n, bs in self._btns.items():
+            if n in pending:
+                continue
+            for b in bs:
+                if not b.get_sensitive() and getattr(b, "kiwi_label", None):
+                    b.set_label(b.kiwi_label)
+                    b.set_sensitive(True)
+                    if b.kiwi_suggested:
+                        b.add_css_class("suggested-action")
+        cats = {a["category"] for a in self._all() if a["category"]}
+        updates = sum(1 for a in self._all() if a["status"] == "update-available")
 
         self._build_chips(sorted(cats))
 

@@ -148,6 +148,10 @@ if [[ $EUID -eq 0 ]]; then
     # KIWI_FETCH_JOBS='PATH[$(cmd)]' was command execution in an arithmetic
     # context. KIWI_UNATTENDED stays: it only ever suppresses prompts.
     unset KIWI_NET_TIMEOUT KIWI_FETCH_JOBS KIWI_LOCK_WAIT KIWI_GUI KIWI_DEP_STACK
+    # Root's clones are read by the user side (installed? which commit?), so
+    # they must stay world-readable after every fetch, not only after the
+    # first clone that sync_repo chmods (L2). Installers inherit this too.
+    umask 022
 fi
 
 # a number from the environment, or the default — never evaluated as an expression
@@ -173,6 +177,13 @@ NET_TIMEOUT="$(env_num "${KIWI_NET_TIMEOUT:-}" 180)"
 # credential helper (keyring, gh, a stored token) whenever a URL answered 401.
 export GIT_TERMINAL_PROMPT=0
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0=
+# Root's git, hardened (FIXPLAN-2.4 L2): check every object a remote sends
+# before it is stored, and never run a hook, whatever a clone's config says.
+if [[ $EUID -eq 0 ]]; then
+    export GIT_CONFIG_COUNT=3 \
+           GIT_CONFIG_KEY_1=transfer.fsckObjects GIT_CONFIG_VALUE_1=true \
+           GIT_CONFIG_KEY_2=core.hooksPath       GIT_CONFIG_VALUE_2=/dev/null
+fi
 unset GIT_ASKPASS SSH_ASKPASS 2>/dev/null || true
 
 # Transport allowlist, enforced by git itself. `kiwi list` clones every entry
@@ -1120,6 +1131,7 @@ run_installer() { # scope repo_dir action [purge]
     # legitimately clones something of its own.
     ( cd "$dir" &&
       env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 \
+          -u GIT_CONFIG_KEY_1 -u GIT_CONFIG_VALUE_1 -u GIT_CONFIG_KEY_2 -u GIT_CONFIG_VALUE_2 \
           -u GIT_ALLOW_PROTOCOL \
           KIWI_SCOPE="$scope" \
           KIWI_ACTION="$action" \

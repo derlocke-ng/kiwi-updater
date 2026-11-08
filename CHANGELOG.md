@@ -49,6 +49,11 @@ behaviour someone may rely on; those say so.
   `KIWI_DEP_STACK` (only `KIWI_UNATTENDED`, which can only suppress prompts,
   is kept), and every numeric setting is checked to be a plain number before
   use, as any user too.
+- **Root's git is stricter** (L2). Root checks every object a remote sends
+  (`transfer.fsckObjects`) and never runs git hooks (`core.hooksPath=/dev/null`);
+  app installers do not inherit either. Root runs with `umask 022`, so its
+  clones stay readable to the user-side view after every fetch, not only after
+  the first clone.
 - **Tab completion no longer runs code from a catalog** (H2). `compgen -W`
   expands its word list, so an entry like `https://…/$(cmd).git` — whose
   basename becomes the app's name when the repo has no usable `NAME` — ran

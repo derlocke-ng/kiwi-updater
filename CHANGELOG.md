@@ -3,6 +3,21 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 2.4.0 — unreleased
+
+Security release from the 2.3.2 audit (`FIXPLAN-2.4.md`). Some entries change
+behaviour someone may rely on; those say so.
+
+- **Tab completion no longer runs code from a catalog** (H2). `compgen -W`
+  expands its word list, so an entry like `https://…/$(cmd).git` — whose
+  basename becomes the app's name when the repo has no usable `NAME` — ran
+  `cmd` the moment you pressed Tab after `kiwi install `, as root in a root
+  shell. Completion now matches names as plain text, and a URL whose basename
+  does not look like a name (`^[A-Za-z0-9][A-Za-z0-9._-]*$`) is refused
+  everywhere: `kiwi add`, `catalog add`, lists and catalogs (reported with the
+  file it is in), and the root wrapper. *Changes behaviour:* a repo whose name
+  starts with `.`/`_`/`-` or contains other characters can no longer be listed.
+
 ## 2.3.2 — 2026-10-29
 
 - **DEPENDS examples follow the kiwi-proxy split.** The provider plugins now

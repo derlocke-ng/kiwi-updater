@@ -40,6 +40,8 @@ known() {
     while read -r url _; do
         [[ -z ${url:-} ]] && continue
         d="$(basename "${url%.git}")"
+        # a basename is not a name until it looks like one (FIXPLAN-2.4 H2)
+        [[ $d =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || continue
         printf '%s\n' "$d"
     done < <(grep -Ev '^[[:space:]]*(#|$)' "$SYS_LIST" 2>/dev/null || true)
 }

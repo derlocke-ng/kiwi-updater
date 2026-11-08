@@ -184,13 +184,16 @@ kiwi network apps take theirs from
 installs a desktop entry, install the same file as its icon, so the app menu
 and kiwi show the same picture — kiwi-updater does exactly that.
 
-Release by tagging: `git tag v1.3.0 && git push --tags`. Or let a merged
-version bump release itself: copy [`templates/release.yml`](templates/release.yml)
-to `.github/workflows/release.yml`, and every push to `main` whose `VERSION`
-has no tag yet tags `v<VERSION>` and publishes a GitHub Release. It refuses a
-version kiwi would not install or one older than your newest release, and
-runs your `tests/check-version.sh` first if you have one. Every kiwi network
-app carries it.
+Release by pushing a **signed** tag: `git tag -s v1.3.0 -m v1.3.0 && git push
+origin v1.3.0`, with `gpg.format=ssh` and your release key as
+`user.signingkey` (see *Signed releases*: root updates an app without a
+password only to tags signed by the key it pinned). To publish the GitHub
+Release too, copy [`templates/release.yml`](templates/release.yml) to
+`.github/workflows/release.yml` and list your key in `.github/allowed_signers`:
+for each pushed `v*` tag it checks the signature, that the tag equals
+`VERSION`, that it is newer than your newest release and that your
+`tests/check-version.sh` passes, then publishes the notes. It never makes or
+signs a tag itself. Every kiwi network app carries it.
 
 A tag counts as a release only if it matches `^v?[0-9]+(\.[0-9]+){0,3}$` —
 `v1`, `v1.2`, `1.2.3` and `v1.2.3.4` all qualify. `v2.0.0-rc1`, `nightly` and

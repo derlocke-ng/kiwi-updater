@@ -49,7 +49,7 @@ matter most:
   `/etc/kiwi-updater`, `/var/lib/kiwi-updater` and `/usr/local/bin/kiwi`. Container only:
   ```bash
   podman run --rm -v "$PWD":/src:ro,Z fedora:latest bash -c \
-    'dnf -y -q install git-core gawk util-linux shadow-utils procps-ng python3 openssl >/dev/null && bash /src/tests/repro.sh'
+    'dnf -y -q install git-core gawk util-linux shadow-utils procps-ng python3 openssl openssh-clients >/dev/null && bash /src/tests/repro.sh'
   ```
 - Never run `install.sh`, `get-kiwi.sh`, `sudo` or `pkexec` on the host to "try something".
   The GUI (`gui/kiwi-gui`) may be run on the host — it only calls the CLI — but

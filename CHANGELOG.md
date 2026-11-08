@@ -21,6 +21,14 @@ behaviour someone may rely on; those say so.
   in the Fedora Atomic images). *Changes behaviour:* system apps whose
   releases are not signed no longer update in the background — kiwi-updater's
   own releases are signed from 2.4.0 on.
+- **Releases are signed tags; CI no longer makes them** (H4).
+  `release.yml` used to turn any push to `main` that bumped `VERSION` into a
+  tag, with a write token and actions pinned by tag — so a push to `main`, or a
+  compromised action, was a release root would install. Now a maintainer signs
+  and pushes the tag (`git tag -s`); the workflow runs for pushed `v*` tags
+  only, checks the signature against `.github/allowed_signers`, the version
+  and the ordering, and publishes the notes. Every action is pinned to a
+  commit SHA (`templates/release.yml` the same, for every kiwi app).
 - **Root no longer follows a local repo it does not own** (H1). *Migration:*
   if you ran `kiwi add --system /home/…/repo` (or root ever recorded a local
   path for you), root now skips that entry — `kiwi doctor` lists it. Use the

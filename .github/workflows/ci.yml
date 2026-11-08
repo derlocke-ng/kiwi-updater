@@ -5,7 +5,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       - name: shellcheck
         run: |
           shellcheck -S warning bin/kiwi install.sh get-kiwi.sh \
@@ -19,7 +19,7 @@ jobs:
   repro:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       # The same command the README and FIXPLAN tell a developer to run, rather
       # than a `container:` job: repro.sh needs root, useradd and a disposable
       # filesystem, and running it through docker here means CI exercises the
@@ -27,5 +27,5 @@ jobs:
       - name: findings stay fixed
         run: |
           docker run --rm -v "$PWD":/src:ro fedora:latest bash -c \
-            'dnf -y -q install git-core gawk util-linux shadow-utils procps-ng python3 >/dev/null &&
+            'dnf -y -q install git-core gawk util-linux shadow-utils procps-ng python3 openssl openssh-clients >/dev/null &&
              bash /src/tests/repro.sh'

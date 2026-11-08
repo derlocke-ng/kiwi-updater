@@ -84,6 +84,13 @@ behaviour someone may rely on; those say so.
   the GUI's refresh. Each run now asks every remote once, a few at a time
   (`KIWI_FETCH_JOBS`, default 4), and remembers the answer for the rest of
   the run; an unreachable remote costs one timeout instead of three.
+- **`kiwi list` is about 2.7× faster** (Q3): with 15 installed apps,
+  `kiwi list --porcelain --no-sync` (Tab completion, and the GUI's first
+  view) went from ~940 ms to ~350 ms, `--check` against local remotes from
+  ~1.5 s to ~0.8 s. Fewer processes: no `basename` per entry, each manifest
+  read once per app instead of a dozen times, and where an entry comes from
+  worked out once per listing instead of once per row. The output is
+  byte-for-byte the same.
 - **Tab completion no longer runs code from a catalog** (H2). `compgen -W`
   expands its word list, so an entry like `https://…/$(cmd).git` — whose
   basename becomes the app's name when the repo has no usable `NAME` — ran

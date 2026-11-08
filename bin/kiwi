@@ -806,7 +806,10 @@ catalog_has_url() { # url
 }
 
 dir_name() { # url -> repo directory name
-    local b; b="$(basename "$1")"
+    # no `basename`: this runs for every entry many times per command (Q3)
+    local b="$1"
+    while [[ $b == */ ]]; do b="${b%/}"; done
+    b="${b##*/}"
     echo "${b%.git}"
 }
 
@@ -856,6 +859,26 @@ manifest_get() { # repo_dir key default
 # wrapper, so it has to look like a name. A manifest that disagrees falls back
 # to the repo's directory name rather than putting something shaped like an
 # option where a name is expected.
+# The whole manifest in one read, for loops that want many keys of it (Q3):
+# cmd_list used to start ~12 subshells per app, one manifest_get each. Same
+# rules as manifest_get — the first KEY= line wins, cleaned the same way.
+declare -gA MF=()
+manifest_load() { # repo_dir -> MF[KEY]=value
+    MF=()
+    local f="$1/$MANIFEST" line k v
+    [[ -f $f ]] || return 0
+    while IFS= read -r line || [[ -n $line ]]; do
+        [[ $line == [A-Za-z_]*=* ]] || continue
+        k="${line%%=*}"
+        [[ -n ${MF[$k]+x} ]] && continue
+        v="${line#*=}"
+        v="${v//$'\t'/ }"
+        v="${v//[[:cntrl:]]/}"
+        v="${v%"${v##*[![:space:]]}"}"
+        MF[$k]="$v"
+    done < "$f"
+}
+
 manifest_name() { # repo_dir fallback
     local n; n="$(manifest_get "$1" NAME "")"
     if [[ ! $n =~ $NAME_RE ]]; then
@@ -1765,6 +1788,13 @@ cmd_list() {
 
     local url opts dir name comp comp_full ver desc scs lbl status target tsha tref sc
     local found=0 inst miss any_root=0 inst_scs pin_ref
+    # where each entry comes from, read once rather than once per row (Q3)
+    local -A orig=() origl=(); local osrc ou okey origin
+    while IFS=$'\t' read -r osrc ou _; do
+        [[ -z $ou ]] && continue
+        okey="${ou%/}"; okey="${okey%.git}"
+        [[ -n ${orig[$okey]+x} ]] || orig[$okey]="$osrc"
+    done < <(app_entries_raw)
     (( porcelain )) || printf '%s%-20s %-12s %-22s %-9s %-17s %s%s\n' \
         "$c_bold" NAME SCOPES COMPONENTS VERSION STATUS DESCRIPTION "$c_off"
     while IFS=$'\t' read -r url opts; do
@@ -1774,12 +1804,18 @@ cmd_list() {
         # read the details out of the clone the app was installed from, so the
         # version shown is the version running
         dir="$(installed_dir "$url")"
-        name="$(manifest_name "$dir" "$(dir_name "$url")")"
-        comp="$(manifest_get "$dir" COMPONENTS "$(manifest_get "$dir" TYPE "?")")"
-        ver="$(manifest_get "$dir" VERSION "-")"
+        manifest_load "$dir"
+        name="${MF[NAME]:-}"
+        if [[ ! $name =~ $NAME_RE ]]; then
+            [[ -n $name ]] && warn "ignoring unusable NAME '$name' in $dir/$MANIFEST"
+            name="$(dir_name "$url")"
+            [[ $name =~ $NAME_RE ]] || name=""
+        fi
+        comp="${MF[COMPONENTS]:-${MF[TYPE]:-?}}"
+        ver="${MF[VERSION]:--}"
         comp_full="$comp"
         (( ${#comp} > 22 )) && comp="${comp:0:21}…"
-        desc="$(manifest_get "$dir" DESCRIPTION "")"
+        desc="${MF[DESCRIPTION]:-}"
         scs="$(effective_scopes "$dir" "$opts" "$url")"
         [[ -z $scs ]] && scs="$(entry_opt "$opts" scope user)"
         lbl="$(scope_label $scs)"
@@ -1830,14 +1866,17 @@ cmd_list() {
             # "catalog NAME"); 17: for an app with a system half, 1 if root
             # lists this URL (it can install it), 0 if it must be registered
             # first (D4); empty otherwise
+            okey="${url%/}"; okey="${okey%.git}"; osrc="${orig[$okey]:-}"
+            [[ -n ${origl[$osrc]+x} ]] || origl[$osrc]="$(origin_label "$osrc")"
+            origin="${origl[$osrc]}"
             printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
                 "$name" "$scs" "$comp_full" "$status" "$ver" "$url" "$desc" "${tref:-}" \
-                "$(manifest_get "$dir" CATEGORY "")" \
-                "$(manifest_get "$dir" TAGS "")" "$dir" \
-                "$(manifest_get "$dir" ROOT_REASON "")" \
+                "${MF[CATEGORY]:-}" \
+                "${MF[TAGS]:-}" "$dir" \
+                "${MF[ROOT_REASON]:-}" \
                 "$inst_scs" "$pin_ref" \
-                "$(manifest_get "$dir" ICON "")" \
-                "$(entry_origin "$url")" \
+                "${MF[ICON]:-}" \
+                "$origin" \
                 "$([[ $scs == *system* ]] && { root_will_know "$url" && echo 1 || echo 0; } || true)"
         else
             local col=""
@@ -1931,7 +1970,10 @@ entry_sources() { # url
 # where the entry for <url> comes from, said for a person: "your list",
 # "system list", or "catalog <NAME>" — shown before root is asked for (M4)
 entry_origin() { # url
-    local src; src="$(entry_sources "$1" | head -1)"
+    origin_label "$(entry_sources "$1" | head -1)"
+}
+origin_label() { # list file -> "your list" | "system list" | "catalog NAME"
+    local src="$1"
     case "$src" in
         "") echo "" ;;
         "$USER_LIST") echo "your list" ;;

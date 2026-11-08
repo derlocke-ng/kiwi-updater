@@ -39,6 +39,10 @@ known() {
     [[ -r $SYS_LIST ]] || return 0
     while read -r url _; do
         [[ -z ${url:-} ]] && continue
+        # only entries root follows by URL alone: a local path counts for root
+        # only when it is root-owned all the way up (H1), and kiwi list above
+        # already names every one of those that is usable
+        [[ $url == https://* ]] || continue
         d="$(basename "${url%.git}")"
         # a basename is not a name until it looks like one (FIXPLAN-2.4 H2)
         [[ $d =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || continue

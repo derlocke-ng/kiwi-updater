@@ -1065,12 +1065,33 @@ installer_path() { # scope
     fi
 }
 
+# The installer that runs is a regular file inside the clone — the one `kiwi
+# diff` reviewed and root just checked out (FIXPLAN-2.4 M6). INSTALLER=../../x
+# or an install.sh committed as a symlink made kiwi run a file outside the
+# root-owned clone, which whoever owns that file can change at any time.
+installer_name() { # repo_dir -> the INSTALLER path, if its shape is usable
+    local inst; inst="$(manifest_get "$1" INSTALLER install.sh)"
+    [[ -n $inst && $inst != /* && $inst != *..* ]] || return 1
+    echo "$inst"
+}
+installer_file() { # repo_dir -> absolute path of the installer, or fail
+    local inst p d
+    inst="$(installer_name "$1")" || return 1
+    [[ ! -L "$1/$inst" ]] || return 1
+    p="$(realpath -e -- "$1/$inst" 2>/dev/null)" || return 1
+    d="$(realpath -e -- "$1" 2>/dev/null)" || return 1
+    [[ $p == "$d"/* && -f $p ]] || return 1
+    echo "$p"
+}
+
 run_installer() { # scope repo_dir action [purge]
     local scope="$1" dir="$2" action="$3" purge="${4:-0}"
-    local inst; inst="$(manifest_get "$dir" INSTALLER install.sh)"
+    local inst ipath; inst="$(manifest_get "$dir" INSTALLER install.sh)"
     # One unusable app must not abort the run: with --all that would mean the
     # first broken repo stops every app after it from being updated.
-    [[ -f "$dir/$inst" ]] || { warn "installer '$inst' not found in $dir"; return 1; }
+    ipath="$(installer_file "$dir")" || {
+        warn "installer '$inst' is missing, a symlink, or outside $dir — not running it"
+        return 1; }
     local gui; gui="$(effective_gui "$dir")"
     # --purge has to reach the app. The README promises it "also drops its
     # config", but kiwi only ever removed the URL from its own list and called
@@ -1095,7 +1116,7 @@ run_installer() { # scope repo_dir action [purge]
           KIWI_GUI="$gui" \
           KIWI_PURGE="$purge" \
           PATH="$(installer_path "$scope")" \
-          bash "./$inst" "${args[@]}" 9>&- )
+          bash "$ipath" "${args[@]}" 9>&- )
 }
 
 # Every failure path RETURNS, and none of them die. This runs inside $(...),
@@ -1860,13 +1881,14 @@ cmd_info() { # [--porcelain] [--installer] name
         IFS=$'\t' read -r url opts <<<"$line"
         dir="$(sync_meta "$url" "$opts")" || die "cannot reach $url"
         scs="$(effective_scopes "$dir" "$opts" "$url")"
-        local inst; inst="$(manifest_get "$dir" INSTALLER install.sh)"
-        [[ -f "$dir/$inst" ]] || die "there is no installer '$inst' in $dir"
+        local inst ipath; inst="$(manifest_get "$dir" INSTALLER install.sh)"
+        ipath="$(installer_file "$dir")" ||
+            die "installer '$inst' is missing, a symlink, or outside $dir — kiwi would not run it"
         info "$inst from $url"
         [[ $scs == *system* ]] &&
             info "${c_ylw}this app declares the system scope, so kiwi runs this as root${c_off}"
         log ""
-        safe_text < "$dir/$inst"
+        safe_text < "$ipath"
         return 0
     fi
 
@@ -2075,7 +2097,8 @@ cmd_diff() {
         log ""
         log "${c_bold}files${c_off}"
         git -C "$dir" -c core.quotePath=true diff --no-color --stat "$from" "$tsha" 2>/dev/null | safe_text | sed 's/^/  /'
-        inst="$(manifest_get "$dir" INSTALLER install.sh)"
+        inst="$(installer_name "$dir")" || {
+            warn "unusable INSTALLER in $dir — kiwi would not run it"; continue; }
         log ""
         if git -C "$dir" diff --quiet "$from" "$tsha" -- "$inst" 2>/dev/null; then
             log "${c_dim}$inst is unchanged${c_off}"

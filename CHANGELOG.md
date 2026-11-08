@@ -31,6 +31,12 @@ behaviour someone may rely on; those say so.
   unless root's own list pins it (`kiwi pin --system <app> <tag>`). *Changes
   behaviour:* `ref=`/`branch=` in a catalog now only apply to user-scope
   installs.
+- **The installer that runs is the one inside the clone** (M6).
+  `INSTALLER=../../../tmp/x.sh`, or an `install.sh` committed as a symlink,
+  made kiwi run a file outside the root-owned clone — one whoever owns it can
+  change at any time — and made `kiwi diff` review a different file from the
+  one that ran. The installer must now be a regular file inside the clone;
+  otherwise install, update, `info --installer` and `diff` refuse it.
 - **Tab completion no longer runs code from a catalog** (H2). `compgen -W`
   expands its word list, so an entry like `https://…/$(cmd).git` — whose
   basename becomes the app's name when the repo has no usable `NAME` — ran

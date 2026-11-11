@@ -287,6 +287,14 @@ catalog_urls() {
     done | sort -u
 }
 
+catalogs_unfetched() { # is any registered catalog still without a clone?
+    local u
+    while read -r u _; do
+        [[ -n ${u:-} && ! -d "$(catalogs_dir)/$(dir_name "$u")/.git" ]] && return 0
+    done < <(catalog_urls)
+    return 1
+}
+
 # the registered catalogs, minus anything unusable
 valid_catalog_urls() {
     local u
@@ -1971,7 +1979,10 @@ cmd_list() {
             *) die "unknown option: $1" ;;
         esac; shift
     done
-    (( check )) && sync_catalogs
+    # A catalog registered but never fetched — the default one right after
+    # install — listed no apps until something else synced (PORTPLAN K7).
+    # Fetch those once; --no-sync (Tab completion) stays offline.
+    if (( check )) || { (( ! nosync )) && catalogs_unfetched; }; then sync_catalogs; fi
     (( nosync )) || sync_all_meta
     if (( check )); then
         # every remote this listing will ask about, asked in parallel first

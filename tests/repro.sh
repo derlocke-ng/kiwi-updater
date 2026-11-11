@@ -1330,10 +1330,24 @@ t_H4() { # root updates without a password only to releases signed by the key it
     check H4 "signed releases: ${r[*]}" f
 }
 
+t_K7() { # right after install, `kiwi list` shows the apps of the registered catalog
+    # install.sh registers the default catalog without fetching it; the first
+    # `kiwi list` printed kiwi-updater alone on every distro (PORTPLAN K7)
+    mkapp a k7one user; mkapp a k7two user
+    mkcat c k7cat $GITROOT/a/k7one.git $GITROOT/a/k7two.git
+    mkdir -p $TH/.config/kiwi-updater
+    echo "$GITROOT/c/k7cat.git" > $TH/.config/kiwi-updater/catalogs.list; chown -R $T $TH/.config
+    local offline names
+    offline="$(ku list --porcelain --no-sync 2>/dev/null | cut -f1 | tr '\n' ' ')"
+    names="$(ku list --porcelain 2>/dev/null | cut -f1 | tr '\n' ' ')"
+    f() { [[ $names == *k7one* && $names == *k7two* && $offline != *k7one* ]]; }
+    check K7 "first 'kiwi list' fetches a never-fetched catalog (listed: ${names:-nothing}); --no-sync stays offline" f
+}
+
 for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
          P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P17 P18 P19 P20 P22 P23 P25 \
          P27 P28 P29 P30 P31 P32 P33 P34 P35 P36 P37 \
-         H1 H2 H3 M1 M2 M3 M6 M7 L1 Q1 Q4 H4; do run $t; done
+         H1 H2 H3 M1 M2 M3 M6 M7 L1 Q1 Q4 H4 K7; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

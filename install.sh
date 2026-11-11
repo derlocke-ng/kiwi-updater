@@ -337,6 +337,13 @@ from gi.repository import Adw; print("%d.%d" % (Adw.get_major_version(), Adw.get
     fi
 
     say "done — try: kiwi list  |  kiwi add <git-url>  |  kiwi-gui"
+    # Arch's and Alpine's default profiles never put ~/.local/bin on PATH;
+    # Debian's ~/.profile does only from the next login (PORTPLAN K8).
+    case ":$PATH:" in
+        *":$USER_BIN:"*) ;;
+        *) say "note: $USER_BIN is not on your PATH yet. Open a new login shell, or add it:"
+           say "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc" ;;
+    esac
     # Report what is actually on the machine, not which flag this run was given.
     # `kiwi update kiwi-updater` re-runs this installer without --with-system,
     # so testing the flag announced "not set up" on every single update — even

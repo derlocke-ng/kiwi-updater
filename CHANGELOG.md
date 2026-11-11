@@ -33,6 +33,14 @@ the audit found on top of that.
   group into the rule (wheel, else sudo, else admin). Where polkit is missing
   or too old to read rule files (Ubuntu 22.04 ships 0.105), it sets up manual
   mode and says why, instead of installing a rule that never matches.
+- **The first `kiwi list` shows the catalog** (K7). Right after install it
+  listed kiwi-updater alone — on every distro — because the default catalog is
+  registered but not fetched until something synced. `kiwi list` now fetches
+  any registered catalog that was never fetched; `--no-sync` (Tab completion)
+  stays offline.
+- **`~/.local/bin` on PATH** (K8). Arch's and Alpine's default shell profiles
+  don't include it, and Debian's only from the next login; the installer now
+  says so, with the line that adds it.
 
 ## 2.4.0 — unreleased
 

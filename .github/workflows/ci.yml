@@ -37,7 +37,9 @@ jobs:
             setup: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git gawk util-linux passwd procps python3 openssl openssh-client ca-certificates
           - name: ubuntu-24.04
             image: docker.io/library/ubuntu:24.04
-            setup: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git gawk util-linux passwd procps python3 openssl openssh-client ca-certificates
+            # the mirror GitHub's runners use themselves: archive/security.ubuntu.com
+            # stopped resolving from inside runner containers for a whole afternoon
+            setup: sed -i "s|http://archive.ubuntu.com|http://azure.archive.ubuntu.com|; s|http://security.ubuntu.com|http://azure.archive.ubuntu.com|" /etc/apt/sources.list.d/ubuntu.sources && apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git gawk util-linux passwd procps python3 openssl openssh-client ca-certificates
           - name: arch
             image: docker.io/library/archlinux:latest
             setup: pacman -Syu --noconfirm --needed git gawk util-linux shadow procps-ng python openssl openssh

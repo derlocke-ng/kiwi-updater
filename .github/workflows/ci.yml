@@ -28,7 +28,7 @@ jobs:
       matrix:
         include:
           - name: fedora
-            image: registry.fedoraproject.org/fedora:latest
+            image: docker.io/library/fedora:latest
             setup: dnf -y -q install git-core gawk util-linux shadow-utils procps-ng python3 openssl openssh-clients
           - name: debian-13
             image: docker.io/library/debian:13
@@ -40,7 +40,7 @@ jobs:
             image: docker.io/library/archlinux:latest
             setup: pacman -Syu --noconfirm --needed git gawk util-linux shadow procps-ng python openssl openssh
           - name: opensuse-tumbleweed
-            image: registry.opensuse.org/opensuse/tumbleweed:latest
+            image: docker.io/opensuse/tumbleweed:latest
             setup: zypper -n -q in git-core gawk util-linux findutils shadow procps python3 openssl openssh-clients
           - name: alpine
             image: docker.io/library/alpine:latest

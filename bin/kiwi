@@ -1168,14 +1168,25 @@ pkg_hint() { # need... -> "the command that installs them on this machine"
 
 # 1 if the machine has a GTK4 stack (desktop), 0 on headless/server installs.
 # Deliberately NOT based on $DISPLAY — ssh sessions to desktops have none.
+#
+# Asked of python3 itself, not of the filesystem (PORTPLAN K1): Debian and
+# Ubuntu keep the typelibs under /usr/lib/<multiarch>/, so looking for
+# /usr/lib{,64}/girepository-1.0 found no GUI on any of them. And the GUIs
+# need libadwaita >= 1.5 (Adw.Dialog), which Debian 12 and Ubuntu 22.04 lack:
+# there the answer is "no GUI", not a GUI that crashes on start.
+GUI_STACK=""        # probed once per run (main), "" = not yet
+gui_stack_probe() {
+    command -v python3 >/dev/null 2>&1 || { echo 0; return; }
+    if python3 -c 'import sys, gi
+gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1")
+from gi.repository import Adw
+sys.exit(0 if (Adw.get_major_version(), Adw.get_minor_version()) >= (1, 5) else 1)' 2>/dev/null
+    then echo 1; else echo 0; fi
+}
 gui_available() {
     [[ -n ${KIWI_GUI:-} ]] && { echo "$KIWI_GUI"; return; }
-    if [[ -e /usr/lib64/girepository-1.0/Gtk-4.0.typelib ||
-          -e /usr/lib/girepository-1.0/Gtk-4.0.typelib ]]; then
-        echo 1
-    else
-        echo 0
-    fi
+    [[ -n $GUI_STACK ]] && { echo "$GUI_STACK"; return; }
+    gui_stack_probe
 }
 
 # decide the GUI flavor (0/1) for an install/update:
@@ -2958,6 +2969,10 @@ gnu_tools_ok() {
 }
 gnu_tools_ok || die "kiwi needs the GNU versions of realpath, flock and find (BusyBox has too few options):
   $(pkg_hint gnu-tools)"
+
+# whether this machine can run the GUIs: asked once, for every app this run
+# installs or updates (K1)
+case "$CMD" in install|update|self-update) GUI_STACK="$(gui_stack_probe)" ;; esac
 
 # the per-run ls-remote cache (Q1). As root never under $TMPDIR: a directory
 # the user can write is one where the cache could be swapped (L1).

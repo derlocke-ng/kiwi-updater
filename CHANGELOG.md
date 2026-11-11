@@ -19,6 +19,13 @@ the audit found on top of that.
   and `install.sh` now stop at once and print the one `apk add` line that
   provides the GNU tools, with which every check passes. Network timeouts use
   `timeout -k`, which every `timeout` understands.
+- **The GUI installs on Debian and Ubuntu** (K1). kiwi looked for GTK's
+  typelibs in `/usr/lib{,64}`; Debian and Ubuntu keep them under
+  `/usr/lib/<arch>/`, so they never got kiwi-gui, and every app was installed
+  CLI-only there. kiwi now asks python3 whether GTK 4 and libadwaita 1.5 or
+  newer import. On a system whose libadwaita is too old (Debian 12, Ubuntu
+  22.04) the install says so instead of offering packages that are already
+  there, and `kiwi-gui` itself explains instead of crashing.
 
 ## 2.4.0 — unreleased
 

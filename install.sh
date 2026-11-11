@@ -60,8 +60,13 @@ want_gui() {
     (( CLI_ONLY )) && return 1
     [[ ${KIWI_GUI:-} == 0 ]] && return 1
     [[ -n ${KIWI_GUI:-} ]] && return 0
-    [[ -e /usr/lib64/girepository-1.0/Gtk-4.0.typelib ||
-       -e /usr/lib/girepository-1.0/Gtk-4.0.typelib ]]
+    # python3 itself, not typelib paths (Debian/Ubuntu use a multiarch dir),
+    # and libadwaita >= 1.5, which kiwi-gui needs (PORTPLAN K1)
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 -c 'import sys, gi
+gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1")
+from gi.repository import Adw
+sys.exit(0 if (Adw.get_major_version(), Adw.get_minor_version()) >= (1, 5) else 1)' 2>/dev/null
 }
 
 USER_BIN="$HOME/.local/bin"
@@ -289,8 +294,17 @@ user_install() {
             update-desktop-database -q "$USER_APPS" 2>/dev/null || true
     else
         say "no GTK4 stack (or --cli-only) — skipping GUI"
-        (( CLI_ONLY )) || [[ ${KIWI_GUI:-} == 0 ]] ||
-            say "  for the GUI: $(bash "$SRC/bin/kiwi" pkg-hint gui), then run this again"
+        if (( ! CLI_ONLY )) && [[ ${KIWI_GUI:-} != 0 ]]; then
+            local adw
+            adw="$(python3 -c 'import gi; gi.require_version("Adw", "1")
+from gi.repository import Adw; print("%d.%d" % (Adw.get_major_version(), Adw.get_minor_version()))' 2>/dev/null || true)"
+            if [[ -n $adw ]]; then
+                # installed, just too old: no package hint would help (Debian 12, Ubuntu 22.04)
+                say "  this system's libadwaita is $adw; the GUI needs 1.5 or newer — kiwi works from the terminal"
+            else
+                say "  for the GUI: $(bash "$SRC/bin/kiwi" pkg-hint gui), then run this again"
+            fi
+        fi
     fi
 
     # bash completion is a plain file; no service, nothing to enable

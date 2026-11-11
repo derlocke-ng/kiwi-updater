@@ -408,6 +408,10 @@ root_install() {
         fi
     fi
     say "installing root-owned kiwi to $SYS_BIN ($mode mode)"
+    # H4: root checks release signatures with ssh-keygen; without it every
+    # system update needs a password
+    command -v ssh-keygen >/dev/null 2>&1 ||
+        say "note: no ssh-keygen, so release signatures cannot be checked and system updates will ask for a password: $(bash "$SRC/bin/kiwi" pkg-hint ssh-keygen 2>/dev/null)"
     install -Dm755 "$SRC/bin/kiwi" "$SYS_BIN/kiwi"
     # /usr/local: writable everywhere, including Fedora Atomic's immutable /usr
     install -Dm644 "$SRC/data/bash-completion/kiwi" \

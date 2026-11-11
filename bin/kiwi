@@ -1150,6 +1150,7 @@ pkg_names() { # manager need -> package names
         *:ssh-keygen)                 echo openssh-clients ;;
         apk:gnu-tools)                echo bash coreutils util-linux findutils sed grep ;;
         *:gnu-tools)                  echo coreutils util-linux findutils ;;
+        *:awk)                        echo gawk ;;
         apt:gui)                      echo python3-gi gir1.2-adw-1 gir1.2-gtk-4.0 ;;
         pacman:gui)                   echo python-gobject libadwaita gtk4 ;;
         zypper:gui)                   echo python3-gobject typelib-1_0-Adw-1 typelib-1_0-Gtk-4_0 ;;
@@ -2969,6 +2970,8 @@ done
 if [[ $CMD == pkg-hint ]]; then pkg_hint ${ARGS[@]+"${ARGS[@]}"}; exit 0; fi
 
 command -v git >/dev/null 2>&1 || die "git is required: $(pkg_hint git)"
+# every release lookup goes through awk; minimal Fedora images ship none
+command -v awk >/dev/null 2>&1 || die "awk is required: $(pkg_hint awk)"
 
 # BusyBox — Alpine's default userland — lacks options kiwi's root-path and lock
 # code relies on (realpath -e, flock -w, find -uid). Porting that code to

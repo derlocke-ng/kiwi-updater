@@ -25,6 +25,34 @@ set -euo pipefail
 # part way through would otherwise run a prefix of this — a half-finished
 # clone, or a checkout with no install after it. Nothing happens until the
 # whole file is here.
+# kiwi-updater's release key (SIGNING.md): every release tag is signed with it.
+# The same line as .github/allowed_signers and install.sh's — tests/check-version.sh
+# keeps the three equal.
+KIWI_SIGNER='derlocke-ng namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOgQc/J6GUopStnNbqhY0QM/k5krVteKyWj4e6qyZX+r'
+CANONICAL_REPO="https://github.com/derlocke-ng/kiwi-updater.git"
+
+# Refuse a release that is not signed by that key: this script is often the
+# first kiwi code on a machine, and the tag it checks out is what then runs.
+verify_release() { # dir tag
+    if [[ $REPO != "$CANONICAL_REPO" ]]; then
+        echo ":: $REPO is not kiwi-updater's own repo — its signature is not checked"
+        return 0
+    fi
+    if ! command -v ssh-keygen >/dev/null 2>&1; then
+        echo ":: note: no ssh-keygen, so the release signature is not checked here"
+        return 0
+    fi
+    local f rc=0; f="$(mktemp)"
+    printf '%s\n' "$KIWI_SIGNER" > "$f"
+    git -C "$1" -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$f" verify-tag -- "$2" >/dev/null 2>&1 || rc=$?
+    rm -f "$f"
+    if (( rc )); then
+        echo "error: $2 is not signed by kiwi-updater's release key — refusing to install it" >&2
+        return 1
+    fi
+    echo ":: $2 is signed by kiwi-updater's release key"
+}
+
 main() {
     local REPO DIR tag
     REPO="${KIWI_REPO:-https://github.com/derlocke-ng/kiwi-updater.git}"
@@ -61,6 +89,7 @@ main() {
     if [[ -n $tag ]]; then
         echo ":: checking out release $tag"
         git -C "$DIR" -c advice.detachedHead=false checkout --quiet --force "$tag"
+        verify_release "$DIR" "$tag" || exit 1
     fi
 
     # The recommended install is the default here, so the one line people copy

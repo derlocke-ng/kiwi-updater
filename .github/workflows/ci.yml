@@ -8,7 +8,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       - name: shellcheck
         run: |
-          shellcheck -S warning bin/kiwi install.sh get-kiwi.sh \
+          shellcheck -S warning bin/kiwi bin/kiwi-release install.sh get-kiwi.sh \
             data/kiwi-system-update data/bash-completion/kiwi \
             templates/install.sh tests/*.sh
       - name: the GUI has to at least parse

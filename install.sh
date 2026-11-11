@@ -289,6 +289,8 @@ user_install() {
             update-desktop-database -q "$USER_APPS" 2>/dev/null || true
     else
         say "no GTK4 stack (or --cli-only) — skipping GUI"
+        (( CLI_ONLY )) || [[ ${KIWI_GUI:-} == 0 ]] ||
+            say "  for the GUI: $(bash "$SRC/bin/kiwi" pkg-hint gui), then run this again"
     fi
 
     # bash completion is a plain file; no service, nothing to enable
@@ -358,7 +360,7 @@ root_install() {
     local mode="${SYSTEM_MODE:-$(cat "$SYS_CONF/mode" 2>/dev/null || echo auto)}"
     say "installing root-owned kiwi to $SYS_BIN ($mode mode)"
     install -Dm755 "$SRC/bin/kiwi" "$SYS_BIN/kiwi"
-    # /usr is immutable on ostree; /usr/local is the writable one
+    # /usr/local: writable everywhere, including Fedora Atomic's immutable /usr
     install -Dm644 "$SRC/data/bash-completion/kiwi" \
         /usr/local/share/bash-completion/completions/kiwi
 
@@ -425,6 +427,15 @@ root_uninstall() {
 }
 
 # ---------------- dispatch ------------------------------------------------------
+# GNU tools first (PORTPLAN K5/P2): the root phase relies on realpath -e/-m and
+# find -uid, which BusyBox (Alpine's default) does not have.
+if ! { realpath -e / >/dev/null 2>&1 && realpath -m /nope >/dev/null 2>&1 &&
+       find / -maxdepth 0 -uid 0 >/dev/null 2>&1 && flock -w 0 / true 2>/dev/null; }; then
+    echo "error: kiwi needs the GNU versions of realpath, flock and find (BusyBox has too few options):" >&2
+    echo "  $(bash "$SRC/bin/kiwi" pkg-hint gnu-tools 2>/dev/null || echo 'install coreutils util-linux findutils')" >&2
+    exit 1
+fi
+
 case "$ACTION" in install|update|uninstall) ;; *)
     echo "usage: $0 install|update|uninstall [--purge] [--with-system[=auto|manual]] [--cli-only]" >&2; exit 1 ;;
 esac

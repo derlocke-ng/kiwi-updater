@@ -3,6 +3,23 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 2.5.0 — unreleased
+
+Beyond Fedora Atomic (`PORTPLAN.md`). kiwi's own suite already passed on
+Debian 13, Ubuntu 24.04, Arch and openSUSE Tumbleweed; this release fixes what
+the audit found on top of that.
+
+- **Hints name your distro's packages** (K6). Instead of `rpm-ostree install
+  git` everywhere, kiwi, `install.sh` and `get-kiwi.sh` detect rpm-ostree, dnf,
+  apt, pacman, zypper or apk and print the command and package names that
+  install what is missing (git, ssh-keygen, the GUI's GTK/libadwaita bindings).
+  Apps' installers can ask too: `kiwi pkg-hint <git|ssh-keygen|gui|gnu-tools>`.
+- **Alpine: a clear message instead of a half-done install** (K5, P2). BusyBox
+  lacks options kiwi relies on (`realpath -e`, `flock -w`, `find -uid`); kiwi
+  and `install.sh` now stop at once and print the one `apk add` line that
+  provides the GNU tools, with which every check passes. Network timeouts use
+  `timeout -k`, which every `timeout` understands.
+
 ## 2.4.0 — unreleased
 
 Security release from the 2.3.2 audit (`FIXPLAN-2.4.md`). Some entries change

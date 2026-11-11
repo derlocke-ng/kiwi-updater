@@ -1,7 +1,8 @@
 # kiwi-updater
 
-Install and update open-source apps from **git catalogs**, on Fedora Silverblue /
-Bluefin and other ostree systems. An app is just a git repo with a
+Install and update open-source apps from **git catalogs** — on Fedora
+Silverblue / Bluefin, where it started, and on Fedora, Debian, Ubuntu, Arch,
+openSUSE and Alpine (see *Supported systems*). An app is just a git repo with a
 `kiwi.manifest` and an `install.sh`; `kiwi` clones it, checks out its latest
 release tag, runs its installer, and keeps it updated in the background —
 including itself.
@@ -9,8 +10,8 @@ including itself.
 No accounts, no store, no vendor. A catalog is a repo you can read, fork and
 send a pull request to.
 
-- **`kiwi`** — the CLI (needs `git`, coreutils, `util-linux` for `flock`, and
-  `awk`; all are in the Silverblue/Bluefin base image)
+- **`kiwi`** — the CLI (needs bash, `git`, GNU coreutils, `util-linux` for
+  `flock`, findutils and `awk`; on most desktops all of them are already there)
 - **`kiwi-gui`** — the desktop app, **Kiwi Apps** in your app grid: search,
   filter and browse the catalogs, with a detail view per app
 - **releases are git tags** — apps follow their latest *version* tag, meaning
@@ -20,6 +21,27 @@ send a pull request to.
   as you like, managed through ordinary git
 - **one timer, yours** — background updates for everything you installed; the
   root halves through a small polkit-gated helper, without a password
+
+## Supported systems
+
+Tested in CI on every push: the full suite and a real install over the
+network.
+
+| | kiwi + CLI apps | GUIs (GTK 4, libadwaita ≥ 1.5) | Passwordless system updates |
+|---|---|---|---|
+| Fedora Silverblue / Bluefin, Fedora | ✅ | ✅ | ✅ `wheel` |
+| Debian 13, Ubuntu 24.04 | ✅ | ✅ | ✅ `sudo` group |
+| Arch, openSUSE Tumbleweed | ✅ | ✅ | ✅ `wheel` |
+| Alpine | ✅ with the GNU tools¹ | ✅ | ✅ `wheel` (needs polkit) |
+| Debian 12, Ubuntu 22.04 | ✅ | — libadwaita too old | Debian 12 ✅; Ubuntu 22.04 manual mode (polkit 0.105) |
+| WSL2 | expected to work with systemd enabled; not yet tested | via WSLg | not yet tested |
+
+¹ `doas apk add bash git coreutils util-linux findutils sed grep openssh-keygen`
+— BusyBox lacks options kiwi needs; kiwi tells you so instead of failing.
+
+Apps say what they need; when something is missing kiwi names the package
+for your distro. GNOME-only apps (gnome-monitor, the Shell extensions) work
+only on GNOME; their non-extension parts work everywhere.
 
 ## Install
 

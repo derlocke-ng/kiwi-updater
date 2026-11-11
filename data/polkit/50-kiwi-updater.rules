@@ -1,6 +1,10 @@
 // kiwi-updater: let active admin users run the fixed-purpose system-update
 // wrapper without a password.
 //
+// "wheel" below is the admin group as shipped; install.sh writes this
+// machine's own one in its place (wheel, else sudo as on Debian/Ubuntu, else
+// admin). Needs polkit 0.106 or newer, which reads .rules files.
+//
 // pkexec of exactly one root-owned program is authorized:
 // /usr/local/libexec/kiwi-system-update. It accepts app NAMES, but treats them
 // as a SELECTION rather than as input — each name must match

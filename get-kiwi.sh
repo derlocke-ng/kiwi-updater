@@ -31,7 +31,15 @@ main() {
     DIR="${XDG_DATA_HOME:-$HOME/.local/share}/kiwi-updater/repos/kiwi-updater"
 
     command -v git >/dev/null 2>&1 || {
-        echo "error: git is required (in the base image on Silverblue/Bluefin)" >&2
+        # this script runs before kiwi is here to ask, so the hint is inline
+        local how="your package manager"
+        if command -v dnf >/dev/null; then how="sudo dnf install git"
+        elif command -v apt-get >/dev/null; then how="sudo apt install git"
+        elif command -v pacman >/dev/null; then how="sudo pacman -S git"
+        elif command -v zypper >/dev/null; then how="sudo zypper install git-core"
+        elif command -v apk >/dev/null; then how="doas apk add bash git coreutils util-linux findutils sed grep"
+        fi
+        echo "error: git is required — $how" >&2
         exit 1
     }
 

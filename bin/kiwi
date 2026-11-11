@@ -10,7 +10,7 @@
 #   system — listed in /etc/kiwi-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-KIWI_VERSION=2.4.0
+KIWI_VERSION=2.5.0
 
 # systemd system services start without $HOME (set -u would abort at the
 # path definitions below) — root's user-scope paths are never used anyway
@@ -203,7 +203,7 @@ export GIT_ALLOW_PROTOCOL=https:file
 # git that talks to a remote: hard wall-clock cap, plus git's own stalled
 # transfer abort so a connection that goes quiet does not sit there.
 git_net() {
-    timeout --kill-after=10 "$NET_TIMEOUT" \
+    timeout -k 10 "$NET_TIMEOUT" \
         env GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=30 \
         git "$@"
 }
@@ -285,6 +285,14 @@ catalog_urls() {
     for f in "${files[@]}"; do
         [[ -r $f ]] && list_trusted "$f" && grep -Ev '^[[:space:]]*(#|$)' "$f" 2>/dev/null
     done | sort -u
+}
+
+catalogs_unfetched() { # is any registered catalog still without a clone?
+    local u
+    while read -r u _; do
+        [[ -n ${u:-} && ! -d "$(catalogs_dir)/$(dir_name "$u")/.git" ]] && return 0
+    done < <(catalog_urls)
+    return 1
 }
 
 # the registered catalogs, minus anything unusable
@@ -1118,16 +1126,76 @@ Retry, or raise KIWI_LOCK_WAIT (currently ${wait_s}s)."
     printf '%s pid=%s started=%s\n' "$me" "$$" "$(date -Is 2>/dev/null)" > "$lock"
 }
 
+# ---------- packages, said the way this distro says them (PORTPLAN K6) -------
+# kiwi runs on Fedora Atomic, Fedora, Debian, Ubuntu, Arch, openSUSE and
+# Alpine. When something is missing, name the command that installs it HERE,
+# not `rpm-ostree install`. Needs are logical names; this maps them.
+pkg_manager() {
+    if [[ -e /run/ostree-booted ]] && command -v rpm-ostree >/dev/null 2>&1; then echo rpm-ostree
+    elif command -v dnf >/dev/null 2>&1; then echo dnf
+    elif command -v apt-get >/dev/null 2>&1; then echo apt
+    elif command -v pacman >/dev/null 2>&1; then echo pacman
+    elif command -v zypper >/dev/null 2>&1; then echo zypper
+    elif command -v apk >/dev/null 2>&1; then echo apk
+    fi
+}
+
+pkg_names() { # manager need -> package names
+    case "$1:$2" in
+        zypper:git)                   echo git-core ;;
+        *:git)                        echo git ;;
+        apt:ssh-keygen)               echo openssh-client ;;
+        pacman:ssh-keygen)            echo openssh ;;
+        apk:ssh-keygen)               echo openssh-keygen ;;
+        *:ssh-keygen)                 echo openssh-clients ;;
+        apk:gnu-tools)                echo bash coreutils util-linux findutils sed grep ;;
+        *:gnu-tools)                  echo coreutils util-linux findutils ;;
+        *:awk)                        echo gawk ;;
+        apt:gui)                      echo python3-gi gir1.2-adw-1 gir1.2-gtk-4.0 ;;
+        pacman:gui)                   echo python-gobject libadwaita gtk4 ;;
+        zypper:gui)                   echo python3-gobject typelib-1_0-Adw-1 typelib-1_0-Gtk-4_0 ;;
+        apk:gui)                      echo py3-gobject3 libadwaita gtk4.0 ;;
+        *:gui)                        echo python3-gobject libadwaita gtk4 ;;
+        *)                            echo "$2" ;;
+    esac
+}
+
+pkg_hint() { # need... -> "the command that installs them on this machine"
+    local pm n p=()
+    pm="$(pkg_manager)"
+    for n in "$@"; do read -r -a n <<<"$(pkg_names "$pm" "$n")"; p+=("${n[@]}"); done
+    case "$pm" in
+        rpm-ostree) echo "rpm-ostree install ${p[*]}   (then reboot)" ;;
+        dnf)        echo "sudo dnf install ${p[*]}" ;;
+        apt)        echo "sudo apt install ${p[*]}" ;;
+        pacman)     echo "sudo pacman -S ${p[*]}" ;;
+        zypper)     echo "sudo zypper install ${p[*]}" ;;
+        apk)        echo "doas apk add ${p[*]}" ;;
+        *)          echo "install with your package manager: ${p[*]}" ;;
+    esac
+}
+
 # 1 if the machine has a GTK4 stack (desktop), 0 on headless/server installs.
 # Deliberately NOT based on $DISPLAY — ssh sessions to desktops have none.
+#
+# Asked of python3 itself, not of the filesystem (PORTPLAN K1): Debian and
+# Ubuntu keep the typelibs under /usr/lib/<multiarch>/, so looking for
+# /usr/lib{,64}/girepository-1.0 found no GUI on any of them. And the GUIs
+# need libadwaita >= 1.5 (Adw.Dialog), which Debian 12 and Ubuntu 22.04 lack:
+# there the answer is "no GUI", not a GUI that crashes on start.
+GUI_STACK=""        # probed once per run (main), "" = not yet
+gui_stack_probe() {
+    command -v python3 >/dev/null 2>&1 || { echo 0; return; }
+    if python3 -c 'import sys, gi
+gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1")
+from gi.repository import Adw
+sys.exit(0 if (Adw.get_major_version(), Adw.get_minor_version()) >= (1, 5) else 1)' 2>/dev/null
+    then echo 1; else echo 0; fi
+}
 gui_available() {
     [[ -n ${KIWI_GUI:-} ]] && { echo "$KIWI_GUI"; return; }
-    if [[ -e /usr/lib64/girepository-1.0/Gtk-4.0.typelib ||
-          -e /usr/lib/girepository-1.0/Gtk-4.0.typelib ]]; then
-        echo 1
-    else
-        echo 0
-    fi
+    [[ -n $GUI_STACK ]] && { echo "$GUI_STACK"; return; }
+    gui_stack_probe
 }
 
 # decide the GUI flavor (0/1) for an install/update:
@@ -1402,7 +1470,8 @@ release_trusted() { # dir url tref sha -> may root check out <sha>?
         unverified "$name" "$tref is not a release tag"; return
     fi
     if ! command -v ssh-keygen >/dev/null 2>&1; then
-        [[ -s $f ]] && { warn "$name: ssh-keygen is missing, so its signed releases cannot be checked — refusing"; return 1; }
+        [[ -s $f ]] && { warn "$name: ssh-keygen is missing, so its signed releases cannot be checked — refusing"
+                         warn "  $(pkg_hint ssh-keygen)"; return 1; }
         unverified "$name" "ssh-keygen is missing"; return
     fi
     if ! key="$(tag_signer "$dir" "$tref")"; then
@@ -1911,7 +1980,10 @@ cmd_list() {
             *) die "unknown option: $1" ;;
         esac; shift
     done
-    (( check )) && sync_catalogs
+    # A catalog registered but never fetched — the default one right after
+    # install — listed no apps until something else synced (PORTPLAN K7).
+    # Fetch those once; --no-sync (Tab completion) stays offline.
+    if (( check )) || { (( ! nosync )) && catalogs_unfetched; }; then sync_catalogs; fi
     (( nosync )) || sync_all_meta
     if (( check )); then
         # every remote this listing will ask about, asked in parallel first
@@ -2498,7 +2570,7 @@ cmd_doctor() {
     # git's SSH signature check (H4): without it root cannot verify a release,
     # so system halves only update with a password
     if command -v ssh-keygen >/dev/null 2>&1; then _good "ssh-keygen (release signatures)"
-    elif [[ -x $ROOT_KIWI ]]; then _bad "ssh-keygen is missing — root cannot check release signatures (install openssh-clients)"
+    elif [[ -x $ROOT_KIWI ]]; then _bad "ssh-keygen is missing — root cannot check release signatures: $(pkg_hint ssh-keygen)"
     fi
 
     info "versions"
@@ -2835,7 +2907,7 @@ An app declares the scopes it needs in its kiwi.manifest, so a catalog lists it
 once even when it has both a root service and a desktop component. Apps marked
 with * in 'kiwi list' need root for part of their install; 'kiwi info' says why.
 
-  user apps:      $USER_PREFIX   (no root, survives an ostree rebase)
+  user apps:      $USER_PREFIX   (no root; on Fedora Atomic it survives a rebase)
   system apps:    $SYS_PREFIX
   user list:      $USER_LIST
   system list:    $SYS_LIST
@@ -2894,7 +2966,27 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-command -v git >/dev/null 2>&1 || die "git is required (rpm-ostree install git)"
+# `kiwi pkg-hint <need>…`: the same hints for install.sh and the apps' installers
+if [[ $CMD == pkg-hint ]]; then pkg_hint ${ARGS[@]+"${ARGS[@]}"}; exit 0; fi
+
+command -v git >/dev/null 2>&1 || die "git is required: $(pkg_hint git)"
+# every release lookup goes through awk; minimal Fedora images ship none
+command -v awk >/dev/null 2>&1 || die "awk is required: $(pkg_hint awk)"
+
+# BusyBox — Alpine's default userland — lacks options kiwi's root-path and lock
+# code relies on (realpath -e, flock -w, find -uid). Porting that code to
+# BusyBox semantics was declined (PORTPLAN P2): say what to install, here,
+# instead of failing halfway through an install.
+gnu_tools_ok() {
+    realpath -e / >/dev/null 2>&1 && flock -w 0 / true 2>/dev/null &&
+        find / -maxdepth 0 -uid 0 >/dev/null 2>&1
+}
+gnu_tools_ok || die "kiwi needs the GNU versions of realpath, flock and find (BusyBox has too few options):
+  $(pkg_hint gnu-tools)"
+
+# whether this machine can run the GUIs: asked once, for every app this run
+# installs or updates (K1)
+case "$CMD" in install|update|self-update) GUI_STACK="$(gui_stack_probe)" ;; esac
 
 # the per-run ls-remote cache (Q1). As root never under $TMPDIR: a directory
 # the user can write is one where the cache could be swapped (L1).

@@ -21,10 +21,31 @@ import sys
 import threading
 
 import gi
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
-gi.require_version("GdkPixbuf", "2.0")
+
+
+def _no_gui(why):
+    """Without GTK 4 and libadwaita >= 1.5 there is no window to explain it in:
+    say it on the terminal, with this distro's packages (PORTPLAN K1)."""
+    try:
+        hint = subprocess.run(["kiwi", "pkg-hint", "gui"], capture_output=True,
+                              text=True, timeout=10).stdout.strip()
+    except Exception:  # noqa: BLE001
+        hint = ""
+    sys.exit("kiwi-gui: %s.\nIt needs GTK 4 and libadwaita 1.5 or newer%s\n"
+             "Everything works from the terminal as well: kiwi help"
+             % (why, (" — " + hint) if hint else "."))
+
+
+try:
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    gi.require_version("GdkPixbuf", "2.0")
+except ValueError as e:
+    _no_gui(str(e))
 from gi.repository import Gtk, Adw, Gio, GLib, GObject, Gdk, GdkPixbuf, Pango  # noqa: E402
+
+if (Adw.get_major_version(), Adw.get_minor_version()) < (1, 5):
+    _no_gui("this system has libadwaita %d.%d" % (Adw.get_major_version(), Adw.get_minor_version()))
 
 APP_ID = "eu.kiwinetwork.KiwiUpdater"
 

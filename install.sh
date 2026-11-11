@@ -60,8 +60,13 @@ want_gui() {
     (( CLI_ONLY )) && return 1
     [[ ${KIWI_GUI:-} == 0 ]] && return 1
     [[ -n ${KIWI_GUI:-} ]] && return 0
-    [[ -e /usr/lib64/girepository-1.0/Gtk-4.0.typelib ||
-       -e /usr/lib/girepository-1.0/Gtk-4.0.typelib ]]
+    # python3 itself, not typelib paths (Debian/Ubuntu use a multiarch dir),
+    # and libadwaita >= 1.5, which kiwi-gui needs (PORTPLAN K1)
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 -c 'import sys, gi
+gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1")
+from gi.repository import Adw
+sys.exit(0 if (Adw.get_major_version(), Adw.get_minor_version()) >= (1, 5) else 1)' 2>/dev/null
 }
 
 USER_BIN="$HOME/.local/bin"
@@ -289,6 +294,17 @@ user_install() {
             update-desktop-database -q "$USER_APPS" 2>/dev/null || true
     else
         say "no GTK4 stack (or --cli-only) — skipping GUI"
+        if (( ! CLI_ONLY )) && [[ ${KIWI_GUI:-} != 0 ]]; then
+            local adw
+            adw="$(python3 -c 'import gi; gi.require_version("Adw", "1")
+from gi.repository import Adw; print("%d.%d" % (Adw.get_major_version(), Adw.get_minor_version()))' 2>/dev/null || true)"
+            if [[ -n $adw ]]; then
+                # installed, just too old: no package hint would help (Debian 12, Ubuntu 22.04)
+                say "  this system's libadwaita is $adw; the GUI needs 1.5 or newer — kiwi works from the terminal"
+            else
+                say "  for the GUI: $(bash "$SRC/bin/kiwi" pkg-hint gui), then run this again"
+            fi
+        fi
     fi
 
     # bash completion is a plain file; no service, nothing to enable
@@ -321,6 +337,13 @@ user_install() {
     fi
 
     say "done — try: kiwi list  |  kiwi add <git-url>  |  kiwi-gui"
+    # Arch's and Alpine's default profiles never put ~/.local/bin on PATH;
+    # Debian's ~/.profile does only from the next login (PORTPLAN K8).
+    case ":$PATH:" in
+        *":$USER_BIN:"*) ;;
+        *) say "note: $USER_BIN is not on your PATH yet. Open a new login shell, or add it:"
+           say "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc" ;;
+    esac
     # Report what is actually on the machine, not which flag this run was given.
     # `kiwi update kiwi-updater` re-runs this installer without --with-system,
     # so testing the flag announced "not set up" on every single update — even
@@ -354,11 +377,43 @@ user_uninstall() {
 }
 
 # ---------------- system phase (opt-in, runs as root) --------------------------
+# Auto mode is one polkit rule (PORTPLAN K2). It needs pkexec, a polkit that
+# reads .rules files — 0.106 or newer; Ubuntu 22.04 ships 0.105 — and the
+# group this distro's admins are in: wheel on Fedora, Arch, openSUSE, Alpine;
+# sudo on Debian and Ubuntu, where a rule naming wheel matched nobody.
+admin_group() {
+    local g
+    for g in wheel sudo admin; do
+        grep -q "^$g:" /etc/group 2>/dev/null && { echo "$g"; return 0; }
+    done
+    return 1
+}
+polkit_rules_ok() {
+    command -v pkexec >/dev/null 2>&1 || return 1
+    local v; v="$(pkaction --version 2>/dev/null | awk '{print $NF}' || true)"
+    [[ -n $v && $v == 0.* ]] || return 0      # 1xx, or not reported: reads .rules
+    [[ "$(printf '%s\n0.106\n' "$v" | sort -V | head -1)" == 0.106 ]]
+}
+
 root_install() {
-    local mode="${SYSTEM_MODE:-$(cat "$SYS_CONF/mode" 2>/dev/null || echo auto)}"
+    local mode="${SYSTEM_MODE:-$(cat "$SYS_CONF/mode" 2>/dev/null || echo auto)}" grp=""
+    if [[ $mode == auto ]]; then
+        if ! polkit_rules_ok; then
+            say "passwordless updates need pkexec and polkit 0.106 or newer; this system has" \
+                "$(pkaction --version 2>/dev/null || echo 'no polkit') — using manual mode"
+            mode=manual
+        elif ! grp="$(admin_group)"; then
+            say "no wheel, sudo or admin group to grant passwordless updates to — using manual mode"
+            mode=manual
+        fi
+    fi
     say "installing root-owned kiwi to $SYS_BIN ($mode mode)"
+    # H4: root checks release signatures with ssh-keygen; without it every
+    # system update needs a password
+    command -v ssh-keygen >/dev/null 2>&1 ||
+        say "note: no ssh-keygen, so release signatures cannot be checked and system updates will ask for a password: $(bash "$SRC/bin/kiwi" pkg-hint ssh-keygen 2>/dev/null)"
     install -Dm755 "$SRC/bin/kiwi" "$SYS_BIN/kiwi"
-    # /usr is immutable on ostree; /usr/local is the writable one
+    # /usr/local: writable everywhere, including Fedora Atomic's immutable /usr
     install -Dm644 "$SRC/data/bash-completion/kiwi" \
         /usr/local/share/bash-completion/completions/kiwi
 
@@ -391,10 +446,12 @@ root_install() {
     # auto-update path for system halves. (/etc/polkit-1/rules.d is writable
     # on ostree systems.)
     install -Dm755 "$SRC/data/kiwi-system-update" /usr/local/libexec/kiwi-system-update
-    install -Dm644 "$SRC/data/polkit/50-kiwi-updater.rules" \
-        /etc/polkit-1/rules.d/50-kiwi-updater.rules
+    mkdir -p /etc/polkit-1/rules.d
+    sed "s/isInGroup(\"wheel\")/isInGroup(\"$grp\")/" "$SRC/data/polkit/50-kiwi-updater.rules" \
+        > /etc/polkit-1/rules.d/50-kiwi-updater.rules
+    chmod 644 /etc/polkit-1/rules.d/50-kiwi-updater.rules
     systemctl reload polkit 2>/dev/null || systemctl restart polkit 2>/dev/null || true
-    say "system halves update from your own timer, without a password"
+    say "system halves update from your own timer, without a password (members of '$grp')"
 }
 
 root_update() { root_install; }
@@ -425,6 +482,15 @@ root_uninstall() {
 }
 
 # ---------------- dispatch ------------------------------------------------------
+# GNU tools first (PORTPLAN K5/P2): the root phase relies on realpath -e/-m and
+# find -uid, which BusyBox (Alpine's default) does not have.
+if ! { realpath -e / >/dev/null 2>&1 && realpath -m /nope >/dev/null 2>&1 &&
+       find / -maxdepth 0 -uid 0 >/dev/null 2>&1 && flock -w 0 / true 2>/dev/null; }; then
+    echo "error: kiwi needs the GNU versions of realpath, flock and find (BusyBox has too few options):" >&2
+    echo "  $(bash "$SRC/bin/kiwi" pkg-hint gnu-tools 2>/dev/null || echo 'install coreutils util-linux findutils')" >&2
+    exit 1
+fi
+
 case "$ACTION" in install|update|uninstall) ;; *)
     echo "usage: $0 install|update|uninstall [--purge] [--with-system[=auto|manual]] [--cli-only]" >&2; exit 1 ;;
 esac

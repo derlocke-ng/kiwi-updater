@@ -3,7 +3,57 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
-## 2.4.0 — unreleased
+## 2.5.0 — 2026-11-11
+
+Beyond Fedora Atomic (`PORTPLAN.md`). kiwi's own suite already passed on
+Debian 13, Ubuntu 24.04, Arch and openSUSE Tumbleweed; this release fixes what
+the audit found on top of that.
+
+- **Hints name your distro's packages** (K6). Instead of `rpm-ostree install
+  git` everywhere, kiwi, `install.sh` and `get-kiwi.sh` detect rpm-ostree, dnf,
+  apt, pacman, zypper or apk and print the command and package names that
+  install what is missing (git, ssh-keygen, the GUI's GTK/libadwaita bindings).
+  Apps' installers can ask too: `kiwi pkg-hint <git|ssh-keygen|gui|gnu-tools>`.
+- **Alpine: a clear message instead of a half-done install** (K5, P2). BusyBox
+  lacks options kiwi relies on (`realpath -e`, `flock -w`, `find -uid`); kiwi
+  and `install.sh` now stop at once and print the one `apk add` line that
+  provides the GNU tools, with which every check passes. Network timeouts use
+  `timeout -k`, which every `timeout` understands.
+- **The GUI installs on Debian and Ubuntu** (K1). kiwi looked for GTK's
+  typelibs in `/usr/lib{,64}`; Debian and Ubuntu keep them under
+  `/usr/lib/<arch>/`, so they never got kiwi-gui, and every app was installed
+  CLI-only there. kiwi now asks python3 whether GTK 4 and libadwaita 1.5 or
+  newer import. On a system whose libadwaita is too old (Debian 12, Ubuntu
+  22.04) the install says so instead of offering packages that are already
+  there, and `kiwi-gui` itself explains instead of crashing.
+- **Passwordless system updates work on Debian and Ubuntu** (K2). The polkit
+  rule granted them to `wheel`, a group Debian and Ubuntu don't have — their
+  admins are in `sudo` — so every system update there asked for a password,
+  or was skipped by the timer. The bootstrap now writes this machine's admin
+  group into the rule (wheel, else sudo, else admin). Where polkit is missing
+  or too old to read rule files (Ubuntu 22.04 ships 0.105), it sets up manual
+  mode and says why, instead of installing a rule that never matches.
+- **The first `kiwi list` shows the catalog** (K7). Right after install it
+  listed kiwi-updater alone — on every distro — because the default catalog is
+  registered but not fetched until something synced. `kiwi list` now fetches
+  any registered catalog that was never fetched; `--no-sync` (Tab completion)
+  stays offline.
+- **`~/.local/bin` on PATH** (K8). Arch's and Alpine's default shell profiles
+  don't include it, and Debian's only from the next login; the installer now
+  says so, with the line that adds it.
+- **Missing `awk`, `find` or `ssh-keygen` are named up front.** Minimal
+  Fedora images have no awk (every release lookup uses it) and openSUSE's no
+  `find`; kiwi now stops with the package to install instead of failing later.
+  The root bootstrap warns when `ssh-keygen` is missing, since without it
+  every system update needs a password (H4).
+- **Tested on every supported distro in CI** (T1–T3). The full suite and a
+  new `tests/smoke.sh` — a real install over the network: user install, the
+  first `kiwi list`, the root bootstrap of the tree under test, `kiwi doctor`,
+  installing a real app — run on Fedora, Debian 13, Ubuntu 24.04, Arch,
+  openSUSE Tumbleweed and Alpine; a separate job checks that stock BusyBox
+  Alpine gets the one-line answer.
+
+## 2.4.0 — 2026-11-08
 
 Security release from the 2.3.2 audit (`FIXPLAN-2.4.md`). Some entries change
 behaviour someone may rely on; those say so.

@@ -370,8 +370,36 @@ user_uninstall() {
 }
 
 # ---------------- system phase (opt-in, runs as root) --------------------------
+# Auto mode is one polkit rule (PORTPLAN K2). It needs pkexec, a polkit that
+# reads .rules files — 0.106 or newer; Ubuntu 22.04 ships 0.105 — and the
+# group this distro's admins are in: wheel on Fedora, Arch, openSUSE, Alpine;
+# sudo on Debian and Ubuntu, where a rule naming wheel matched nobody.
+admin_group() {
+    local g
+    for g in wheel sudo admin; do
+        grep -q "^$g:" /etc/group 2>/dev/null && { echo "$g"; return 0; }
+    done
+    return 1
+}
+polkit_rules_ok() {
+    command -v pkexec >/dev/null 2>&1 || return 1
+    local v; v="$(pkaction --version 2>/dev/null | awk '{print $NF}' || true)"
+    [[ -n $v && $v == 0.* ]] || return 0      # 1xx, or not reported: reads .rules
+    [[ "$(printf '%s\n0.106\n' "$v" | sort -V | head -1)" == 0.106 ]]
+}
+
 root_install() {
-    local mode="${SYSTEM_MODE:-$(cat "$SYS_CONF/mode" 2>/dev/null || echo auto)}"
+    local mode="${SYSTEM_MODE:-$(cat "$SYS_CONF/mode" 2>/dev/null || echo auto)}" grp=""
+    if [[ $mode == auto ]]; then
+        if ! polkit_rules_ok; then
+            say "passwordless updates need pkexec and polkit 0.106 or newer; this system has" \
+                "$(pkaction --version 2>/dev/null || echo 'no polkit') — using manual mode"
+            mode=manual
+        elif ! grp="$(admin_group)"; then
+            say "no wheel, sudo or admin group to grant passwordless updates to — using manual mode"
+            mode=manual
+        fi
+    fi
     say "installing root-owned kiwi to $SYS_BIN ($mode mode)"
     install -Dm755 "$SRC/bin/kiwi" "$SYS_BIN/kiwi"
     # /usr/local: writable everywhere, including Fedora Atomic's immutable /usr
@@ -407,10 +435,12 @@ root_install() {
     # auto-update path for system halves. (/etc/polkit-1/rules.d is writable
     # on ostree systems.)
     install -Dm755 "$SRC/data/kiwi-system-update" /usr/local/libexec/kiwi-system-update
-    install -Dm644 "$SRC/data/polkit/50-kiwi-updater.rules" \
-        /etc/polkit-1/rules.d/50-kiwi-updater.rules
+    mkdir -p /etc/polkit-1/rules.d
+    sed "s/isInGroup(\"wheel\")/isInGroup(\"$grp\")/" "$SRC/data/polkit/50-kiwi-updater.rules" \
+        > /etc/polkit-1/rules.d/50-kiwi-updater.rules
+    chmod 644 /etc/polkit-1/rules.d/50-kiwi-updater.rules
     systemctl reload polkit 2>/dev/null || systemctl restart polkit 2>/dev/null || true
-    say "system halves update from your own timer, without a password"
+    say "system halves update from your own timer, without a password (members of '$grp')"
 }
 
 root_update() { root_install; }

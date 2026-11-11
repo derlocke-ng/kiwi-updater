@@ -26,6 +26,13 @@ the audit found on top of that.
   newer import. On a system whose libadwaita is too old (Debian 12, Ubuntu
   22.04) the install says so instead of offering packages that are already
   there, and `kiwi-gui` itself explains instead of crashing.
+- **Passwordless system updates work on Debian and Ubuntu** (K2). The polkit
+  rule granted them to `wheel`, a group Debian and Ubuntu don't have — their
+  admins are in `sudo` — so every system update there asked for a password,
+  or was skipped by the timer. The bootstrap now writes this machine's admin
+  group into the rule (wheel, else sudo, else admin). Where polkit is missing
+  or too old to read rule files (Ubuntu 22.04 ships 0.105), it sets up manual
+  mode and says why, instead of installing a rule that never matches.
 
 ## 2.4.0 — unreleased
 

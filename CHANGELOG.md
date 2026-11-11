@@ -3,7 +3,7 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
-## 2.5.0 — unreleased
+## 2.5.0 — 2026-11-11
 
 Beyond Fedora Atomic (`PORTPLAN.md`). kiwi's own suite already passed on
 Debian 13, Ubuntu 24.04, Arch and openSUSE Tumbleweed; this release fixes what
@@ -53,7 +53,7 @@ the audit found on top of that.
   openSUSE Tumbleweed and Alpine; a separate job checks that stock BusyBox
   Alpine gets the one-line answer.
 
-## 2.4.0 — unreleased
+## 2.4.0 — 2026-11-08
 
 Security release from the 2.3.2 audit (`FIXPLAN-2.4.md`). Some entries change
 behaviour someone may rely on; those say so.

@@ -3,6 +3,26 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 2.5.1 — unreleased
+
+- **`kiwi-release`: signed releases for any kiwi app in two commands.**
+  `kiwi-release setup --key <key>` once per repo (writes
+  `.github/allowed_signers`, copies kiwi's release workflow, configures git to
+  sign tags); `kiwi-release tag --push` per release (signs `v<VERSION>`,
+  refuses a dirty tree, an existing or older version or a failing
+  `tests/check-version.sh`, verifies the signature before pushing).
+  `kiwi-release check` verifies any tag. Installed next to `kiwi`.
+- **kiwi's installers check kiwi's signature.** `get-kiwi.sh` refuses a
+  release not signed by kiwi-updater's release key before installing
+  anything, and the root bootstrap refuses one before root runs it — then
+  pins that key as root's signer for kiwi-updater, instead of trusting the
+  first tag it sees. A fork named in `self-url` is checked against a
+  root-owned `/etc/kiwi-updater/self-signers`.
+- **[SIGNING.md](SIGNING.md)**: what users see, how app authors sign
+  (`kiwi-release`, by hand, changing keys), and kiwi-updater's own release
+  checklist. `tests/check-version.sh` keeps the three copies of kiwi's key
+  equal.
+
 ## 2.5.0 — 2026-11-11
 
 Beyond Fedora Atomic (`PORTPLAN.md`). kiwi's own suite already passed on

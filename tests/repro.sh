@@ -43,6 +43,9 @@ ROOTGIT=/srv/kiwi-git-root
 K=$W/bin/kiwi
 
 id $T >/dev/null 2>&1 || useradd -m -s /bin/bash $T
+# auto mode grants the wrapper to the admin group (K2); openSUSE's image has
+# none, and without one the bootstrap rightly falls back to manual mode
+grep -q '^wheel:' /etc/group || grep -q '^sudo:' /etc/group || groupadd -r wheel
 git config --system safe.directory '*'
 git config --system user.email t@example.com
 git config --system user.name tester

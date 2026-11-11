@@ -41,6 +41,17 @@ the audit found on top of that.
 - **`~/.local/bin` on PATH** (K8). Arch's and Alpine's default shell profiles
   don't include it, and Debian's only from the next login; the installer now
   says so, with the line that adds it.
+- **Missing `awk`, `find` or `ssh-keygen` are named up front.** Minimal
+  Fedora images have no awk (every release lookup uses it) and openSUSE's no
+  `find`; kiwi now stops with the package to install instead of failing later.
+  The root bootstrap warns when `ssh-keygen` is missing, since without it
+  every system update needs a password (H4).
+- **Tested on every supported distro in CI** (T1–T3). The full suite and a
+  new `tests/smoke.sh` — a real install over the network: user install, the
+  first `kiwi list`, the root bootstrap of the tree under test, `kiwi doctor`,
+  installing a real app — run on Fedora, Debian 13, Ubuntu 24.04, Arch,
+  openSUSE Tumbleweed and Alpine; a separate job checks that stock BusyBox
+  Alpine gets the one-line answer.
 
 ## 2.4.0 — unreleased
 

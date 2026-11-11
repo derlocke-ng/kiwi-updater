@@ -330,14 +330,26 @@ own commits in its own repo.
 
 ---
 
-## 6. Decisions
+## 6. Decisions (answered 11 Nov 2026)
 
-- **P1:** the support tiers in §1. Is Ubuntu 22.04 / Debian 12 "CLI only, documented" acceptable, or are they targets?
-- **P2:** Alpine: require the GNU tools (recommended), or port kiwi to BusyBox?
-- **P3:** the `REQUIRES=` / `GUI_REQUIRES=` manifest fields (C1). Vocabulary and syntax.
-- **P4:** ensconce and gnome-monitor declared single-platform (recommended), or ported?
-- **P5:** Alpine/OpenRC for the root daemon (kiwi-killswitch): needed, or systemd-only?
-- **P6:** podman-only apps stay podman-only (recommended), or add docker?
+- **P1 — tiers:** as §1. Debian 12 and Ubuntu 22.04 are **CLI only,
+  documented**: kiwi and shell-only apps work; GUI and podman apps report
+  "not supported here" through C1 instead of failing mid-install.
+- **P2 — Alpine:** **require the GNU tools** (K5). kiwi and `get-kiwi.sh`
+  detect BusyBox and print the one `apk add` line.
+- **P3 — manifest:** **`REQUIRES=` / `GUI_REQUIRES=` with a fixed vocabulary**
+  kiwi checks itself (C1) — never a script from the app.
+- **P4 — single-platform apps:** **declare and hide**: ensconce
+  `REQUIRES=rpm-ostree`, gnome-monitor `REQUIRES=desktop=gnome`.
+- **P5 — kiwi-killswitch:** **systemd only, declared**
+  (`REQUIRES=systemd networkmanager`); no OpenRC init script.
+- **P6 — container apps:** **podman only, documented**
+  (`REQUIRES=podman>=4.7`); no docker fallback.
+
+Consequences for the work items: K4's OpenRC part shrinks to the user-timer
+fallback (cron / autostart) for kiwi itself; A1's OpenRC work and every docker
+port are dropped; C1 becomes the first thing to build after kiwi's own fixes,
+since most app-side items reduce to declaring requirements.
 
 ## 7. Suggested order
 

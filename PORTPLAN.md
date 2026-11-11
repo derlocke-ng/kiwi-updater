@@ -351,6 +351,14 @@ fallback (cron / autostart) for kiwi itself; A1's OpenRC work and every docker
 port are dropped; C1 becomes the first thing to build after kiwi's own fixes,
 since most app-side items reduce to declaring requirements.
 
+## Status
+
+- **kiwi-updater 2.5.0 (branch `port-plan`):** K1, K2, K5 (P2), K6, K7, K8,
+  T1–T3 done; plus awk/find/ssh-keygen named up front (found by T2). All six
+  CI distros pass repro.sh and smoke.sh.
+- **Open:** C1 (`REQUIRES=`), the per-app items, K3/K4 (doas/run0/sudoers,
+  non-systemd timer fallback), K10/T4 (a real WSL2 and Alpine run).
+
 ## 7. Suggested order
 
 1. **kiwi-updater 2.5.0:**

@@ -1,446 +1,69 @@
 # kiwi-updater
 
 Install and update open-source apps from **git catalogs** — on Fedora
-Silverblue / Bluefin, where it started, and on Fedora, Debian, Ubuntu, Arch,
-openSUSE and Alpine (see *Supported systems*). An app is just a git repo with a
-`kiwi.manifest` and an `install.sh`; `kiwi` clones it, checks out its latest
-release tag, runs its installer, and keeps it updated in the background —
-including itself.
+Silverblue and Bluefin, Fedora, Debian, Ubuntu, Arch, openSUSE and Alpine.
 
-No accounts, no store, no vendor. A catalog is a repo you can read, fork and
-send a pull request to.
+An app is a git repository with a `kiwi.manifest` and an `install.sh`. A
+catalog is a git repository that lists apps. `kiwi` clones an app, checks out
+its newest release, runs its installer, and keeps it updated in the
+background — itself included. No accounts, no store, no vendor.
 
-- **`kiwi`** — the CLI (needs bash, `git`, GNU coreutils, `util-linux` for
-  `flock`, findutils and `awk`; on most desktops all of them are already there)
-- **`kiwi-gui`** — the desktop app, **Kiwi Apps** in your app grid: search,
-  filter and browse the catalogs, with a detail view per app
-- **releases are git tags** — apps follow their latest *version* tag, meaning
-  one shaped like `v1.2.3`. Pre-releases and scratch tags are never picked up
-  by accident; untagged repos follow HEAD
-- **catalogs** — the Kiwi Network catalog comes registered; add as many more
-  as you like, managed through ordinary git
-- **one timer, yours** — background updates for everything you installed; the
-  root halves through a small polkit-gated helper, without a password
-
-## Supported systems
-
-Tested in CI on every push: the full suite and a real install over the
-network.
-
-| | kiwi + CLI apps | GUIs (GTK 4, libadwaita ≥ 1.5) | Passwordless system updates |
-|---|---|---|---|
-| Fedora Silverblue / Bluefin, Fedora | ✅ | ✅ | ✅ `wheel` |
-| Debian 13, Ubuntu 24.04 | ✅ | ✅ | ✅ `sudo` group |
-| Arch, openSUSE Tumbleweed | ✅ | ✅ | ✅ `wheel` |
-| Alpine | ✅ with the GNU tools¹ | ✅ | ✅ `wheel` (needs polkit) |
-| Debian 12, Ubuntu 22.04 | ✅ | — libadwaita too old | Debian 12 ✅; Ubuntu 22.04 manual mode (polkit 0.105) |
-| WSL2 | expected to work with systemd enabled; not yet tested | via WSLg | not yet tested |
-
-¹ `doas apk add bash git coreutils util-linux findutils sed grep openssh-keygen`
-— BusyBox lacks options kiwi needs; kiwi tells you so instead of failing.
-
-Apps say what they need; when something is missing kiwi names the package
-for your distro. GNOME-only apps (gnome-monitor, the Shell extensions) work
-only on GNOME; their non-extension parts work everywhere.
+- **`kiwi`** — the command-line tool
+- **Kiwi Apps** (`kiwi-gui`) — the desktop app: browse, search, install, and
+  read an app's installer before it runs
+- **Root parts done carefully** — apps that need root (a firewall daemon, say)
+  are installed by a root-owned copy of kiwi, only from sources root lists,
+  and updated without a password only to releases signed by a key root pinned
 
 ## Install
-
-**Recommended** — the user scope plus the root-owned system scope, one
-password prompt:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash
 ```
 
-**Minimal** — 100 % user-level: `~/.local`, no root, no password, ever:
+This sets up the user part and the root part, with one password prompt. For
+your home directory only — no root, no password, ever — add `-s -- --minimal`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --minimal
 ```
 
-Anything that is only files in your home — the CLI tools, ensconce, syncman — is
-complete on the minimal install. An app with a **root half** (kiwi-killswitch:
-a root firewall daemon plus a desktop part) needs the system scope; if it is
-not there yet, `kiwi install kiwi-killswitch` sets it up on the spot with one
-password. Prefer to type a password for *every* system change instead of
-granting passwordless updates? `--with-system=manual` installs the same thing
-without the polkit rule; one command switches either way.
+| Tested on every push | |
+|---|---|
+| Fedora Silverblue, Bluefin, Fedora, Debian 13, Ubuntu 24.04, Arch, openSUSE Tumbleweed | everything |
+| Alpine | everything, with the GNU tools: `doas apk add bash git coreutils util-linux findutils sed grep openssh-keygen` |
+| Debian 12, Ubuntu 22.04 (tested, not on every push) | `kiwi` and command-line apps; their libadwaita is too old for the GUIs |
 
-The [Kiwi Network catalog](https://github.com/derlocke-ng/kiwi-catalog) is
-registered by the install, so you can go straight to:
-
-```bash
-kiwi list
-kiwi-gui
-```
+Packages per distribution, manual mode, uninstalling and WSL:
+[docs/install.md](docs/install.md).
 
 ## Use
 
 ```bash
-kiwi list [--check]        # everything this machine knows about
-kiwi search vpn            # find an app across every registered catalog
-kiwi info kiwi-killswitch  # what it installs, and whether it needs root
-kiwi install <app>         # a name, or an explicit --all
-kiwi update                # everything with a new release
-kiwi uninstall <app>       # --purge also drops its config
-kiwi-gui                   # the desktop app ("Kiwi Apps")
+kiwi list                    # every app you can install
+kiwi install <app>           # install it
+kiwi update                  # update everything (the background timer does this too)
+kiwi info --installer <app>  # read the script before it runs
+kiwi doctor                  # when something is wrong
+kiwi-gui                     # the desktop app
 ```
 
-Before you run something, and when something goes wrong:
+All commands: [docs/usage.md](docs/usage.md).
 
-```bash
-kiwi info --installer <app> # print the script an install would run
-kiwi diff <app>             # what an update would change, installer included
-kiwi pin <app> v1.2.0       # stay there; kiwi unpin <app> to follow releases
-kiwi install <app> --dry-run # scope, URL, ref, installer path — and do nothing
-kiwi doctor                 # stale locks, version skew, bad list files, timers
-```
+## Documentation
 
-## One app, one line — even when it needs root
-
-Some apps are only a binary in `~/.local/bin`. Others — a VPN kill switch, say —
-are a root daemon **and** a desktop app **and** a GNOME extension. Those halves
-install in different places with different privileges, and that distinction is
-real: **root must never execute a file the user can write**, so system apps are
-cloned as root into `/var/lib` and user apps into `~/.local`.
-
-What you should not have to care about is *expressing* it. The app declares it:
-
-```ini
-COMPONENTS=daemon cli gui gnome-extension
-SCOPES=user system
-ROOT_REASON=installs a root firewall daemon, its D-Bus policy and two systemd units
-```
-
-A catalog lists that app **once**. `kiwi` reads the manifest, installs each half
-correctly, and shows one row:
-
-```
-NAME                 SCOPES       COMPONENTS             VERSION   STATUS
-kiwi-killswitch      user+system* daemon cli gui gnome-… 0.1.0     installed
-* needs root for part of the install
-```
-
-Before asking for your password it tells you what the password is *for* — that
-is what `ROOT_REASON` is. `kiwi info <app>` shows it any time.
-
-`scope=` on a catalog line still exists, but only as a **filter**: "on this
-machine, install just the user half". It is not a declaration.
-
-## The app convention
-
-Put a [`kiwi.manifest`](templates/kiwi.manifest) and an
-[`install.sh`](templates/install.sh) in your repo root:
-
-```ini
-NAME=my-tool
-DESCRIPTION=Short description
-# COMPONENTS: cli gui daemon service gnome-extension config …
-COMPONENTS=cli
-# SCOPES: user, system, or both
-SCOPES=user
-VERSION=0.1.0
-HOMEPAGE=https://…
-LICENSE=GPL-3.0-or-later
-INSTALLER=install.sh
-```
-
-A value runs to the end of the line — comments go on their own line, never
-after a value. A description may legitimately contain a `#`, so kiwi cannot
-strip trailing comments. Copied with `COMPONENTS=cli  # … gui …` on one line,
-the comment became part of the value and the app was treated as having a GUI.
-
-`kiwi` runs your installer once **per declared scope**, with:
-
-| env var | value |
+| | |
 |---|---|
-| `KIWI_SCOPE` | `user` or `system` |
-| `KIWI_PREFIX` | `~/.local` or `/usr/local` |
-| `KIWI_APP_DIR` | absolute path of the clone |
-| `KIWI_ACTION` | `install` \| `update` \| `uninstall` |
-| `KIWI_GUI` | `0` on a headless machine, or with `--cli-only` |
-| `KIWI_PURGE` | `1` when the user asked for `--purge` (uninstall only) |
-| `PATH` | begins with `$KIWI_PREFIX/bin`, so your installer can call what it just installed by name, whichever way it was reached — a terminal, the GUI, or the passwordless update. For the system scope it is fixed (`/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin`), not inherited |
+| [Install](docs/install.md) | supported systems, packages, install modes, uninstall |
+| [Using kiwi](docs/usage.md) | commands, Kiwi Apps, background updates, settings, scripting |
+| [Catalogs](docs/catalogs.md) | adding catalogs, `apps.list`, pins and overrides |
+| [Security](docs/security.md) | what runs as root, when you type a password, signed releases |
+| [Writing an app](docs/app-authors.md) | `kiwi.manifest`, `install.sh`, dependencies, icons, releases |
+| [Signed releases](docs/signing.md) | `kiwi-release`: signing your app's releases in two commands |
+| [Development](docs/development.md) | tests, CI, releasing kiwi-updater |
 
-On a purging uninstall your script is also called as `./install.sh uninstall
---purge`, so you can branch on either. Without `--purge`, leave the user's
-configuration where it is.
-
-A dual-scope installer branches on `KIWI_SCOPE` and does only that half each
-time. `COMPONENTS` containing `gui` is what makes `kiwi` skip desktop parts
-where there is no GTK stack.
-
-### Depending on another app
-
-`DEPENDS` lists commands your installer needs — `DEPENDS=podman git`. kiwi
-checks each one with `command -v` (in the `PATH` your installer will get) and
-says what is missing before it runs anything. When a missing word is the name
-of a **kiwi app**, kiwi installs that app first: the provider plugins say
-`DEPENDS=kiwi-proxy podman`, so `kiwi install kiwi-plugin-tor` brings
-kiwi-proxy along. `kiwi install … --dry-run`, `kiwi info` and the GUI all show
-which apps an install would bring.
-
-Only where it is safe to:
-
-- **from your own catalog, or a list on this machine.** A dependency is looked
-  up only in a list that also names your app, or in one the user keeps
-  locally. Otherwise one catalog could claim a common name another catalog's
-  app depends on, and get its installer run without anyone choosing it.
-- **in the same scope.** A user-scope app never pulls in a system install by
-  itself (that needs a password the user did not expect to give), and root
-  never installs a user app. kiwi names the `kiwi install` command instead.
-- **at install time.** An update does not add a dependency that a new version
-  started declaring; nothing removes a dependency when its last user goes.
-
-### Your icon
-
-Your app owns its icon: ship it in your repo and name it in the manifest,
-`ICON=data/my-tool.svg` (SVG or PNG, repo-relative, at most 1 MiB). The kiwi
-GUI draws it in the list, on the cards and in the detail view, straight from
-the clone — nothing is fetched. An app without one gets a themed icon for its
-category.
-
-kiwi network apps take theirs from
-[kiwi-icons](https://github.com/derlocke-ng/kiwi-icons): copy
-`svg/classic/<app-id>.svg` into your repo and point `ICON=` at it. If the app
-installs a desktop entry, install the same file as its icon, so the app menu
-and kiwi show the same picture — kiwi-updater does exactly that.
-
-Release by pushing a **signed** tag — root updates an app without a password
-only to tags signed by the key it pinned. Two commands, both explained in
-[SIGNING.md](SIGNING.md): `kiwi-release setup --key ~/.ssh/myapp-release`
-once (writes `.github/allowed_signers` and kiwi's release workflow, configures
-the repo to sign), then `kiwi-release tag --push` for each release (tags
-`v<VERSION>`, signed and verified; the workflow publishes the release notes).
-Every kiwi network app carries it.
-
-A tag counts as a release only if it matches `^v?[0-9]+(\.[0-9]+){0,3}$` —
-`v1`, `v1.2`, `1.2.3` and `v1.2.3.4` all qualify. `v2.0.0-rc1`, `nightly` and
-`wip-test` do not, so a pre-release never overtakes the release it precedes.
-Someone who wants one can ask for it by name with `ref=v2.0.0-rc1` on their
-`apps.list` line. A repo with no version tag follows its default branch.
-
-## Catalogs
-
-A catalog is a git repo with an `apps.list` and, optionally, a
-`catalog.manifest` describing itself:
-
-```ini
-NAME=kiwi-catalog
-DESCRIPTION=The Kiwi Network app catalog — open source, no accounts, no lock-in
-HOMEPAGE=https://github.com/derlocke-ng/kiwi-catalog
-MAINTAINER=derlocke-ng
-```
-
-The Kiwi Network catalog is registered by the install; any other is one
-command away:
-
-```bash
-kiwi catalog add https://github.com/you/your-catalog.git
-kiwi catalog list
-kiwi catalog remove <url>
-```
-
-Local `apps.list` entries always beat catalog entries, so a machine can pin or
-override anything.
-
-### Trust
-
-Installing an app **runs that repo's `install.sh`**, and an app declaring the
-system scope runs it **as root**. `kiwi` says so when you add a catalog, and
-`kiwi info` tells you what an app is before you install it. Catalogs are curated
-by whoever maintains them — they are not audited. Add catalogs you trust, the
-same way you would add a package repository.
-
-## Choosing what you run
-
-Installing an app runs that repo's `install.sh`, as root when it declares the
-system scope. None of this changes that — it exists to make the choice
-deliberate rather than automatic.
-
-Shipped in 1.3.0:
-
-- [x] **`kiwi pin <app> <tag>` / `kiwi unpin`** — the existing `ref=` entry
-      option as a first-class command, so code only changes when you say so.
-      The cheapest real protection there is.
-- [x] **`kiwi diff <app>`** — what changed between the installed commit and the
-      one an update would move you to, *before* updating. For a catalog of
-      small tools this is the strong one: a forty-line installer change is
-      something you can actually read, so the installer's diff is shown in
-      full.
-- [x] **`kiwi info --installer <app>`** — the script that is about to run,
-      before the first install.
-
-Still planned:
-
-- [ ] **A hosted registry of trusted catalogs** — `kiwi catalog browse` listing
-      known catalogs with their maintainer, so catalogs can be discovered
-      instead of pasted from somewhere. Catalogs stay opt-in either way.
-- [ ] **Signature verification** — `signer=<fingerprint>` on a registry entry,
-      checked with `git verify-tag` before an installer runs.
-
-A note on that last one, because it is easy to oversell: a signature proves a
-tag was made by someone holding a particular key. With a pinned fingerprint
-that catches an account takeover, a repo transfer, or a typosquatted URL. It
-does **not** catch a maintainer who ships something malicious — that signature
-is perfectly valid — nor a stolen key, nor an installer that fetches more code
-at install time. Signing narrows *who may publish*; it says nothing about *what
-the published thing does*. Pinning and diffs are the ones that let you see the
-change.
-
-## Why the split layout
-
-| piece | location | why |
-|---|---|---|
-| `kiwi`, `kiwi-gui`, user apps | `~/.local` | no root, survives an ostree rebase |
-| root-owned `kiwi` copy | `/usr/local/bin` (= writable `/var/usrlocal`) | what runs as root must never be a *user-writable* file, or any process running as you could edit it and become root on the next update |
-| system app repos / config | `/var/lib`, `/etc` | writable on ostree, root-owned |
-
-The immutable `/usr` is never touched. If you never install a system app,
-nothing outside your home is ever written.
-
-### Why two copies — and how rpm, apt, flatpak and brew do the same job
-
-Every installer that can touch the system answers one question: **what runs as
-root, and who can edit that file?** Line kiwi up against the others and the
-shape stops looking strange.
-
-| | install without root | install as root | the thing that runs as root |
-|---|---|---|---|
-| **rpm/dnf, apt** | none — everything is system-wide | always | `/usr/bin/dnf`, root-owned because the distro shipped it |
-| **flatpak** | `--user` → `~/.local/share/flatpak` | `--system` → `/var/lib/flatpak` | `flatpak-system-helper`, a root daemon that polkit authorises per request |
-| **brew** | `/home/linuxbrew/.linuxbrew`, owned by *you*; brew refuses to run as root | none | nothing — a formula that needs a root service tells you to do that part yourself |
-| **kiwi** | user scope → `~/.local` | system scope → `/var/lib` + `/usr/local` | the root-owned copy of kiwi, reached only through the polkit-gated wrapper or sudo |
-
-So the *shape* is flatpak's: a user installation needing no root, plus an
-optional system installation guarded by polkit and a root-owned helper. What
-makes kiwi look odd is only that its user copy lives in `~/.local/bin` — because
-kiwi installs **itself**, from git, with no package. Flatpak's binary is
-root-owned because the distro installed it; kiwi's is yours because *you* did.
-And root must never execute a file you can write — anything running as you
-could edit it and own root on the next timer tick — so the system scope needs
-its own root-owned copy. That second copy *is* kiwi's `flatpak-system-helper`,
-not a duplicate for its own sake.
-
-The two coherent alternatives are the other rows. Be a package —
-`rpm-ostree install kiwi-updater` would give one root-owned `/usr/bin/kiwi` and
-no second copy — at the price of layering on an ostree system, a reboot for
-every kiwi update, and depending on the very thing this exists to avoid. Or be
-brew — never touch the system — which is exactly the minimal install above,
-and which cannot install a kill switch.
-
-The split has real costs, and kiwi carries tooling for each: the copies can
-drift (`kiwi version` shows both, `kiwi doctor` warns, and your timer updates
-the root copy like any other system half),
-kiwi manages itself in both scopes at once (each scope follows its own list
-entry, so a pin on one half never silently holds or blocks the other), and
-the one bootstrap exception — `install --with-system` running a user-writable
-script as root once, password-gated — exists because no root-owned copy is
-there yet to do it instead. Even then, that script only fetches kiwi as root
-into `/var/lib/kiwi-updater/repos/kiwi-updater`, checks out the latest release
-and hands over to the `install.sh` in that clone: the root-owned kiwi, the
-wrapper and the polkit rule come from root's own clone, and root updates itself
-from `https://github.com/derlocke-ng/kiwi-updater.git` — not from your
-checkout or its `origin`. To have root follow a fork instead, put its https
-URL in a root-owned `/etc/kiwi-updater/self-url` before the bootstrap.
-
-## Background updates
-
-One timer, yours: `kiwi-updater.timer` runs `kiwi update --all` every six
-hours as you. User halves it updates directly; system halves — kiwi's own
-root-owned copy included — go through the passwordless helper. There is no
-root timer: nothing of kiwi's runs as root except on behalf of your update.
-In `manual` mode the timer leaves system halves for your next interactive
-`kiwi update`, where you type the password.
-
-### Root, and when you are asked for a password
-
-| | needs root | asks for a password |
-|---|---|---|
-| anything in the user scope | no | no |
-| **updating** a system app | yes | **no**, for a release signed by the key root pinned for it — your own update timer does it through one fixed-purpose helper that polkit grants to `wheel` users (with `--with-system=manual`, or for an unsigned release: yes) |
-| **installing** a system app | yes | yes |
-| **uninstalling** a system app | yes | yes |
-
-A plain `kiwi install` never touches root unless the app declares
-`SCOPES=… system`, and `kiwi info <app>` tells you why before you are asked.
-A `--minimal` install has no system scope at all; the first such app sets it
-up on the spot, with one password.
-
-Root installs only **sources it lists**: its own `/etc/kiwi-updater/apps.list`
-and the catalogs registered for it (the default catalog is, from the start).
-An app with a root half from anywhere else — your own list, a catalog only you
-added — installs its user half and tells you the one command that registers the
-source for root, `kiwi add --system <https-url>`; the GUI offers the same as
-"Register and Install". Before any password prompt, kiwi shows each root app's
-source, where that entry came from, and which other apps it would also install
-as root.
-
-Passwordless system *updates* go through `/usr/local/libexec/kiwi-system-update`,
-which the polkit rule authorises by exact path. It takes app names but treats
-them as a **selection**: every name must look like a name (never an option) and
-must already appear in the root-owned `/etc/kiwi-updater/apps.list` or a
-catalog registered for root, and anything else is refused — so the worst a
-caller can ask for is an update of an app the administrator already trusts.
-With no names it updates every one of them.
-
-The rule requires an **active** session in `wheel`, not a local one: VM and
-remote desktop sessions can report as non-local.
-
-### Signed releases
-
-A passwordless update runs new code as root that nobody looked at, so it only
-happens for a release root can check. Root pins one SSH signing key per system
-app, in `/etc/kiwi-updater/signers/<app>` — trust on first use, taken from the
-release you installed with your password (or, on a machine from before 2.4,
-from the release already installed). From then on:
-
-- a version tag signed by that key updates without a password;
-- an unsigned release, an app that follows a branch, or one without release
-  tags updates only when you type your password, and kiwi says it could not
-  verify it;
-- a release signed by any other key — or an unsigned one, once an app's
-  releases were signed — is refused, password or not. If the project really
-  changed its key: `kiwi trust --system <app>`, then update it with your
-  password, which pins the new key.
-
-This needs `ssh-keygen` (openssh-clients), which git uses to check SSH
-signatures; `kiwi doctor` says if it is missing.
-
-**App authors:** see [SIGNING.md](SIGNING.md) — `kiwi-release setup` once,
-`kiwi-release tag --push` per release. Keep the key off CI.
-
-## Notes
-
-- `kiwi check` exits `10` when updates are available (script-friendly).
-- `kiwi list` fetches app metadata the first time so it can show descriptions
-  and components; `--no-sync` skips that. `kiwi list --check` and `kiwi sync`
-  also bring those cached clones up to the release an install would use, so a
-  listing describes what you would get rather than what was current when the
-  app was first seen.
-- Whether an app has an update is decided by comparing the remote against the
-  commit recorded in each scope's own marker file, so a system app updated by
-  root shows as up to date for the user too.
-- `kiwi install` needs an app name or an explicit `--all`. `kiwi update` with
-  no arguments means everything already installed.
-- Concurrent runs are prevented with per-scope lock files. A command waits
-  briefly (`KIWI_LOCK_WAIT`, 20s) rather than failing instantly, since the
-  usual collision is the background timer; if it still cannot get the lock it
-  names the host and pid holding it. Every network git call is bounded by
-  `KIWI_NET_TIMEOUT` (180s) so a stalled fetch cannot hold the lock forever.
-  Both are read only by the user-side kiwi: root ignores every `KIWI_*`
-  tuning variable in its environment and uses the defaults.
-- The GUI is a thin layer over `kiwi list --porcelain` — the CLI is the single
-  source of truth. It shows which scopes an app is actually installed in, can
-  pin and unpin, and shows an app's installer and an update's diff before you
-  run either.
-- `kiwi list --porcelain` fields are positional and only ever appended to, so
-  anything parsing it keeps working. Field 13 is the scopes an app is installed
-  in, 14 its pin, 15 its icon.
+Release notes: [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
 GPL-3.0-or-later — see [LICENSE](LICENSE).
-
-Release notes are in [CHANGELOG.md](CHANGELOG.md); the 1.3.0 audit that
-produced most of them is in [FIXPLAN.md](FIXPLAN.md).

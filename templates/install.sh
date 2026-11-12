@@ -7,7 +7,7 @@
 #   KIWI_PREFIX   ~/.local (user)  or  /usr/local (system)
 #   KIWI_APP_DIR  absolute path of this repo's clone
 #   KIWI_ACTION   same as $1
-#   KIWI_GUI      0 on a headless machine or with --cli-only
+#   KIWI_GUI      0 without GTK 4 / libadwaita 1.5+, or with --cli-only
 #   KIWI_PURGE    1 when the user asked for --purge (uninstall only); your
 #                 script is also called as `./install.sh uninstall --purge`
 #   PATH          begins with $KIWI_PREFIX/bin, so you can call what you just
@@ -38,7 +38,7 @@ do_install() {
     install -Dm755 "$SRC/bin/$APP" "$KIWI_PREFIX/bin/$APP"
 
     # --- GTK GUI example (uncomment) ---------------------------------------
-    # kiwi exports KIWI_GUI=0 on headless machines — skip GUI parts then:
+    # kiwi exports KIWI_GUI=0 where the GUI cannot run — skip GUI parts then:
     # if [[ "${KIWI_GUI:-1}" == 1 ]]; then
     #     install -Dm755 "$SRC/gui/$APP-gui" "$KIWI_PREFIX/bin/$APP-gui"
     #     install -Dm644 "$SRC/data/$APP.desktop" "$KIWI_PREFIX/share/applications/$APP.desktop"

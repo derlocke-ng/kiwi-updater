@@ -52,7 +52,7 @@ DEFAULT_CATALOG="https://github.com/derlocke-ng/kiwi-catalog.git"
 # A root-owned /etc/kiwi-updater/self-url can name another source (a fork, or
 # the test suite's fixture); nothing in the environment can.
 CANONICAL_URL="https://github.com/derlocke-ng/kiwi-updater.git"
-# kiwi-updater's release key (SIGNING.md). Same line as .github/allowed_signers
+# kiwi-updater's release key (docs/signing.md). Same line as .github/allowed_signers
 # and get-kiwi.sh's; tests/check-version.sh keeps them equal.
 KIWI_SIGNER='derlocke-ng namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOgQc/J6GUopStnNbqhY0QM/k5krVteKyWj4e6qyZX+r'
 
@@ -317,7 +317,7 @@ system_uninstall() {
 user_install() {
     say "installing kiwi to $USER_BIN"
     install -Dm755 "$SRC/bin/kiwi" "$USER_BIN/kiwi"
-    # for app authors: signed releases in two commands (SIGNING.md)
+    # for app authors: signed releases in two commands (docs/signing.md)
     install -Dm755 "$SRC/bin/kiwi-release" "$USER_BIN/kiwi-release"
 
     if want_gui; then

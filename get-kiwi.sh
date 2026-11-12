@@ -25,7 +25,7 @@ set -euo pipefail
 # part way through would otherwise run a prefix of this — a half-finished
 # clone, or a checkout with no install after it. Nothing happens until the
 # whole file is here.
-# kiwi-updater's release key (SIGNING.md): every release tag is signed with it.
+# kiwi-updater's release key (docs/signing.md): every release tag is signed with it.
 # The same line as .github/allowed_signers and install.sh's — tests/check-version.sh
 # keeps the three equal.
 KIWI_SIGNER='derlocke-ng namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOgQc/J6GUopStnNbqhY0QM/k5krVteKyWj4e6qyZX+r'

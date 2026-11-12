@@ -11,7 +11,7 @@
 #
 # or by hand: git config gpg.format ssh; git config user.signingkey <key>;
 # git tag -s v1.2.0 -m v1.2.0 && git push origin v1.2.0. See kiwi-updater's
-# SIGNING.md.
+# docs/signing.md.
 #
 # This workflow creates no tag and holds no key. For a pushed v* tag it checks
 # that the tag is annotated, signed by a key in .github/allowed_signers, equal

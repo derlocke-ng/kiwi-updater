@@ -9,7 +9,7 @@
 #              search` matches against, so lead with what the thing does.
 # VERSION      your version string; keep it in sync with your git tag
 #              (`kiwi-release tag --push` signs v<VERSION>; the release
-#              workflow checks it and publishes — see SIGNING.md).
+#              workflow checks it and publishes — see docs/signing.md).
 #              kiwi installs the latest tag matching ^v?[0-9]+(\.[0-9]+){0,3}$
 #              — v1.2.3 counts, v2.0.0-rc1 and nightly do not, so a
 #              pre-release never overtakes a release. No version tag at all
@@ -25,8 +25,9 @@
 #                 cli  gui  daemon  service  gnome-extension  config  module
 #              (module: a plugin for another app, installed into that app's
 #              data — kiwi-proxy's provider modules, for example)
-#              Anything containing "gui" is skipped on a machine with no GTK
-#              stack, or with --cli-only.
+#              kiwi does not skip anything by itself: it passes KIWI_GUI=0
+#              (no GTK 4 / libadwaita 1.5+, or --cli-only) and your
+#              installer leaves its desktop parts out.
 #
 # CATEGORY     ONE word, used to group and filter in the explorer and to pick
 #              the icon. Use an existing one where it fits:

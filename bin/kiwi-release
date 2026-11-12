@@ -3,7 +3,7 @@
 #
 # kiwi installs an app's newest version tag, and root updates an app's system
 # half without a password only to a tag signed by the key it pinned for that
-# app (kiwi-updater's SIGNING.md). This tool does the author's side:
+# app (kiwi-updater's docs/signing.md). This tool does the author's side:
 #
 #   kiwi-release setup --key ~/.ssh/myapp-release   once per repo
 #   kiwi-release tag [--push]                       per release

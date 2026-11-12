@@ -8,7 +8,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       - name: shellcheck
         run: |
-          shellcheck -S warning bin/kiwi install.sh get-kiwi.sh \
+          shellcheck -S warning bin/kiwi bin/kiwi-release install.sh get-kiwi.sh \
             data/kiwi-system-update data/bash-completion/kiwi \
             templates/install.sh tests/*.sh
       - name: the GUI has to at least parse
@@ -21,6 +21,8 @@ jobs:
   # real install a new user does, over the network. Through docker rather than
   # a `container:` job: both need root, useradd and a disposable filesystem,
   # and this is the invocation the README and the plans document.
+  # Package setup retries: runners have hit both a registry timeout and a
+  # DNS failure for a distro mirror, which said nothing about kiwi.
   distros:
     runs-on: ubuntu-latest
     strategy:
@@ -35,7 +37,9 @@ jobs:
             setup: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git gawk util-linux passwd procps python3 openssl openssh-client ca-certificates
           - name: ubuntu-24.04
             image: docker.io/library/ubuntu:24.04
-            setup: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git gawk util-linux passwd procps python3 openssl openssh-client ca-certificates
+            # the mirror GitHub's runners use themselves: archive/security.ubuntu.com
+            # stopped resolving from inside runner containers for a whole afternoon
+            setup: sed -i "s|http://archive.ubuntu.com|http://azure.archive.ubuntu.com|; s|http://security.ubuntu.com|http://azure.archive.ubuntu.com|" /etc/apt/sources.list.d/ubuntu.sources && apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git gawk util-linux passwd procps python3 openssl openssh-client ca-certificates
           - name: arch
             image: docker.io/library/archlinux:latest
             setup: pacman -Syu --noconfirm --needed git gawk util-linux shadow procps-ng python openssl openssh
@@ -51,11 +55,15 @@ jobs:
       - name: repro.sh — findings stay fixed
         run: |
           docker run --rm -v "$PWD":/src:ro ${{ matrix.image }} sh -c \
-            '${{ matrix.setup }} >/dev/null && bash /src/tests/repro.sh'
+            'ok=0; for i in 1 2 3; do if { ${{ matrix.setup }}; } >/dev/null 2>&1; then ok=1; break; fi; sleep 20; done
+             [ $ok = 1 ] || { echo "package setup failed 3 times (mirror or DNS trouble on the runner)"; exit 1; }
+             bash /src/tests/repro.sh'
       - name: smoke.sh — a real install, over the network
         run: |
           docker run --rm -v "$PWD":/src:ro ${{ matrix.image }} sh -c \
-            '${{ matrix.setup }} >/dev/null && bash /src/tests/smoke.sh'
+            'ok=0; for i in 1 2 3; do if { ${{ matrix.setup }}; } >/dev/null 2>&1; then ok=1; break; fi; sleep 20; done
+             [ $ok = 1 ] || { echo "package setup failed 3 times (mirror or DNS trouble on the runner)"; exit 1; }
+             bash /src/tests/smoke.sh'
 
   # Stock Alpine has BusyBox, which kiwi does not support (P2): it must stop at
   # once with the line that installs the GNU tools, not fail halfway (T3).

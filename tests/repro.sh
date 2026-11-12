@@ -131,11 +131,16 @@ rootfix() {
 # in /etc/kiwi-updater/self-url. Since M5 root installs kiwi only from its own
 # clone of that source (by default the real GitHub repo), so without this a
 # root bootstrap in a test would install the published release, not this tree.
-selffix() {
+selffix() { # [signing-key]: sign the release tag with it (default: unsigned)
     local w=/tmp/kt-work-selffix v
     v="$(sed -n 's/^VERSION=//p' $W/kiwi.manifest | head -1)"
     rm -rf $w; mkdir -p $w; cp -r $W/. $w/
-    ( cd $w && git init -q && git add -A && git commit -qm self && git tag -a "v$v" -m "v$v" )
+    if [[ -n ${1:-} ]]; then
+        ( cd $w && git init -q && git add -A && git commit -qm self &&
+          git -c gpg.format=ssh -c user.signingkey="$1" tag -s "v$v" -m "v$v" )
+    else
+        ( cd $w && git init -q && git add -A && git commit -qm self && git tag -a "v$v" -m "v$v" )
+    fi
     mkdir -p $ROOTGIT/self; chmod 755 $ROOTGIT $ROOTGIT/self
     rm -rf $ROOTGIT/self/kiwi-updater.git
     git clone -q --bare $w $ROOTGIT/self/kiwi-updater.git; chmod -R go-w $ROOTGIT/self/kiwi-updater.git
@@ -1347,10 +1352,30 @@ t_K7() { # right after install, `kiwi list` shows the apps of the registered cat
     check K7 "first 'kiwi list' fetches a never-fetched catalog (listed: ${names:-nothing}); --no-sync stays offline" f
 }
 
+t_H4B() { # the root bootstrap installs kiwi only from a release signed by its key, and pins it
+    local src=$TH/checkout boot ok=no refused=no pinned=no
+    boot() { rm -rf /usr/local/bin/kiwi /var/lib/kiwi-updater /etc/kiwi-updater/signers
+             env -i HOME=/root PATH=$STUBS:/usr/sbin:/usr/bin:/bin bash $src/install.sh install >/dev/null 2>&1; }
+    rm -rf $src; cp -r $W $src; chown -R $T $src
+    # a fork named in self-url, with its key in a root-owned self-signers
+    selffix $KEYA
+    printf 'fork namespaces="git" %s\n' "$(cut -d' ' -f1-2 $KEYA.pub)" > /etc/kiwi-updater/self-signers
+    boot
+    [[ -x /usr/local/bin/kiwi ]] && ok=yes
+    grep -qF "$(cut -d' ' -f2 $KEYA.pub)" /etc/kiwi-updater/signers/kiwi-updater 2>/dev/null && pinned=yes
+    # the same, signed by another key: refused before anything from it runs
+    selffix $KEYB
+    printf 'fork namespaces="git" %s\n' "$(cut -d' ' -f1-2 $KEYA.pub)" > /etc/kiwi-updater/self-signers
+    boot
+    [[ ! -e /usr/local/bin/kiwi ]] && refused=yes
+    f() { [[ $ok == yes && $pinned == yes && $refused == yes ]]; }
+    check H4B "bootstrap: signed release installs ($ok) and its key is pinned ($pinned); another key's is refused ($refused)" f
+}
+
 for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
          P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P17 P18 P19 P20 P22 P23 P25 \
          P27 P28 P29 P30 P31 P32 P33 P34 P35 P36 P37 \
-         H1 H2 H3 M1 M2 M3 M6 M7 L1 Q1 Q4 H4 K7; do run $t; done
+         H1 H2 H3 M1 M2 M3 M6 M7 L1 Q1 Q4 H4 H4B K7; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

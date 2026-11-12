@@ -206,16 +206,13 @@ kiwi network apps take theirs from
 installs a desktop entry, install the same file as its icon, so the app menu
 and kiwi show the same picture — kiwi-updater does exactly that.
 
-Release by pushing a **signed** tag: `git tag -s v1.3.0 -m v1.3.0 && git push
-origin v1.3.0`, with `gpg.format=ssh` and your release key as
-`user.signingkey` (see *Signed releases*: root updates an app without a
-password only to tags signed by the key it pinned). To publish the GitHub
-Release too, copy [`templates/release.yml`](templates/release.yml) to
-`.github/workflows/release.yml` and list your key in `.github/allowed_signers`:
-for each pushed `v*` tag it checks the signature, that the tag equals
-`VERSION`, that it is newer than your newest release and that your
-`tests/check-version.sh` passes, then publishes the notes. It never makes or
-signs a tag itself. Every kiwi network app carries it.
+Release by pushing a **signed** tag — root updates an app without a password
+only to tags signed by the key it pinned. Two commands, both explained in
+[SIGNING.md](SIGNING.md): `kiwi-release setup --key ~/.ssh/myapp-release`
+once (writes `.github/allowed_signers` and kiwi's release workflow, configures
+the repo to sign), then `kiwi-release tag --push` for each release (tags
+`v<VERSION>`, signed and verified; the workflow publishes the release notes).
+Every kiwi network app carries it.
 
 A tag counts as a release only if it matches `^v?[0-9]+(\.[0-9]+){0,3}$` —
 `v1`, `v1.2`, `1.2.3` and `v1.2.3.4` all qualify. `v2.0.0-rc1`, `nightly` and
@@ -410,12 +407,8 @@ from the release already installed). From then on:
 This needs `ssh-keygen` (openssh-clients), which git uses to check SSH
 signatures; `kiwi doctor` says if it is missing.
 
-**App authors:** sign your release tags with an SSH key and push them —
-`git tag -s v1.2.0 -m v1.2.0` with `git config gpg.format ssh` and
-`user.signingkey` pointing at the key (ideally on a hardware token). Keep the
-key off CI: a release workflow that can sign would make its token the key.
-`templates/release.yml` publishes a GitHub Release only for a tag that is
-signed by a key listed in the repo's `.github/allowed_signers`.
+**App authors:** see [SIGNING.md](SIGNING.md) — `kiwi-release setup` once,
+`kiwi-release tag --push` per release. Keep the key off CI.
 
 ## Notes
 

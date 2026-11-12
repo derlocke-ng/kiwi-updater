@@ -6,9 +6,12 @@
 # a maintainer makes and signs it — never CI, whose token would otherwise be
 # the signing key:
 #
-#     git config gpg.format ssh
-#     git config user.signingkey ~/.ssh/<your release key>
-#     git tag -s v1.2.0 -m v1.2.0 && git push origin v1.2.0
+#     kiwi-release setup --key ~/.ssh/<your release key>     (once)
+#     kiwi-release tag --push                                 (per release)
+#
+# or by hand: git config gpg.format ssh; git config user.signingkey <key>;
+# git tag -s v1.2.0 -m v1.2.0 && git push origin v1.2.0. See kiwi-updater's
+# SIGNING.md.
 #
 # This workflow creates no tag and holds no key. For a pushed v* tag it checks
 # that the tag is annotated, signed by a key in .github/allowed_signers, equal

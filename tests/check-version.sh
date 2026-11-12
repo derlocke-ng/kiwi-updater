@@ -32,10 +32,20 @@ fi
 # `./bin/kiwi` answering "Permission denied" from a fresh clone. Nothing in
 # kiwi's own paths noticed — it runs everything through `bash` or reinstalls
 # with `install -m755` — which is exactly why it needs checking here.
-for f in bin/kiwi install.sh get-kiwi.sh gui/kiwi-gui templates/install.sh \
+for f in bin/kiwi bin/kiwi-release install.sh get-kiwi.sh gui/kiwi-gui templates/install.sh \
          tests/check-version.sh tests/repro.sh; do
     mode="$(git ls-files -s -- "$f" | awk '{print $1}')"
     [[ $mode == 100755 ]] || say_bad "$f is tracked as ${mode:-<untracked>}, not 100755 — chmod 755 it and re-add"
+done
+
+# 4. kiwi-updater's release key is carried three times: .github/allowed_signers
+# (the release workflow), get-kiwi.sh and install.sh (they verify the release
+# they install). A copy that drifted would refuse every release.
+key_repo="$(grep -Ev '^[[:space:]]*(#|$)' .github/allowed_signers 2>/dev/null | head -1)"
+for f in get-kiwi.sh install.sh; do
+    k="$(sed -n "s/^KIWI_SIGNER='\(.*\)'$/\1/p" "$f" | head -1)"
+    [[ -n $key_repo && $k == "$key_repo" ]] ||
+        say_bad "$f's KIWI_SIGNER differs from .github/allowed_signers"
 done
 
 # 3. The default catalog is named twice: install.sh registers it, and bin/kiwi

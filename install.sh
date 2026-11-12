@@ -52,6 +52,9 @@ DEFAULT_CATALOG="https://github.com/derlocke-ng/kiwi-catalog.git"
 # A root-owned /etc/kiwi-updater/self-url can name another source (a fork, or
 # the test suite's fixture); nothing in the environment can.
 CANONICAL_URL="https://github.com/derlocke-ng/kiwi-updater.git"
+# kiwi-updater's release key (SIGNING.md). Same line as .github/allowed_signers
+# and get-kiwi.sh's; tests/check-version.sh keeps them equal.
+KIWI_SIGNER='derlocke-ng namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOgQc/J6GUopStnNbqhY0QM/k5krVteKyWj4e6qyZX+r'
 
 # GUI parts are skipped on headless machines (no GTK4 stack), with
 # --cli-only / KIWI_GUI=0 as explicit overrides. Not based on $DISPLAY —
@@ -187,9 +190,47 @@ root_from_own_clone() {
     fi
     tag="$(latest_release "$ROOT_CLONE")"
     [[ -z $tag ]] || rgit -C "$ROOT_CLONE" -c advice.detachedHead=false checkout --quiet "$tag"
+    verify_own_release "$tag"
     chmod -R a+rX "$ROOT_CLONE"
     say "installing the system scope from $url${tag:+ ($tag)} — not from $SRC"
     exec bash "$ROOT_CLONE/install.sh" "$ACTION" ${SYSTEM_MODE:+--with-system=$SYSTEM_MODE}
+}
+
+# Before root runs anything from its own clone, the release must be signed by
+# kiwi-updater's key — the one this script carries, or for a fork named in
+# self-url, the keys in a root-owned /etc/kiwi-updater/self-signers. Then root
+# pins that key for kiwi-updater (signers/kiwi-updater), so its updates are
+# checked against the key that was verified here, not trusted on first use.
+verify_own_release() { # tag
+    local tag="$1" f="" pin="$SYS_CONF/signers/kiwi-updater"
+    if [[ -f $SYS_CONF/self-url ]]; then
+        if [[ -f $SYS_CONF/self-signers ]] && root_owned_chain "$SYS_CONF/self-signers"; then
+            f="$SYS_CONF/self-signers"
+        else
+            say "note: self-url without a root-owned $SYS_CONF/self-signers — the release is not signature-checked"
+            return 0
+        fi
+    fi
+    if ! command -v ssh-keygen >/dev/null 2>&1; then
+        say "note: no ssh-keygen — the release signature cannot be checked here"
+        return 0
+    fi
+    [[ -n $tag ]] || { echo "error: $ROOT_CLONE has no release tag to verify — refusing" >&2; exit 1; }
+    local tmp; tmp="$(mktemp /tmp/kiwi-signers.XXXXXX)"
+    if [[ -n $f ]]; then grep -Ev '^[[:space:]]*(#|$)' "$f" > "$tmp" || true
+    else printf '%s\n' "$KIWI_SIGNER" > "$tmp"; fi
+    if ! git -C "$ROOT_CLONE" -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$tmp" \
+             verify-tag -- "$tag" >/dev/null 2>&1; then
+        rm -f "$tmp"
+        echo "error: $tag is not signed by kiwi-updater's release key — refusing to install it as root" >&2
+        exit 1
+    fi
+    if [[ ! -s $pin ]]; then
+        mkdir -p "$SYS_CONF/signers"; chmod 755 "$SYS_CONF/signers"
+        awk '{ $1 = "kiwi-updater"; print }' "$tmp" > "$pin"; chmod 644 "$pin"
+    fi
+    rm -f "$tmp"
+    say "$tag is signed by kiwi-updater's release key"
 }
 
 has_self_entry() { # list-file -> is any entry a repo called kiwi-updater?
@@ -276,6 +317,8 @@ system_uninstall() {
 user_install() {
     say "installing kiwi to $USER_BIN"
     install -Dm755 "$SRC/bin/kiwi" "$USER_BIN/kiwi"
+    # for app authors: signed releases in two commands (SIGNING.md)
+    install -Dm755 "$SRC/bin/kiwi-release" "$USER_BIN/kiwi-release"
 
     if want_gui; then
         say "installing kiwi-gui + desktop entry + icon"
@@ -363,7 +406,7 @@ user_uninstall() {
     rm -f "$USER_UNIT_DIR/kiwi-updater.service" "$USER_UNIT_DIR/kiwi-updater.timer"
     # no user session (ssh, a container): still remove the files below
     systemctl --user daemon-reload 2>/dev/null || true
-    rm -f "$USER_BIN/kiwi" "$USER_BIN/kiwi-gui" \
+    rm -f "$USER_BIN/kiwi" "$USER_BIN/kiwi-gui" "$USER_BIN/kiwi-release" \
           "${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions/kiwi" \
           "$USER_APPS/eu.kiwinetwork.KiwiUpdater.desktop" "$USER_APPS/kiwi-gui.desktop" \
           "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps/eu.kiwinetwork.KiwiUpdater.png" \

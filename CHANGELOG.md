@@ -3,7 +3,7 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
-## 2.5.1 — 2026-11-11
+## 2.5.1 — 2026-11-13
 
 - **`kiwi-release`: signed releases for any kiwi app in two commands.**
   `kiwi-release setup --key <key>` once per repo (writes

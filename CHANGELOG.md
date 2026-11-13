@@ -3,6 +3,25 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 2.5.2 — 2026-11-13
+
+Documentation only; kiwi itself behaves as in 2.5.1.
+
+- **A short README, and the details in `docs/`.** The README had grown to 446
+  lines and drifted from the code; it is now about 70 lines, and seven pages
+  in [`docs/`](docs/README.md) cover installing, using kiwi, catalogs,
+  security, writing an app, signed releases and development. Every claim was
+  checked against the code. Corrected on the way: signature checks were still
+  listed as "planned", `wheel` was named as the only admin group, and
+  `COMPONENTS=gui` was said to make kiwi skip desktop parts (kiwi passes
+  `KIWI_GUI=0`; the app's installer decides). Debian 12 and Ubuntu 22.04 are
+  now verified: kiwi's suite and a real install pass on both.
+- **Ready for kiwi-network.eu.** `docs/kiwi-docs.yml` lists the pages in menu
+  order with their titles, for the site's docs puller, which reads each
+  tool's `docs/` at its latest release.
+- **The kiwi-docs guide** for writing these docs is part of the repository
+  (`.claude/skills/kiwi-docs/`), with its checker.
+
 ## 2.5.1 — 2026-11-13
 
 - **`kiwi-release`: signed releases for any kiwi app in two commands.**

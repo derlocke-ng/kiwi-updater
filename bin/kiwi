@@ -161,6 +161,11 @@ env_num() { # value default
     if [[ ${1:-} =~ ^[0-9]+$ ]]; then echo "$1"; else echo "$2"; fi
 }
 
+# kiwi's own files (lists, settings, markers, clones) are 0644/0755 whatever
+# the caller's umask: Ubuntu gives users 002, which left the lists
+# group-writable — exactly what `kiwi doctor` warns about. Root sets 022 above.
+umask 022
+
 MANIFEST="kiwi.manifest"
 LS_REMOTE_TIMEOUT=10
 # Every network git call is bounded. An unbounded clone or fetch on a flaky

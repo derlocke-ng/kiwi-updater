@@ -19,11 +19,13 @@
 # system-level parts are (re)installed.
 set -euo pipefail
 
-# As root, files are created 0644/0755 whatever umask the caller had. Ubuntu
+# Files are created 0644/0755 whatever umask the caller had. Ubuntu
 # gives users umask 002, and Ubuntu 26.04's sudo (sudo-rs) passes it on to
 # root where classic sudo forced 022: root's own clone came out group-writable,
 # and the bootstrap then refused it as "not root-owned all the way up".
-if [[ $EUID -eq 0 ]]; then umask 022; fi
+# The same for the user part: with umask 002 the lists came out 664, and
+# `kiwi doctor` rightly flagged them as writable by others.
+umask 022
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="$SRC/install.sh"

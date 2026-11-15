@@ -792,7 +792,9 @@ t_P22() { # on a user-only machine a dual-scope app installs its user half and s
     # harness's pkexec stub refuses it)
     : > $ESC
     ku add --system "$hu" >/dev/null 2>&1
-    local boot=no; grep -q 'install.sh install --with-system' $ESC && boot=yes
+    # one escalation that sets the scope up AND registers (one password)
+    local boot=no
+    [[ "$(wc -l < $ESC)" -eq 1 ]] && grep -q 'kiwi-setup .*install.sh add --system' $ESC && boot=yes
     # An app from the DEFAULT catalog needs no registering: the bootstrap gives
     # root that catalog, so `kiwi install` sets the scope up with one password.
     # (The real catalog URL is mapped onto a fixture for this check only.)
@@ -804,9 +806,11 @@ t_P22() { # on a user-only machine a dual-scope app installs its user half and s
     : > $ESC
     ku install defapp >/dev/null 2>&1
     git config --system --unset "url.$GITROOT/c/defcat.git.insteadOf"
-    local defboot=no; grep -q 'install.sh install --with-system' $ESC && defboot=yes
+    # one escalation that sets the scope up AND installs the root half
+    local defboot=no
+    [[ "$(wc -l < $ESC)" -eq 1 ]] && grep -q 'kiwi-setup .*install.sh install --system defapp' $ESC && defboot=yes
     f() { [[ $first == yes && $boot == yes && $defboot == yes ]]; }
-    check P22 "user half installs, root half asks for no password (ok=$first); 'kiwi add --system' bootstraps (ok=$boot); a default-catalog app bootstraps directly (ok=$defboot)" f
+    check P22 "user half installs, root half asks for no password (ok=$first); 'kiwi add --system' sets up + registers in one escalation (ok=$boot); a default-catalog app sets up + installs in one (ok=$defboot)" f
 }
 
 t_P23() { # --with-system=manual: root-owned kiwi and lists, nothing that runs as root unattended

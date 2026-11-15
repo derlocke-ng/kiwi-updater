@@ -22,31 +22,31 @@ ROOT_KIWI="/usr/local/bin/kiwi"
 # the catalog install.sh registers for both scopes; keep the two in step
 DEFAULT_CATALOG="https://github.com/derlocke-ng/kiwi-catalog.git"
 
-# NEVER returns $SELF. Running ~/.local/bin/kiwi as root would hand every
+# NEVER runs this copy as root. Running ~/.local/bin/kiwi as root would hand every
 # process running as you a path to root on the next privileged call, which is
 # the entire reason the root copy exists. If it is missing we offer to install
 # it properly instead of quietly doing the unsafe thing.
-root_kiwi() {
-    if [[ -x $ROOT_KIWI ]]; then
-        echo "$ROOT_KIWI"; return 0
-    fi
+
+# Run the root-owned kiwi with <args>. When the system scope is not there yet,
+# set it up and run <args> in the SAME root call: one password, as promised,
+# instead of one for the setup and a second for the work it was set up for
+# (`kiwi install kiwi-killswitch` on a minimal install asked twice). The
+# script and its arguments go to bash as separate words, never spliced into
+# the script text.
+as_root_kiwi() { # args...
+    if [[ -x $ROOT_KIWI ]]; then as_root "$ROOT_KIWI" "$@"; return; fi
     local repo="$USER_REPOS/kiwi-updater"
     if [[ ! -f "$repo/install.sh" ]]; then
         die "system apps need a root-owned copy of kiwi and the kiwi-updater
 checkout is missing. Set it up with:
   curl -fsSL https://raw.githubusercontent.com/derlocke-ng/kiwi-updater/main/get-kiwi.sh | bash -s -- --with-system"
     fi
-    # >&2, all of it: this function's stdout IS the program path the caller
-    # runs. Three info lines on stdout meant the caller executed
-    # `sudo ":: This needs a root-owned copy…"` with the path tacked on the end.
-    info "This app has a root half, so this machine needs the system scope: a" >&2
-    info "root-owned copy of kiwi (root must never execute a file you can write)" >&2
-    info "and the helper that lets your updates reach it. Setting it up now —" >&2
-    info "one password prompt." >&2
-    as_root bash "$repo/install.sh" install --with-system >&2 9>&- ||
-        die "could not set up the system scope"
-    [[ -x $ROOT_KIWI ]] || die "the system scope did not install ($ROOT_KIWI is still missing)"
-    echo "$ROOT_KIWI"
+    info "This needs the system scope: a root-owned copy of kiwi (root must never" >&2
+    info "execute a file you can write) and the helper that lets your updates reach" >&2
+    info "it. Setting it up now, together with what you asked for — one password." >&2
+    # shellcheck disable=SC2016  # $1/$@ belong to the root shell, on purpose
+    as_root bash -c 'bash "$1" install --with-system >&2 || exit 1; shift; [ -x /usr/local/bin/kiwi ] || { echo "the system scope did not install" >&2; exit 1; }; exec /usr/local/bin/kiwi "$@"' \
+        kiwi-setup "$repo/install.sh" "$@"
 }
 
 # How the system scope was set up (see install.sh): "auto" has a root timer
@@ -1175,6 +1175,152 @@ pkg_hint() { # need... -> "the command that installs them on this machine"
     esac
 }
 
+# ---------- settings ---------------------------------------------------------
+# One key=value file per scope: ~/.config/kiwi-updater/settings for you,
+# /etc/kiwi-updater/settings for root (root reads nothing a user can write).
+settings_file() { [[ $EUID -eq 0 ]] && echo "$SYS_CONFIG_DIR/settings" || echo "$USER_CONFIG_DIR/settings"; }
+setting() { # key default -> value
+    local f v=""; f="$(settings_file)"
+    if [[ -r $f ]] && list_trusted "$f"; then
+        v="$(grep -m1 "^$1=" "$f" 2>/dev/null | cut -d= -f2- || true)"
+    fi
+    case "$1:$v" in
+        auto-deps:ask|auto-deps:yes|auto-deps:no) echo "$v" ;;
+        *) echo "$2" ;;
+    esac
+}
+cmd_config() { # [key [value]]   (--system: root's settings)
+    if [[ $SCOPE_FILTER == system && $EUID -ne 0 ]]; then
+    as_root_kiwi config --system -- "$@"
+        return
+    fi
+    local f; f="$(settings_file)"
+    case $# in
+        0) echo "auto-deps=$(setting auto-deps ask)   # ask | yes | no — install missing packages ($f)" ;;
+        1) [[ $1 == auto-deps ]] || die "unknown setting: $1 (known: auto-deps)"; setting auto-deps ask ;;
+        2) [[ $1 == auto-deps ]] || die "unknown setting: $1 (known: auto-deps)"
+           [[ $2 == ask || $2 == yes || $2 == no ]] || die "auto-deps is ask, yes or no"
+           mkdir -p "$(dirname "$f")"; touch "$f"
+           { grep -v '^auto-deps=' "$f" 2>/dev/null || true; echo "auto-deps=$2"; } > "$f.tmp" && mv -f "$f.tmp" "$f"
+           chmod 644 "$f"
+           info "auto-deps=$2 in $f" ;;
+        *) die "usage: kiwi config [auto-deps [ask|yes|no]] [--system]" ;;
+    esac
+}
+
+# ---------- installing missing packages ------------------------------------
+# A command an app needs (DEPENDS) -> the package that provides it here. The
+# app can say it in its manifest (PACKAGES_<MANAGER>=, else PACKAGES=); kiwi
+# knows the common ones; otherwise the package manager is asked, where it can
+# answer without extra setup (dnf, zypper, apk).
+cmd_package() { # manager command -> package, or nothing
+    case "$1:$2" in
+        apt:nmcli|apt:NetworkManager)        echo network-manager ;;
+        pacman:nmcli|apk:nmcli)              echo networkmanager ;;
+        *:nmcli)                             echo NetworkManager ;;
+        dnf:ip|rpm-ostree:ip)                echo iproute ;;
+        *:ip)                                echo iproute2 ;;
+        *:nft)                               echo nftables ;;
+        *:wg|*:wg-quick)                     echo wireguard-tools ;;
+        apt:secret-tool)                     echo libsecret-tools ;;
+        zypper:secret-tool)                  echo secret-tool ;;
+        *:secret-tool)                       echo libsecret ;;
+        apt:gpg|apt:gpgv)                    echo "$2" ;;
+        dnf:gpg*|rpm-ostree:gpg*)            echo gnupg2 ;;
+        zypper:gpg*)                         echo gpg2 ;;
+        *:gpg|*:gpgv)                        echo gnupg ;;
+        pacman:python3)                      echo python ;;
+        *:inotifywait)                       echo inotify-tools ;;
+        apt:notify-send)                     echo libnotify-bin ;;
+        zypper:notify-send)                  echo libnotify-tools ;;
+        *:notify-send)                       echo libnotify ;;
+        *:xdg-open)                          echo xdg-utils ;;
+        pacman:resolvectl)                   echo systemd ;;
+        *:resolvectl)                        echo systemd-resolved ;;
+        *:pasta)                             echo passt ;;
+        *:podman|*:rsync|*:curl|*:jq|*:git|*:catatonit|*:passt|*:iptables|*:python3|*:expect|*:age|*:openssl)
+                                             echo "$2" ;;
+        dnf:*|rpm-ostree:*)
+            dnf repoquery -q --qf '%{name}\n' --whatprovides "/usr/bin/$2" 2>/dev/null | head -1 ;;
+        zypper:*)
+            zypper -q -n search --provides --match-exact "/usr/bin/$2" 2>/dev/null |
+                awk -F'|' 'NR>2 && $2 {gsub(/ /,"",$2); print $2; exit}' ;;
+        apk:*)
+            apk search -q -x "cmd:$2" 2>/dev/null | head -1 ;;
+    esac
+}
+
+dep_packages() { # repo_dir "cmd …" -> "pkg …" for this machine (empty if unknown)
+    local pm key v c p out=() unknown=0
+    pm="$(pkg_manager)"; [[ -n $pm ]] || return 0
+    key="PACKAGES_$(tr 'a-z-' 'A-Z_' <<<"$pm")"
+    [[ $pm == rpm-ostree ]] && key=PACKAGES_DNF
+    v="$(manifest_get "$1" "$key" "")"; [[ -n $v ]] || v="$(manifest_get "$1" PACKAGES "")"
+    if [[ -n $v ]]; then
+        split_words "$v"; out=(${WORDS[@]+"${WORDS[@]}"})
+    else
+        split_words "$2"
+        for c in ${WORDS[@]+"${WORDS[@]}"}; do
+            p="$(cmd_package "$pm" "$c")"
+            if [[ -n $p ]]; then out+=("$p"); else unknown=1; fi
+        done
+    fi
+    # package names are handed to the package manager: names only, nothing else
+    for p in ${out[@]+"${out[@]}"}; do [[ $p =~ ^[A-Za-z0-9][A-Za-z0-9.+_:@-]*$ ]] || return 0; done
+    (( unknown )) && [[ -z $v ]] && return 0       # partial answers help nobody
+    echo "${out[*]:-}"
+}
+
+pkg_install_argv() { # manager pkg… -> PKG_ARGV (the command that installs them)
+    local pm=$1; shift
+    case "$pm" in
+        dnf)        PKG_ARGV=(dnf install -y "$@") ;;
+        rpm-ostree) PKG_ARGV=(rpm-ostree install --idempotent "$@") ;;
+        apt)        PKG_ARGV=(sh -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"' sh "$@") ;;
+        pacman)     PKG_ARGV=(pacman -S --needed --noconfirm "$@") ;;
+        zypper)     PKG_ARGV=(zypper -n install "$@") ;;
+        apk)        PKG_ARGV=(apk add "$@") ;;
+        *)          return 1 ;;
+    esac
+}
+
+# Offer to install packages (decision: ask first; `kiwi config auto-deps yes`
+# installs without asking; never unasked on rpm-ostree, which needs a reboot;
+# never from a run nobody is watching). Returns 0 if they were installed.
+offer_packages() { # why "pkg …"
+    local why=$1 pm mode answer; local -a pk
+    pm="$(pkg_manager)"; [[ -n $pm && -n ${2:-} ]] || return 1
+    split_words "$2"; pk=(${WORDS[@]+"${WORDS[@]}"})
+    pkg_install_argv "$pm" "${pk[@]}" || return 1
+    mode="$(setting auto-deps ask)"
+    [[ $mode == no || ${KIWI_UNATTENDED:-0} == 1 ]] && return 1
+    local tty=0; [[ -t 0 || -r /dev/tty && -t 1 ]] && tty=1
+    if [[ $mode == ask || $pm == rpm-ostree ]]; then
+        (( tty )) || return 1
+        printf '%s\n  %s%s\n' "$why" "$(pkg_hint_line "$pm" "${pk[@]}")" \
+            "$([[ $pm == rpm-ostree ]] && echo '   (then reboot)')" >&2
+        printf 'Install them now? [y/N] ' >&2
+        read -r answer </dev/tty || answer=""
+        [[ $answer == [yY]* ]] || return 1
+    else
+        info "$why installing ${pk[*]} (auto-deps=yes)" >&2
+    fi
+    if [[ $EUID -eq 0 ]]; then "${PKG_ARGV[@]}"; else as_root "${PKG_ARGV[@]}"; fi
+}
+
+pkg_hint_line() { # manager pkg… -> the command, for people
+    local pm=$1; shift
+    case "$pm" in
+        rpm-ostree) echo "rpm-ostree install $*" ;;
+        dnf)        echo "sudo dnf install $*" ;;
+        apt)        echo "sudo apt install $*" ;;
+        pacman)     echo "sudo pacman -S $*" ;;
+        zypper)     echo "sudo zypper install $*" ;;
+        apk)        echo "doas apk add $*" ;;
+        *)          echo "install with your package manager: $*" ;;
+    esac
+}
+
 # 1 if the machine has a GTK4 stack (desktop), 0 on headless/server installs.
 # Deliberately NOT based on $DISPLAY — ssh sessions to desktops have none.
 #
@@ -1366,8 +1512,22 @@ install_one() { # scope url opts
         # warn about.
         ensure_deps "$scope" "$url" "$deps"
         miss="${DEPS_MISSING[*]:-}"
-        [[ -n $miss ]] && warn "$(app_name "$scope" "$url") needs these, and they are not here: $miss
+        local pkgs=""
+        if [[ -n $miss ]]; then
+            pkgs="$(dep_packages "$dir" "$miss")"
+            if [[ -n $pkgs ]] && offer_packages "$(app_name "$scope" "$url") needs $miss, which is not installed:" "$pkgs"; then
+                miss="$(deps_missing "$miss" "$scope")"
+            fi
+        fi
+        if [[ -n $miss && -n $pkgs ]]; then
+            warn "$(app_name "$scope" "$url") needs $miss, which is not installed — its installer will probably fail."
+            # shellcheck disable=SC2086  # package names, one word each (checked in dep_packages)
+            warn "  install it:  $(pkg_hint_line "$(pkg_manager)" $pkgs)"
+            warn "  (or let kiwi do it: kiwi config auto-deps yes)"
+        elif [[ -n $miss ]]; then
+            warn "$(app_name "$scope" "$url") needs these, and they are not here: $miss
   its installer will probably fail. Install them first if it does."
+        fi
     fi
 
     # set -e does not apply inside a function called on the left of ||, which is
@@ -1511,8 +1671,7 @@ cmd_trust() { # --system <app>: forget the pinned key; the next authenticated in
     [[ $SCOPE_FILTER == system ]] || die "usage: kiwi trust --system <app>   (signing keys are pinned for the system scope)"
     [[ $# -eq 1 ]] || die "usage: kiwi trust --system <app>"
     if [[ $EUID -ne 0 ]]; then
-        local rk; rk="$(root_kiwi)" || return 1
-        as_root "$rk" trust --system -- "$1"
+    as_root_kiwi trust --system -- "$1"
         return
     fi
     local line url; line="$(resolve "$1")" || die "unknown app: $1"
@@ -1739,7 +1898,7 @@ dispatch() { # verb extra_flag
         # — pass the URL the user was shown along, and root records it (see the
         # install case in main). The old behaviour refused here and sent people
         # to `kiwi catalog add --system` first; and when no system scope existed
-        # at all it refused too, where root_kiwi below sets one up with one
+        # at all it refused too, where as_root_kiwi below sets one up with one
         # password. Both were the opposite of "install root parts with ease".
         if [[ $verb == install ]] && ! root_will_know "${T_URL[$i]}"; then
             # Root installs only sources it already lists (FIXPLAN-2.4 M4, D4).
@@ -1847,11 +2006,7 @@ dispatch() { # verb extra_flag
             fi
         done
         info "escalating for system apps: ${sys_names[*]}"
-        # Capture first. root_kiwi dies when it cannot provide a root-owned
-        # copy, and inside $(...) that exit leaves only the subshell — the
-        # caller went on to run `pkexec "" update --system …`.
-        local rk; rk="$(root_kiwi)" || return 1
-        as_root "$rk" "$verb" --system "${sys_names[@]}" "${extra[@]+"${extra[@]}"}" 9>&- || rc=1
+        as_root_kiwi "$verb" --system "${sys_names[@]}" "${extra[@]+"${extra[@]}"}" 9>&- || rc=1
     fi
 
     if [[ $verb == update && ${#UPDATED[@]} -gt 0 ]]; then
@@ -2403,9 +2558,8 @@ pin_apply() { # app value   ("" clears the pin)
     local app="$1" val="${2:-}" scope=user f line url opts rc=0
     [[ $SCOPE_FILTER == system ]] && scope=system
     if [[ $scope == system && $EUID -ne 0 ]]; then
-        local rk; rk="$(root_kiwi)" || return 1
-        if [[ -n $val ]]; then as_root "$rk" pin --system "$app" "$val" 9>&-
-        else                   as_root "$rk" unpin --system "$app" 9>&-
+        if [[ -n $val ]]; then as_root_kiwi pin --system "$app" "$val" 9>&-
+        else                   as_root_kiwi unpin --system "$app" 9>&-
         fi
         return
     fi
@@ -2759,8 +2913,7 @@ expected https://… or an absolute path to a local repo (http:// is refused: an
         # the one step that decides what root may install (D4): name it
         info "registering for root: $url"
         info "  root will run this repo's installer, and update it without asking again"
-        local rk; rk="$(root_kiwi)" || return 1
-        as_root "$rk" add --system "$url"
+        as_root_kiwi add --system "$url"
         return
     fi
     mkdir -p "$(dirname "$f")"; touch "$f"
@@ -2793,8 +2946,7 @@ expected https://… or an absolute path to a local repo (http:// is refused: an
             local f="$USER_CATALOGS"
             [[ $SCOPE_FILTER == system || $EUID -eq 0 ]] && f="$SYS_CATALOGS"
             if [[ $f == "$SYS_CATALOGS" && $EUID -ne 0 ]]; then
-                local rk; rk="$(root_kiwi)" || return 1
-                as_root "$rk" catalog add "$url" --system
+            as_root_kiwi catalog add "$url" --system
                 return
             fi
             mkdir -p "$(dirname "$f")"; touch "$f"
@@ -2850,8 +3002,7 @@ Both would share one clone. Rename the repo, or use a fork with a distinct name.
             local f="$USER_CATALOGS"
             [[ $SCOPE_FILTER == system || $EUID -eq 0 ]] && f="$SYS_CATALOGS"
             if [[ $f == "$SYS_CATALOGS" && $EUID -ne 0 ]]; then
-                local rk; rk="$(root_kiwi)" || return 1
-                as_root "$rk" catalog remove "$url" --system
+            as_root_kiwi catalog remove "$url" --system
                 return
             fi
             list_has "$f" "$url" || die "not registered in $f"
@@ -2896,6 +3047,7 @@ kiwi $KIWI_VERSION — install and update open-source apps from git catalogs
   kiwi self-update           update kiwi itself
   kiwi doctor                check this install for the things that go wrong quietly
   kiwi trust --system <app>  forget the signing key pinned for a system app
+  kiwi config auto-deps ask|yes|no   install missing packages: ask first (default), always, never
 
 Options: --user / --system (limit to one scope), --cli-only / --gui,
          --purge, --force, --dry-run, --quiet, --notify, --version
@@ -3038,6 +3190,7 @@ register it first (kiwi add --system <url>, https:// only), then install by name
                  collect_targets "${ARGS[@]}"; dispatch uninstall ;;
     pin)         cmd_pin ${ARGS[@]+"${ARGS[@]}"} ;;
     trust)       cmd_trust ${ARGS[@]+"${ARGS[@]}"} ;;
+    config)      cmd_config ${ARGS[@]+"${ARGS[@]}"} ;;
     unpin)       cmd_unpin ${ARGS[@]+"${ARGS[@]}"} ;;
     diff)        cmd_diff ${ARGS[@]+"${ARGS[@]}"} ;;
     doctor)      cmd_doctor ;;

@@ -19,6 +19,12 @@
 # system-level parts are (re)installed.
 set -euo pipefail
 
+# As root, files are created 0644/0755 whatever umask the caller had. Ubuntu
+# gives users umask 002, and Ubuntu 26.04's sudo (sudo-rs) passes it on to
+# root where classic sudo forced 022: root's own clone came out group-writable,
+# and the bootstrap then refused it as "not root-owned all the way up".
+if [[ $EUID -eq 0 ]]; then umask 022; fi
+
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="$SRC/install.sh"
 
@@ -179,6 +185,14 @@ root_from_own_clone() {
     local url tag
     mkdir -p "$SYS_DATA/repos"; chmod 755 "$SYS_DATA" "$SYS_DATA/repos"
     if [[ -d $ROOT_CLONE/.git ]]; then
+        # A clone made by an earlier bootstrap under umask 002 (see the top):
+        # everything in it is root's, only the mode bits are loose. Tighten
+        # them; anything owned by someone else is still refused below.
+        if [[ -z "$(find "$ROOT_CLONE" ! -uid 0 -print -quit 2>/dev/null)" ]] &&
+           [[ -n "$(find "$ROOT_CLONE" -perm /022 -print -quit 2>/dev/null)" ]]; then
+            say "tightening permissions of $ROOT_CLONE (it was made group-writable)"
+            chmod -R go-w "$ROOT_CLONE"
+        fi
         root_owned_chain "$ROOT_CLONE" ||
             { echo "error: $ROOT_CLONE is not root-owned all the way up — refusing to use it" >&2; exit 1; }
         url="$(git -C "$ROOT_CLONE" remote get-url origin 2>/dev/null || true)"

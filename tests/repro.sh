@@ -1372,10 +1372,24 @@ t_H4B() { # the root bootstrap installs kiwi only from a release signed by its k
     check H4B "bootstrap: signed release installs ($ok) and its key is pinned ($pinned); another key's is refused ($refused)" f
 }
 
+t_K11() { # the root bootstrap works under umask 002 (Ubuntu users; sudo-rs passes it to root)
+    selffix
+    local src=$TH/checkout; rm -rf $src; cp -r $W $src; chown -R $T $src
+    env -i HOME=/root PATH=$STUBS:/usr/sbin:/usr/bin:/bin bash -c "umask 002; bash $src/install.sh install" >/dev/null 2>&1
+    local fresh=no; [[ -x /usr/local/bin/kiwi ]] && fresh=yes
+    # a clone an older installer left group-writable is repaired, not refused
+    rm -f /usr/local/bin/kiwi; chmod -R g+w /var/lib/kiwi-updater/repos/kiwi-updater
+    env -i HOME=/root PATH=$STUBS:/usr/sbin:/usr/bin:/bin bash -c "umask 002; bash $src/install.sh install" >/dev/null 2>&1
+    local repaired=no; [[ -x /usr/local/bin/kiwi ]] && repaired=yes
+    local mode; mode="$(stat -c %a /var/lib/kiwi-updater/repos/kiwi-updater 2>/dev/null)"
+    f() { [[ $fresh == yes && $repaired == yes && $mode == 755 ]]; }
+    check K11 "bootstrap under umask 002: fresh ($fresh), repairs a group-writable clone ($repaired, mode $mode)" f
+}
+
 for t in F1 F2 F3 F4 F5 F6 F7 F8 F10 F11 F11b F12 F13 F14 F15 F16 F17 F18 F19 S1 S2 S5 \
          P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P17 P18 P19 P20 P22 P23 P25 \
          P27 P28 P29 P30 P31 P32 P33 P34 P35 P36 P37 \
-         H1 H2 H3 M1 M2 M3 M6 M7 L1 Q1 Q4 H4 H4B K7; do run $t; done
+         H1 H2 H3 M1 M2 M3 M6 M7 L1 Q1 Q4 H4 H4B K7 K11; do run $t; done
 reset
 echo
 if (( BUGS )); then echo "$BUGS finding(s) still reproduce"; exit 1; fi

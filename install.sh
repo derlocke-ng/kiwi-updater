@@ -93,9 +93,13 @@ SYS_DATA="/var/lib/kiwi-updater"
 
 say() { printf ':: %s\n' "$*"; }
 
+# A terminal to ask in. Not stdin: `curl … | bash` makes stdin the script
+# itself, and sudo asks on /dev/tty anyway.
+have_tty() { [[ -t 0 ]] || { : </dev/tty; } 2>/dev/null; }
+
 as_root() {
     if [[ $EUID -eq 0 ]]; then "$@"
-    elif [[ -t 0 ]] && command -v sudo >/dev/null 2>&1; then sudo "$@"
+    elif have_tty && command -v sudo >/dev/null 2>&1; then sudo "$@"
     elif command -v pkexec >/dev/null 2>&1; then pkexec "$@"
     else echo "error: need sudo or pkexec" >&2; exit 1
     fi
@@ -464,9 +468,9 @@ root_install() {
         # offer it where someone can answer, as kiwi does for app packages
         local hint; hint="$(bash "$SRC/bin/kiwi" pkg-hint pkexec 2>/dev/null || echo 'install pkexec')"
         say "passwordless updates need pkexec, which is not installed: $hint"
-        if [[ -t 0 ]]; then
+        if have_tty; then
             local answer=""
-            printf ':: install it now? [y/N] '; read -r answer || answer=""
+            printf ':: install it now? [y/N] ' >&2; read -r answer </dev/tty || answer=""
             if [[ $answer == [yY]* ]]; then
                 case "$hint" in
                     *transactional-update*) transactional-update -n pkg install pkexec ;;

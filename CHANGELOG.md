@@ -3,6 +3,17 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 2.5.4 — unreleased
+
+- **`curl … | bash` asks with sudo again.** The installer took "stdin is not
+  a terminal" to mean nobody can type a password, but with `curl | bash`
+  stdin is the script and the terminal is right there. It fell back to
+  pkexec, and where there is none (openSUSE by default) it stopped with
+  "need sudo or pkexec". It now asks on the terminal (`/dev/tty`), and so
+  does the new question whether to install pkexec, which could otherwise
+  have read the script as its answer. Tested on openSUSE Tumbleweed: pkexec
+  is offered, installed, and passwordless updates are set up.
+
 ## 2.5.3 — 2026-11-16
 
 Tested on desktop VMs (GNOME or KDE): Ubuntu 24.04 and 26.04, Debian 12 and

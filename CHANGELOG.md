@@ -3,6 +3,46 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 2.5.3 — unreleased
+
+Tested on desktop VMs (GNOME or KDE): Ubuntu 24.04 and 26.04, Debian 12 and
+13, Fedora 45, Arch, openSUSE Tumbleweed and openSUSE Leap 16.1 Immutable —
+installing kiwi, setting up the root part, an app with a root part
+(kiwi-killswitch) and an app that needs a package (syncman needs rsync).
+
+- **Ubuntu 26.04: setting up the root part works.** Ubuntu gives users umask
+  002, and Ubuntu 26.04's sudo (sudo-rs) passes it on to root, so the root
+  clone of kiwi came out group-writable and kiwi refused it as "not
+  root-owned all the way up". kiwi and its installer now create their files
+  0644/0755 whatever the umask, and repair a clone an earlier run left
+  group-writable. Lists an older kiwi left group-writable are tightened on
+  the next install, so `kiwi doctor` stops warning about them.
+- **One password, not two.** An install that needed the root part first
+  (`kiwi install kiwi-killswitch` on a fresh machine) asked once to set it up
+  and once more to install. Both now run in one `sudo`.
+- **Missing packages: kiwi offers to install them.** When an app needs a
+  command that is not installed, kiwi shows the install command for this
+  distribution and asks. `kiwi config auto-deps yes` (or the switch in Kiwi
+  Apps → Doctor) installs without asking; `no` only shows the command. Never
+  during background updates, and on Fedora Atomic always with a question,
+  since `rpm-ostree` needs a reboot. Apps can name their packages per package
+  manager (`PACKAGES_DNF=`, `PACKAGES_APT=`, …); kiwi knows the common ones.
+- **openSUSE Leap Immutable (and Aeon, Kalpa):** the root file system is
+  read-only, so kiwi installs packages with `transactional-update pkg install`
+  and always asks first, as on Fedora Atomic.
+- **openSUSE: commands in `/usr/sbin` count as installed.** `nft`, `ip` & co.
+  live there, off a user's `PATH`, so kiwi went on calling a freshly
+  installed `nft` missing.
+- **openSUSE: pkexec.** It is a package of its own there and not installed by
+  default. The installer said the polkit version was too old; it now says
+  pkexec is missing and offers to install it.
+- **Kiwi Apps: every row of cards lines up.** Rows with a long description
+  had their buttons at a different height than the rest, and cards in the
+  same row had different widths of buttons. Buttons now sit at the bottom of
+  each card and have one width.
+- **Install lines per distribution** in [docs/install.md](docs/install.md):
+  one command each that installs everything kiwi and Kiwi Apps need.
+
 ## 2.5.2 — 2026-11-13
 
 Documentation only; kiwi itself behaves as in 2.5.1.

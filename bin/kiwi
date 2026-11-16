@@ -10,7 +10,7 @@
 #   system — listed in /etc/kiwi-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-KIWI_VERSION=2.5.2
+KIWI_VERSION=2.5.3
 
 # systemd system services start without $HOME (set -u would abort at the
 # path definitions below) — root's user-scope paths are never used anyway
@@ -1140,12 +1140,16 @@ pkg_manager() {
     elif command -v dnf >/dev/null 2>&1; then echo dnf
     elif command -v apt-get >/dev/null 2>&1; then echo apt
     elif command -v pacman >/dev/null 2>&1; then echo pacman
+    elif command -v zypper >/dev/null 2>&1 && [[ -x /usr/sbin/transactional-update ]] &&
+         awk '$2 == "/" {o = $4} END {exit !(o ~ /^ro(,|$)/)}' /proc/mounts 2>/dev/null
+    then echo transactional     # openSUSE Leap Immutable, Aeon, Kalpa: / is read-only
     elif command -v zypper >/dev/null 2>&1; then echo zypper
     elif command -v apk >/dev/null 2>&1; then echo apk
     fi
 }
 
 pkg_names() { # manager need -> package names
+    [[ $1 == transactional ]] && set -- zypper "$2"      # zypper's package names
     case "$1:$2" in
         zypper:git)                   echo git-core ;;
         *:git)                        echo git ;;
@@ -1156,12 +1160,18 @@ pkg_names() { # manager need -> package names
         apk:gnu-tools)                echo bash coreutils util-linux findutils sed grep ;;
         *:gnu-tools)                  echo coreutils util-linux findutils ;;
         *:awk)                        echo gawk ;;
+        apt:pygobject)                echo python3-gi ;;
+        pacman:pygobject)             echo python-gobject ;;
+        apk:pygobject)                echo py3-gobject3 ;;
+        *:pygobject)                  echo python3-gobject ;;
+        dnf:pkexec|rpm-ostree:pkexec|pacman:pkexec|apk:pkexec) echo polkit ;;
+        *:pkexec)                     echo pkexec ;;
         apt:gui)                      echo python3-gi gir1.2-adw-1 gir1.2-gtk-4.0 ;;
         pacman:gui)                   echo python-gobject libadwaita gtk4 ;;
         zypper:gui)                   echo python3-gobject typelib-1_0-Adw-1 typelib-1_0-Gtk-4_0 ;;
         apk:gui)                      echo py3-gobject3 libadwaita gtk4.0 ;;
         *:gui)                        echo python3-gobject libadwaita gtk4 ;;
-        *)                            echo "$2" ;;
+        *)  local c; c="$(cmd_package "$1" "$2")"; echo "${c:-$2}" ;;  # a command: its package
     esac
 }
 
@@ -1169,8 +1179,10 @@ pkg_hint() { # need... -> "the command that installs them on this machine"
     local pm n p=()
     pm="$(pkg_manager)"
     for n in "$@"; do read -r -a n <<<"$(pkg_names "$pm" "$n")"; p+=("${n[@]}"); done
+    read -r -a p <<<"$(printf '%s\n' "${p[@]}" | awk 'NF && !seen[$0]++' | tr '\n' ' ')"   # once each
     case "$pm" in
         rpm-ostree) echo "rpm-ostree install ${p[*]}   (then reboot)" ;;
+        transactional) echo "sudo transactional-update pkg install ${p[*]}   (then reboot)" ;;
         dnf)        echo "sudo dnf install ${p[*]}" ;;
         apt)        echo "sudo apt install ${p[*]}" ;;
         pacman)     echo "sudo pacman -S ${p[*]}" ;;
@@ -1196,7 +1208,7 @@ setting() { # key default -> value
 }
 cmd_config() { # [key [value]]   (--system: root's settings)
     if [[ $SCOPE_FILTER == system && $EUID -ne 0 ]]; then
-    as_root_kiwi config --system -- "$@"
+        as_root_kiwi config --system -- "$@"
         return
     fi
     local f; f="$(settings_file)"
@@ -1219,6 +1231,7 @@ cmd_config() { # [key [value]]   (--system: root's settings)
 # knows the common ones; otherwise the package manager is asked, where it can
 # answer without extra setup (dnf, zypper, apk).
 cmd_package() { # manager command -> package, or nothing
+    [[ $1 == transactional ]] && set -- zypper "$2"
     case "$1:$2" in
         apt:nmcli|apt:NetworkManager)        echo network-manager ;;
         pacman:nmcli|apk:nmcli)              echo networkmanager ;;
@@ -1260,6 +1273,7 @@ dep_packages() { # repo_dir "cmd …" -> "pkg …" for this machine (empty if un
     pm="$(pkg_manager)"; [[ -n $pm ]] || return 0
     key="PACKAGES_$(tr 'a-z-' 'A-Z_' <<<"$pm")"
     [[ $pm == rpm-ostree ]] && key=PACKAGES_DNF
+    [[ $pm == transactional ]] && key=PACKAGES_ZYPPER
     v="$(manifest_get "$1" "$key" "")"; [[ -n $v ]] || v="$(manifest_get "$1" PACKAGES "")"
     if [[ -n $v ]]; then
         split_words "$v"; out=(${WORDS[@]+"${WORDS[@]}"})
@@ -1281,6 +1295,7 @@ pkg_install_argv() { # manager pkg… -> PKG_ARGV (the command that installs the
     case "$pm" in
         dnf)        PKG_ARGV=(dnf install -y "$@") ;;
         rpm-ostree) PKG_ARGV=(rpm-ostree install --idempotent "$@") ;;
+        transactional) PKG_ARGV=(transactional-update -n pkg install "$@") ;;
         apt)        PKG_ARGV=(sh -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"' sh "$@") ;;
         pacman)     PKG_ARGV=(pacman -S --needed --noconfirm "$@") ;;
         zypper)     PKG_ARGV=(zypper -n install "$@") ;;
@@ -1300,10 +1315,11 @@ offer_packages() { # why "pkg …"
     mode="$(setting auto-deps ask)"
     [[ $mode == no || ${KIWI_UNATTENDED:-0} == 1 ]] && return 1
     local tty=0; [[ -t 0 || -r /dev/tty && -t 1 ]] && tty=1
-    if [[ $mode == ask || $pm == rpm-ostree ]]; then
+    local reboot=0; [[ $pm == rpm-ostree || $pm == transactional ]] && reboot=1
+    if [[ $mode == ask ]] || (( reboot )); then
         (( tty )) || return 1
         printf '%s\n  %s%s\n' "$why" "$(pkg_hint_line "$pm" "${pk[@]}")" \
-            "$([[ $pm == rpm-ostree ]] && echo '   (then reboot)')" >&2
+            "$( (( reboot )) && echo '   (then reboot)')" >&2
         printf 'Install them now? [y/N] ' >&2
         read -r answer </dev/tty || answer=""
         [[ $answer == [yY]* ]] || return 1
@@ -1317,6 +1333,7 @@ pkg_hint_line() { # manager pkg… -> the command, for people
     local pm=$1; shift
     case "$pm" in
         rpm-ostree) echo "rpm-ostree install $*" ;;
+        transactional) echo "sudo transactional-update pkg install $*" ;;
         dnf)        echo "sudo dnf install $*" ;;
         apt)        echo "sudo apt install $*" ;;
         pacman)     echo "sudo pacman -S $*" ;;
@@ -2303,7 +2320,10 @@ deps_missing() { # "a b c" [scope] -> missing ones
         if [[ $EUID -eq 0 ]]; then scope=system; else scope=user; fi
     fi
     split_words "${1:-}"                     # manifest data: no globbing
-    (   PATH="$(installer_path "$scope")"; hash -r
+    # sbin too for the user scope: openSUSE keeps nft, ip & co. there, off
+    # users' PATH; they are installed, and only root halves run them
+    local sbin=""; [[ $scope == user ]] && sbin=":/usr/sbin:/sbin"
+    (   PATH="$(installer_path "$scope")$sbin"; hash -r
         for d in ${WORDS[@]+"${WORDS[@]}"}; do
             command -v -- "$d" >/dev/null 2>&1 || out+=("$d")
         done

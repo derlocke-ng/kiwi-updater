@@ -86,6 +86,27 @@ Rules of thumb:
 kiwi checks each with `command -v`, in the `PATH` your installer will get,
 and says what is missing before it runs anything.
 
+When a command is missing, kiwi shows the command that installs its package
+and asks whether to run it (the user's `auto-deps` setting, see
+[Settings](usage.md#settings)). kiwi knows the package names of common
+commands. For anything else, or to install more than the missing command
+(a Python module, say), name the packages per package manager:
+
+```ini
+DEPENDS=nft ip nmcli python3
+PACKAGES_DNF=nftables iproute NetworkManager python3 python3-gobject
+PACKAGES_APT=nftables iproute2 network-manager python3 python3-gi
+PACKAGES_PACMAN=nftables iproute2 networkmanager python python-gobject
+PACKAGES_ZYPPER=nftables iproute2 NetworkManager python3 python3-gobject
+PACKAGES_APK=nftables iproute2 networkmanager python3 py3-gobject3
+```
+
+If one `DEPENDS` command is missing, kiwi offers the whole list for the
+user's package manager. `PACKAGES=` without a suffix is used when there is no
+line for that manager. Fedora Atomic systems use `PACKAGES_DNF`, openSUSE Leap
+Immutable uses `PACKAGES_ZYPPER`. Your installer can print the same hint
+itself with `kiwi pkg-hint <command or package>…`.
+
 When a missing word is the name of a **kiwi app**, kiwi installs that app
 first. The kiwi-proxy plugins say `DEPENDS=kiwi-proxy podman`, so
 `kiwi install kiwi-plugin-tor` brings kiwi-proxy along. `--dry-run`,

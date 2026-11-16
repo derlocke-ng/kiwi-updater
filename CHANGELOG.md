@@ -3,7 +3,7 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
-## 2.5.4 — unreleased
+## 2.5.4 — 2026-11-16
 
 - **`curl … | bash` asks with sudo again.** The installer took "stdin is not
   a terminal" to mean nobody can type a password, but with `curl | bash`

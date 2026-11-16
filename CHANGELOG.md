@@ -3,7 +3,7 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
-## 2.5.3 — unreleased
+## 2.5.3 — 2026-11-16
 
 Tested on desktop VMs (GNOME or KDE): Ubuntu 24.04 and 26.04, Debian 12 and
 13, Fedora 45, Arch, openSUSE Tumbleweed and openSUSE Leap 16.1 Immutable —

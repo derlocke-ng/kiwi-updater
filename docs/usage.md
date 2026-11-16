@@ -129,7 +129,28 @@ Check it with `systemctl --user status kiwi-updater.timer` or `kiwi doctor`.
 
 ## Settings
 
-kiwi reads these environment variables. Root ignores all of them except
+`kiwi config` shows and changes kiwi's settings. There is one so far:
+
+| Setting | Default | Effect |
+|---|---|---|
+| `auto-deps` | `ask` | What kiwi does when an app needs a package that is not installed. `ask`: show the install command and ask. `yes`: install it without asking. `no`: only show the command. |
+
+```bash
+kiwi config                    # show the settings
+kiwi config auto-deps yes      # install missing packages without asking
+kiwi config --system auto-deps yes   # the same for root apps (asks for your password)
+```
+
+Your settings are in `~/.config/kiwi-updater/settings`, root's are in
+`/etc/kiwi-updater/settings`. In Kiwi Apps, the switch "Install missing
+packages automatically" under Doctor changes your `auto-deps`.
+
+Whatever the setting, kiwi never installs packages during a background
+update. On read-only systems (Fedora Atomic with `rpm-ostree`, openSUSE Leap
+Immutable with `transactional-update`) it always asks first, because the
+packages are only there after a restart.
+
+kiwi also reads these environment variables. Root ignores all of them except
 `KIWI_UNATTENDED`.
 
 | Variable | Default | Effect |

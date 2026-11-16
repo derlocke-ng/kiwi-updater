@@ -565,6 +565,13 @@ class Card(Gtk.Widget):
         super().__init__()
         inner.set_parent(self)
 
+    def do_get_request_mode(self):
+        # Height depends on width (the description wraps). Without saying so,
+        # GTK measured the card's height for the description at its NATURAL
+        # width — a 22-character column — and some rows of cards came out with
+        # half-width text and their footers out of line with the next row.
+        return Gtk.SizeRequestMode.HEIGHT_FOR_WIDTH
+
     def do_measure(self, orientation, for_size):
         mn, nat, mb, nb = self.get_first_child().measure(orientation, for_size)
         if orientation == Gtk.Orientation.HORIZONTAL:
@@ -1261,8 +1268,44 @@ class DoctorDialog(Adw.Dialog):
         self.again.connect("clicked", lambda *_: self.run())
         header.pack_end(self.again)
         tb.add_top_bar(header)
+
+        # `kiwi config auto-deps`: off ("ask") the GUI can only show the
+        # command, since there is no terminal to ask in; on ("yes") kiwi runs
+        # it, with the system's password dialog.
+        self.autodeps = Adw.SwitchRow(
+            title="Install missing packages automatically",
+            subtitle="When an app needs a package this system lacks, install it "
+                     "(you are asked for your password). Off: the command is shown instead.")
+        self._autodeps_loading = True
+        self.autodeps.connect("notify::active", self._autodeps_changed)
+        group = Adw.PreferencesGroup(margin_top=6, margin_bottom=12,
+                                     margin_start=12, margin_end=12)
+        group.add(self.autodeps)
+        tb.add_bottom_bar(group)
         self.set_child(tb)
+        threading.Thread(target=self._autodeps_load, daemon=True).start()
         self.run()
+
+    def _autodeps_load(self):
+        try:
+            v = subprocess.run([self.kiwi, "config", "auto-deps"], capture_output=True,
+                               text=True, stdin=subprocess.DEVNULL, timeout=30).stdout.strip()
+        except Exception:  # noqa: BLE001
+            v = ""
+
+        def set_it():
+            self.autodeps.set_active(v == "yes")
+            self._autodeps_loading = False
+            return False
+        GLib.idle_add(set_it)
+
+    def _autodeps_changed(self, *_):
+        if self._autodeps_loading:
+            return
+        value = "yes" if self.autodeps.get_active() else "ask"
+        threading.Thread(target=lambda: subprocess.run(
+            [self.kiwi, "config", "auto-deps", value], capture_output=True,
+            stdin=subprocess.DEVNULL, timeout=30), daemon=True).start()
 
     def run(self):
         self.stack.set_visible_child_name("busy")
@@ -1306,6 +1349,9 @@ class Window(Adw.ApplicationWindow):
         self._active_names = []  # the names the running action is about
         self._btns = {}          # app name -> its action buttons (both views)
         self._bound = None       # which view is bound to the model (U2)
+        # every card's / row's action button the same width, so they line up
+        self._card_buttons = Gtk.SizeGroup(mode=Gtk.SizeGroupMode.HORIZONTAL)
+        self._row_buttons = Gtk.SizeGroup(mode=Gtk.SizeGroupMode.HORIZONTAL)
         self._unbound = Gio.ListStore(item_type=App)   # what the hidden view shows
         self._pulse = None
         self.set_default_size(980, 800)
@@ -1651,13 +1697,23 @@ class Window(Adw.ApplicationWindow):
         desc = self._text(app["desc"], css="kiwi-card-desc", wrap=True, lines=2)
         desc.set_vexpand(True)
         desc.set_valign(Gtk.Align.START)
+        desc.set_halign(Gtk.Align.FILL)       # the card's width, not 22 characters
         card.append(desc)
 
         foot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         badges = self._badges(app)
         badges.set_hexpand(True)
+        badges.set_valign(Gtk.Align.END)
         foot.append(badges)
-        foot.append(self._action_button(app, compact=True))
+        # Pinned to the bottom edge, one width and one shape for every card:
+        # centred, a card whose pills wrapped to a second line had its button
+        # half a line lower than its neighbours, and a flat "Details" next to a
+        # framed "Install" did not line up either.
+        btn = self._action_button(app, compact=True)
+        btn.set_valign(Gtk.Align.END)
+        btn.remove_css_class("flat")
+        self._card_buttons.add_widget(btn)
+        foot.append(btn)
         card.append(foot)
         outer = Card(card)
         outer.app = app
@@ -1725,7 +1781,9 @@ class Window(Adw.ApplicationWindow):
         row.add_suffix(ver)
         row.optional.append(ver)
 
-        row.add_suffix(self._action_button(app))
+        rbtn = self._action_button(app)
+        self._row_buttons.add_widget(rbtn)        # one width, so the column lines up
+        row.add_suffix(rbtn)
         for w in row.optional:
             w.set_visible(not self.narrow)
         return row

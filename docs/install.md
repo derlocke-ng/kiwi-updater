@@ -8,7 +8,7 @@ the network on these systems.
 | System | kiwi and CLI apps | GUIs (GTK 4, libadwaita 1.5+) | Updates of root apps without a password |
 |---|---|---|---|
 | Fedora Silverblue, Bluefin, Fedora | yes | yes | yes, for the `wheel` group |
-| Debian 13, Ubuntu 24.04 | yes | yes | yes, for the `sudo` group |
+| Debian 13, Ubuntu 24.04 and 26.04 | yes | yes | yes, for the `sudo` group |
 | Arch, openSUSE Tumbleweed | yes | yes | yes, for the `wheel` group |
 | Alpine | yes, with the GNU tools (see below) | yes | yes, with polkit installed |
 
@@ -17,8 +17,15 @@ Also tested, but not on every push:
 | System | kiwi and CLI apps | GUIs | Updates of root apps without a password |
 |---|---|---|---|
 | Debian 12 | yes | no — libadwaita 1.2 is too old | yes, for the `sudo` group |
+| openSUSE Leap 16.1 Immutable | yes | not tested yet | no — the image has no `wheel` or `sudo` group; kiwi uses manual mode |
 | Ubuntu 22.04 | yes | no — libadwaita 1.1 is too old | no — polkit 0.105 is too old; kiwi uses manual mode |
 | WSL2 | not tested yet | through WSLg, not tested yet | not tested yet |
+
+kiwi 2.5.3 was also installed and used on desktop VMs (GNOME or KDE, a user
+in the admin group) of Ubuntu 24.04 and 26.04, Debian 12 and 13, Fedora 45,
+Arch, openSUSE Tumbleweed and openSUSE Leap 16.1 Immutable: installing kiwi,
+setting up the root part, installing an app with a root part and an app that
+needs a package.
 
 When a GUI cannot run, kiwi installs the command-line part of an app and says
 why. When a tool is missing, kiwi names the package for your distribution.
@@ -86,19 +93,80 @@ up the root part of kiwi first, with one password prompt.
 ## Packages per distribution
 
 kiwi needs bash, git, GNU coreutils, util-linux (for `flock`), findutils and
-awk. To check signatures of root apps it also needs `ssh-keygen`. Most
-desktops have all of these already.
+awk. To check the signatures of root apps it needs `ssh-keygen`. For
+passwordless updates of root apps it needs `pkexec`. Kiwi Apps, the desktop
+app, needs GTK 4 and libadwaita for Python. Most desktops have almost all of
+this already.
 
-| Need | Fedora | Debian, Ubuntu | Arch | openSUSE | Alpine |
-|---|---|---|---|---|---|
-| kiwi | `git` (+ `gawk` in minimal images) | `git` | `git` | `git-core` (+ `findutils` in minimal images) | `bash git coreutils util-linux findutils sed grep` |
-| signatures | `openssh-clients` | `openssh-client` | `openssh` | `openssh-clients` | `openssh-keygen` |
-| Kiwi Apps | `python3-gobject libadwaita gtk4` | `python3-gi gir1.2-adw-1 gir1.2-gtk-4.0` | `python-gobject libadwaita gtk4` | `python3-gobject typelib-1_0-Adw-1 typelib-1_0-Gtk-4_0` | `py3-gobject3 libadwaita gtk4.0` |
+Copy the line for your system, then run the install command from
+[Install kiwi](#install-kiwi). Each line installs everything above, including
+Kiwi Apps.
 
-On Fedora Silverblue and Bluefin everything is in the base image.
+**Fedora Silverblue, Bluefin, other Fedora Atomic systems:** everything is in
+the base image. Nothing to install.
 
-`kiwi pkg-hint <git|ssh-keygen|gui|gnu-tools>` prints the install command for
-the system you are on.
+**Fedora:**
+
+```bash
+sudo dnf install git curl openssh-clients polkit python3-gobject libadwaita gtk4
+```
+
+**Debian 13, Ubuntu 24.04 and 26.04:**
+
+```bash
+sudo apt install git curl openssh-client pkexec python3-gi gir1.2-adw-1 gir1.2-gtk-4.0
+```
+
+**Debian 12, Ubuntu 22.04** (no Kiwi Apps; their libadwaita is too old):
+
+```bash
+sudo apt install git curl openssh-client pkexec
+```
+
+**Arch:**
+
+```bash
+sudo pacman -S --needed git curl openssh polkit python-gobject libadwaita gtk4
+```
+
+**openSUSE Tumbleweed and Leap:** `pkexec` is a package of its own there and
+is not installed by default. Without it, every change to a root app asks for
+your password.
+
+```bash
+sudo zypper install git-core curl openssh-clients pkexec python3-gobject typelib-1_0-Adw-1 typelib-1_0-Gtk-4_0
+```
+
+**openSUSE Leap Immutable, Aeon, Kalpa:** the system is read-only and changes
+with `transactional-update`. Restart afterwards.
+
+```bash
+sudo transactional-update pkg install git-core curl openssh-clients pkexec python3-gobject typelib-1_0-Adw-1 typelib-1_0-Gtk-4_0
+```
+
+**Alpine:** see [Alpine](#alpine) below.
+
+`kiwi pkg-hint <need>…` prints the install command for the system you are on.
+A need is `git`, `ssh-keygen`, `pkexec`, `gui`, `gnu-tools`, a command, or a
+package name.
+
+### Packages that apps need
+
+An app names the commands it needs (`DEPENDS` in its manifest). When one is
+missing, kiwi shows the install command for your system and asks before it
+installs anything:
+
+```text
+kiwi-killswitch needs nft, which is not installed:
+  sudo zypper install nftables iproute2 NetworkManager python3 python3-gobject
+Install them now? [y/N]
+```
+
+To install such packages without being asked, turn on the setting
+`auto-deps` (see [Settings](usage.md#settings)). kiwi never installs packages
+during a background update. On read-only systems (Fedora Atomic with
+`rpm-ostree`, openSUSE Leap Immutable with `transactional-update`) it always
+asks, because the packages are only there after a restart.
 
 ### Alpine
 

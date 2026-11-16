@@ -19,6 +19,14 @@
 # system-level parts are (re)installed.
 set -euo pipefail
 
+# Files are created 0644/0755 whatever umask the caller had. Ubuntu
+# gives users umask 002, and Ubuntu 26.04's sudo (sudo-rs) passes it on to
+# root where classic sudo forced 022: root's own clone came out group-writable,
+# and the bootstrap then refused it as "not root-owned all the way up".
+# The same for the user part: with umask 002 the lists came out 664, and
+# `kiwi doctor` rightly flagged them as writable by others.
+umask 022
+
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="$SRC/install.sh"
 
@@ -179,6 +187,14 @@ root_from_own_clone() {
     local url tag
     mkdir -p "$SYS_DATA/repos"; chmod 755 "$SYS_DATA" "$SYS_DATA/repos"
     if [[ -d $ROOT_CLONE/.git ]]; then
+        # A clone made by an earlier bootstrap under umask 002 (see the top):
+        # everything in it is root's, only the mode bits are loose. Tighten
+        # them; anything owned by someone else is still refused below.
+        if [[ -z "$(find "$ROOT_CLONE" ! -uid 0 -print -quit 2>/dev/null)" ]] &&
+           [[ -n "$(find "$ROOT_CLONE" -perm /022 -print -quit 2>/dev/null)" ]]; then
+            say "tightening permissions of $ROOT_CLONE (it was made group-writable)"
+            chmod -R go-w "$ROOT_CLONE"
+        fi
         root_owned_chain "$ROOT_CLONE" ||
             { echo "error: $ROOT_CLONE is not root-owned all the way up — refusing to use it" >&2; exit 1; }
         url="$(git -C "$ROOT_CLONE" remote get-url origin 2>/dev/null || true)"
@@ -362,6 +378,9 @@ from gi.repository import Adw; print("%d.%d" % (Adw.get_major_version(), Adw.get
         say "registered default catalog ($DEFAULT_CATALOG)"
     }
     register_self "$USER_CONF/apps.list" "$USER_DATA/repos"
+    # lists an older kiwi wrote under umask 002 (Ubuntu) are group-writable,
+    # which kiwi doctor rightly flags; they are only ever the user's own
+    chmod go-w "$USER_CONF"/*.list "$USER_CONF"/settings 2>/dev/null || true
 
     # The timer goes LAST. `enable --now` starts it, and with Persistent=true
     # on a machine up longer than OnBootSec it fires at once — so it used to
@@ -440,10 +459,33 @@ polkit_rules_ok() {
 
 root_install() {
     local mode="${SYSTEM_MODE:-$(cat "$SYS_CONF/mode" 2>/dev/null || echo auto)}" grp=""
+    if [[ $mode == auto ]] && ! command -v pkexec >/dev/null 2>&1; then
+        # openSUSE ships pkexec as its own package, not installed by default;
+        # offer it where someone can answer, as kiwi does for app packages
+        local hint; hint="$(bash "$SRC/bin/kiwi" pkg-hint pkexec 2>/dev/null || echo 'install pkexec')"
+        say "passwordless updates need pkexec, which is not installed: $hint"
+        if [[ -t 0 ]]; then
+            local answer=""
+            printf ':: install it now? [y/N] '; read -r answer || answer=""
+            if [[ $answer == [yY]* ]]; then
+                case "$hint" in
+                    *transactional-update*) transactional-update -n pkg install pkexec ;;
+                    *zypper*) zypper -n install pkexec ;;
+                    *apt*)    { apt-get update -qq && apt-get install -y pkexec; } ;;
+                    *dnf*)    dnf install -y polkit ;;
+                    *pacman*) pacman -S --needed --noconfirm polkit ;;
+                    *apk*)    apk add polkit ;;
+                esac || true
+            fi
+        fi
+    fi
     if [[ $mode == auto ]]; then
-        if ! polkit_rules_ok; then
-            say "passwordless updates need pkexec and polkit 0.106 or newer; this system has" \
-                "$(pkaction --version 2>/dev/null || echo 'no polkit') — using manual mode"
+        if ! command -v pkexec >/dev/null 2>&1; then
+            say "no pkexec — using manual mode (every system change asks for a password)"
+            mode=manual
+        elif ! polkit_rules_ok; then
+            say "passwordless updates need polkit 0.106 or newer; this system has" \
+                "$(pkaction --version 2>/dev/null || echo 'an unknown version') — using manual mode"
             mode=manual
         elif ! grp="$(admin_group)"; then
             say "no wheel, sudo or admin group to grant passwordless updates to — using manual mode"
@@ -467,6 +509,7 @@ root_install() {
     seed_list "$SYS_CONF/catalogs.list" "kiwi system catalogs — git URLs of catalog repos"
     list_has "$SYS_CONF/catalogs.list" "$DEFAULT_CATALOG" || echo "$DEFAULT_CATALOG" >> "$SYS_CONF/catalogs.list"
     register_self "$SYS_CONF/apps.list" "$SYS_DATA/repos"
+    chmod go-w "$SYS_CONF"/*.list "$SYS_CONF"/settings 2>/dev/null || true   # see the user part
 
     # kiwi <= 1.8 ran a root timer. System halves are updated from the USER
     # timer through the wrapper now, so remove it wherever it is still around.

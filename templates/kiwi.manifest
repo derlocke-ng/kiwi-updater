@@ -64,6 +64,11 @@
 #              A word that names a kiwi app in YOUR catalog (or a list on the
 #              user's machine) is installed first, in the same scope — a plugin
 #              says DEPENDS=kiwi-proxy and gets kiwi-proxy with it.
+# PACKAGES_DNF / _APT / _PACMAN / _ZYPPER / _APK
+#              the packages to offer when a DEPENDS command is missing, per
+#              package manager (PACKAGES= for all others). Optional: kiwi
+#              knows common commands. Fedora Atomic uses PACKAGES_DNF, openSUSE
+#              Leap Immutable PACKAGES_ZYPPER.
 #
 # INSTALLER    installer script relative to repo root (default: install.sh)
 
@@ -85,5 +90,6 @@ SCOPES=user
 # SCREENSHOTS=data/screenshots/1.png data/screenshots/2.png
 # ABOUT=README.md
 # DEPENDS=git curl
+# PACKAGES_APT=git curl
 
 INSTALLER=install.sh

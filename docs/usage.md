@@ -107,6 +107,21 @@ Clicks are queued: install several apps in a row and they run one after the
 other, in as few password prompts as possible. The list first shows what is
 installed, then fills in which apps have updates.
 
+The gear button opens Preferences:
+
+- **Packages**: what kiwi does when an app needs a package this system does
+  not have (the `auto-deps` setting, see [Settings](#settings)). Kiwi Apps
+  has no terminal to ask in, so "Ask first" shows the install command in the
+  output instead.
+- **Appearance**: the app icon in the app grid, the dash and the window. Pick
+  one of the kiwi-icons colourways and styles, or an icon of your own: put a
+  PNG or SVG file in `~/.config/kiwi-updater/icons/` (the folder button opens
+  it) and open Preferences again. Updates of kiwi keep your choice.
+- **Window**: Kiwi Apps keeps its size when you close it; Reset goes back to
+  the default size.
+
+These choices are in `~/.config/kiwi-updater/gui.conf` and `window.json`.
+
 Kiwi Apps needs GTK 4 and libadwaita 1.5 or newer. It uses the `kiwi` command
 for everything, so whatever it shows, `kiwi` can do from a terminal.
 
@@ -142,8 +157,8 @@ kiwi config --system auto-deps yes   # the same for root apps (asks for your pas
 ```
 
 Your settings are in `~/.config/kiwi-updater/settings`, root's are in
-`/etc/kiwi-updater/settings`. In Kiwi Apps, the switch "Install missing
-packages automatically" under Doctor changes your `auto-deps`.
+`/etc/kiwi-updater/settings`. In Kiwi Apps, Preferences → Packages →
+"Missing packages" changes your `auto-deps`.
 
 Whatever the setting, kiwi never installs packages during a background
 update. On read-only systems (Fedora Atomic with `rpm-ostree`, openSUSE Leap

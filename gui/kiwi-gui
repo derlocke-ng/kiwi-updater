@@ -11,6 +11,7 @@ which stays the single source of truth. Images are read from the app's own
 cloned repo, so nothing here fetches from the network.
 """
 import functools
+import json
 import os
 import re
 import shlex
@@ -49,12 +50,172 @@ if (Adw.get_major_version(), Adw.get_minor_version()) < (1, 5):
 
 APP_ID = "eu.kiwinetwork.KiwiUpdater"
 
+# Kiwi Apps' own settings: the app icon and the window size. kiwi's settings
+# (auto-deps) stay with kiwi, read and written through `kiwi config`.
+CONF_DIR = os.path.join(GLib.get_user_config_dir(), "kiwi-updater")
+GUI_CONF = os.path.join(CONF_DIR, "gui.conf")
+WINDOW_FILE = os.path.join(CONF_DIR, "window.json")
+DEFAULT_SIZE = (980, 800)
+MIN_SIZE = (360, 420)
+
+# The app icon: kiwi-icons' stock updater kiwi, or the same kiwi in a
+# kiwi-icons colourway and style, or your own file from ICONS_DIR — as in
+# syncman. kiwi_icon.py is kiwi-icons' kit/kiwi_icon.py, copied unchanged;
+# install.sh puts it and the stock icon in LIB_DIR.
+ICON_GLYPH = "updater"
+ICONS_DIR = os.path.join(CONF_DIR, "icons")
+HICOLOR = os.path.join(GLib.get_user_data_dir(), "icons", "hicolor")
+LIB_DIR = os.path.join(GLib.get_user_data_dir(), "kiwi-updater", "lib")
+_here = os.path.dirname(os.path.realpath(__file__))
+for _d in (LIB_DIR, _here):
+    if os.path.isfile(os.path.join(_d, "kiwi_icon.py")):
+        sys.path.insert(0, _d)
+        break
+try:
+    import kiwi_icon  # noqa: E402
+except ImportError:
+    kiwi_icon = None
+
 # Adw.ActionRow titles and subtitles, and Adw.PreferencesGroup descriptions,
 # are Pango markup by default. Every one of these strings comes out of an app's
 # kiwi.manifest, so a description containing a bare & rendered the row empty
 # and a crafted manifest could inject markup into the row that explains why an
 # app wants root.
 esc = GLib.markup_escape_text
+
+
+def conf_get(key, default=""):
+    try:
+        with open(GUI_CONF) as fh:
+            for line in fh:
+                if line.startswith(f"{key}="):
+                    return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return default
+
+
+def conf_set(key, value):
+    os.makedirs(CONF_DIR, exist_ok=True)
+    lines, found = [], False
+    try:
+        with open(GUI_CONF) as fh:
+            lines = fh.readlines()
+    except OSError:
+        pass
+    for i, line in enumerate(lines):
+        if line.startswith(f"{key}="):
+            lines[i] = f"{key}={value}\n"
+            found = True
+    if not found:
+        lines.append(f"{key}={value}\n")
+    with open(GUI_CONF + ".tmp", "w") as fh:
+        fh.writelines(lines)
+    os.replace(GUI_CONF + ".tmp", GUI_CONF)
+
+
+def saved_geometry():
+    """(width, height, maximized) from window.json, else the default."""
+    try:
+        with open(WINDOW_FILE) as fh:
+            d = json.load(fh)
+        return (max(int(d["width"]), MIN_SIZE[0]), max(int(d["height"]), MIN_SIZE[1]),
+                bool(d.get("maximized")))
+    except (OSError, ValueError, KeyError, TypeError):
+        return DEFAULT_SIZE[0], DEFAULT_SIZE[1], False
+
+
+def remember_geometry(window):
+    """GTK 4 keeps the user's resizing in the default size, and the
+    un-maximized size while maximized."""
+    width, height = window.get_default_size()
+    try:
+        os.makedirs(CONF_DIR, exist_ok=True)
+        with open(WINDOW_FILE, "w") as fh:
+            json.dump({"width": width, "height": height,
+                       "maximized": window.is_maximized()}, fh)
+    except OSError:
+        pass
+
+
+ICON_STYLES = [("classic", "Classic"), ("flat", "Flat"), ("night", "Night")]
+
+
+def icon_colors():
+    """(key, label): the stock icon first, then every kiwi-icons colourway."""
+    out = [("", "Kiwi Apps' own")]
+    if kiwi_icon is not None:
+        out += [(k, v["label"]) for k, v in kiwi_icon.COLORWAYS.items()]
+    return out
+
+
+def custom_icons():
+    """Your own icons: PNG or SVG files in ICONS_DIR."""
+    try:
+        names = sorted(os.listdir(ICONS_DIR))
+    except OSError:
+        return []
+    return [f for f in names
+            if f.lower().endswith((".svg", ".png")) and os.path.isfile(os.path.join(ICONS_DIR, f))]
+
+
+def stock_icon():
+    """The stock icon as install.sh keeps it, or from the source tree."""
+    for c in (os.path.join(LIB_DIR, f"{APP_ID}.svg"),
+              os.path.join(_here, "..", "data", "icons", f"{APP_ID}.svg")):
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def apply_icon():
+    """Put the icon gui.conf asks for where the desktop entry finds it.
+    ICON_FILE (one of your own) wins; else the updater kiwi in ICON_COLOR and
+    ICON_STYLE; with neither set, the stock icon. Returns an error, or None."""
+    own = conf_get("ICON_FILE")
+    color = conf_get("ICON_COLOR")
+    style = conf_get("ICON_STYLE", "classic")
+    apps = os.path.join(HICOLOR, "scalable", "apps")
+    target = os.path.join(apps, f"{APP_ID}.svg")
+    try:
+        os.makedirs(apps, exist_ok=True)
+        if own:
+            src = os.path.join(ICONS_DIR, os.path.basename(own))
+            if src.lower().endswith(".png"):
+                # a PNG under a .svg name would not load; wrap it instead
+                import base64
+                with open(src, "rb") as fh:
+                    data = base64.b64encode(fh.read()).decode()
+                svg = ('<svg xmlns="http://www.w3.org/2000/svg" '
+                       'xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 128 128" '
+                       f'width="128" height="128"><image width="128" height="128" '
+                       f'xlink:href="data:image/png;base64,{data}"/></svg>\n')
+            else:
+                with open(src) as fh:
+                    svg = fh.read()
+        elif color or style != "classic":
+            if kiwi_icon is None:
+                return "kiwi_icon.py is missing — reinstall kiwi"
+            svg = kiwi_icon.render(ICON_GLYPH, colorway=color or None, style=style,
+                                   title="Kiwi Apps")
+        else:
+            stock = stock_icon()
+            if stock is None:
+                return "the stock icon is missing — reinstall kiwi"
+            with open(stock) as fh:
+                svg = fh.read()
+        with open(target + ".tmp", "w") as fh:
+            fh.write(svg)
+        os.replace(target + ".tmp", target)
+    except (OSError, ValueError, KeyError) as e:
+        return str(e)
+    if shutil.which("gtk-update-icon-cache"):
+        try:
+            subprocess.run(["gtk-update-icon-cache", "-qtf", HICOLOR], timeout=20,
+                           capture_output=True, stdin=subprocess.DEVNULL)
+        except Exception:  # noqa: BLE001
+            pass
+    return None
 
 
 def repo_path(repo_dir, rel):
@@ -1268,44 +1429,8 @@ class DoctorDialog(Adw.Dialog):
         self.again.connect("clicked", lambda *_: self.run())
         header.pack_end(self.again)
         tb.add_top_bar(header)
-
-        # `kiwi config auto-deps`: off ("ask") the GUI can only show the
-        # command, since there is no terminal to ask in; on ("yes") kiwi runs
-        # it, with the system's password dialog.
-        self.autodeps = Adw.SwitchRow(
-            title="Install missing packages automatically",
-            subtitle="When an app needs a package this system lacks, install it "
-                     "(you are asked for your password). Off: the command is shown instead.")
-        self._autodeps_loading = True
-        self.autodeps.connect("notify::active", self._autodeps_changed)
-        group = Adw.PreferencesGroup(margin_top=6, margin_bottom=12,
-                                     margin_start=12, margin_end=12)
-        group.add(self.autodeps)
-        tb.add_bottom_bar(group)
         self.set_child(tb)
-        threading.Thread(target=self._autodeps_load, daemon=True).start()
         self.run()
-
-    def _autodeps_load(self):
-        try:
-            v = subprocess.run([self.kiwi, "config", "auto-deps"], capture_output=True,
-                               text=True, stdin=subprocess.DEVNULL, timeout=30).stdout.strip()
-        except Exception:  # noqa: BLE001
-            v = ""
-
-        def set_it():
-            self.autodeps.set_active(v == "yes")
-            self._autodeps_loading = False
-            return False
-        GLib.idle_add(set_it)
-
-    def _autodeps_changed(self, *_):
-        if self._autodeps_loading:
-            return
-        value = "yes" if self.autodeps.get_active() else "ask"
-        threading.Thread(target=lambda: subprocess.run(
-            [self.kiwi, "config", "auto-deps", value], capture_output=True,
-            stdin=subprocess.DEVNULL, timeout=30), daemon=True).start()
 
     def run(self):
         self.stack.set_visible_child_name("busy")
@@ -1332,6 +1457,177 @@ class DoctorDialog(Adw.Dialog):
         return False
 
 
+class PreferencesDialog(Adw.PreferencesDialog):
+    """Behind the gear, as in kiwi-fox, kiwi-proxy and kiwi-custodia."""
+
+    # `kiwi config auto-deps`. Kiwi Apps has no terminal to ask in, so "ask"
+    # shows the command in the output, like "no"; "yes" installs, with the
+    # system's password dialog.
+    AUTO_DEPS = [("ask", "Ask first", "in a terminal; here, the command is shown"),
+                 ("yes", "Install them", "you are asked for your password"),
+                 ("no", "Only show the command", "kiwi installs nothing itself")]
+
+    def __init__(self, win):
+        super().__init__(title="Preferences")
+        self.win = win
+        self.kiwi = win.kiwi
+        page = Adw.PreferencesPage(title="General",
+                                   icon_name=ui_icon("preferences-system-symbolic",
+                                                     "preferences-system"))
+        self.add(page)
+        self._build_packages(page)
+        self._build_icon(page)
+        self._build_window(page)
+
+    # ── packages ──────────────────────────────────────────────────────────
+    def _build_packages(self, page):
+        grp = Adw.PreferencesGroup(
+            title="Packages",
+            description="When an app needs a package this system does not have")
+        page.add(grp)
+        self.deps_row = Adw.ComboRow(
+            title="Missing packages",
+            model=Gtk.StringList.new([label for _k, label, _s in self.AUTO_DEPS]))
+        self.deps_row.set_sensitive(False)          # until kiwi has answered
+        self._deps_loading = True
+        self.deps_row.connect("notify::selected", self._deps_changed)
+        grp.add(self.deps_row)
+        threading.Thread(target=self._deps_load, daemon=True).start()
+
+    def _deps_load(self):
+        try:
+            v = subprocess.run([self.kiwi, "config", "auto-deps"], capture_output=True,
+                               text=True, stdin=subprocess.DEVNULL, timeout=30).stdout.strip()
+        except Exception:  # noqa: BLE001
+            v = ""
+
+        def set_it():
+            keys = [k for k, _l, _s in self.AUTO_DEPS]
+            i = keys.index(v) if v in keys else 0
+            self.deps_row.set_selected(i)
+            self.deps_row.set_subtitle(self.AUTO_DEPS[i][2])
+            self.deps_row.set_sensitive(True)
+            self._deps_loading = False
+            return False
+        GLib.idle_add(set_it)
+
+    def _deps_changed(self, *_):
+        if self._deps_loading:
+            return
+        key, _label, sub = self.AUTO_DEPS[self.deps_row.get_selected()]
+        self.deps_row.set_subtitle(sub)
+
+        def work():
+            try:
+                p = subprocess.run([self.kiwi, "config", "auto-deps", key], capture_output=True,
+                                   text=True, stdin=subprocess.DEVNULL, timeout=30)
+                err = None if p.returncode == 0 else (p.stderr or p.stdout).strip()
+            except Exception as e:  # noqa: BLE001
+                err = str(e)
+            GLib.idle_add(self._toast, f"Not saved: {err}" if err else "Saved")
+        threading.Thread(target=work, daemon=True).start()
+
+    # ── app icon (as in syncman) ──────────────────────────────────────────
+    def _build_icon(self, page):
+        grp = Adw.PreferencesGroup(title="Appearance")
+        page.add(grp)
+        self._icon_busy = True
+        self._icon_preview = Gtk.Image(pixel_size=48, valign=Gtk.Align.CENTER)
+        self._icon_choices = icon_colors() + [(f"own:{f}", f"Your own: {f}")
+                                              for f in custom_icons()]
+        self._color_row = Adw.ComboRow(
+            title="App Icon", subtitle="in the app grid, the dash and this window",
+            model=Gtk.StringList.new([label for _k, label in self._icon_choices]))
+        self._color_row.add_prefix(self._icon_preview)
+        own = conf_get("ICON_FILE")
+        have = f"own:{own}" if own else conf_get("ICON_COLOR")
+        keys = [k for k, _l in self._icon_choices]
+        self._color_row.set_selected(keys.index(have) if have in keys else 0)
+        folder = Gtk.Button(icon_name=ui_icon("folder-open-symbolic", "folder-open"),
+                            valign=Gtk.Align.CENTER,
+                            tooltip_text="Your own icons: put PNG or SVG files in this "
+                                         "folder, then open Preferences again")
+        folder.add_css_class("flat")
+        folder.connect("clicked", self._open_icons_folder)
+        self._color_row.add_suffix(folder)
+        grp.add(self._color_row)
+
+        self._style_row = Adw.ComboRow(
+            title="Icon Style", subtitle="kiwi-icons' three styles",
+            model=Gtk.StringList.new([label for _k, label in ICON_STYLES]))
+        styles = [k for k, _l in ICON_STYLES]
+        st = conf_get("ICON_STYLE", "classic")
+        self._style_row.set_selected(styles.index(st) if st in styles else 0)
+        grp.add(self._style_row)
+        if kiwi_icon is None:
+            self._style_row.set_sensitive(False)
+            self._style_row.set_subtitle("kiwi_icon.py is missing — reinstall kiwi")
+        self._color_row.connect("notify::selected", self._on_icon_changed)
+        self._style_row.connect("notify::selected", self._on_icon_changed)
+        self._icon_busy = False
+        self._show_icon()
+
+    def _show_icon(self):
+        key = self._icon_choices[self._color_row.get_selected()][0]
+        self._style_row.set_visible(not key.startswith("own:"))
+        f = os.path.join(HICOLOR, "scalable", "apps", f"{APP_ID}.svg")
+        if os.path.isfile(f):
+            self._icon_preview.set_from_file(f)
+        else:
+            self._icon_preview.set_from_icon_name(APP_ID)
+
+    def _on_icon_changed(self, *_):
+        if self._icon_busy:
+            return
+        key = self._icon_choices[self._color_row.get_selected()][0]
+        style = ICON_STYLES[self._style_row.get_selected()][0]
+        try:
+            conf_set("ICON_FILE", key[4:] if key.startswith("own:") else "")
+            conf_set("ICON_COLOR", "" if key.startswith("own:") else key)
+            conf_set("ICON_STYLE", style)
+        except OSError as e:
+            self._toast(f"Not saved: {e}")
+            return
+        err = apply_icon()
+        self._show_icon()
+        self._toast(f"Icon not changed: {err}" if err else
+                    "Icon changed. The app grid may show it only after you log in again.")
+
+    def _open_icons_folder(self, *_):
+        os.makedirs(ICONS_DIR, exist_ok=True)
+        Gio.AppInfo.launch_default_for_uri(GLib.filename_to_uri(ICONS_DIR, None), None)
+
+    # ── window ────────────────────────────────────────────────────────────
+    def _build_window(self, page):
+        grp = Adw.PreferencesGroup(title="Window")
+        page.add(grp)
+        size = Adw.ActionRow(title="Size")
+
+        def show():
+            w, h, maxed = saved_geometry()
+            size.set_subtitle("maximized" if maxed else f"{w} × {h}, kept when you close it")
+
+        reset = Gtk.Button(label="Reset", valign=Gtk.Align.CENTER)
+
+        def on_reset(*_a):
+            try:
+                os.unlink(WINDOW_FILE)
+            except OSError:
+                pass
+            self.win.unmaximize()
+            self.win.set_default_size(*DEFAULT_SIZE)
+            show()
+
+        reset.connect("clicked", on_reset)
+        size.add_suffix(reset)
+        show()
+        grp.add(size)
+
+    def _toast(self, text):
+        self.add_toast(Adw.Toast(title=esc(text), timeout=4))
+        return False
+
+
 class Window(Adw.ApplicationWindow):
     def __init__(self, app, kiwi):
         super().__init__(application=app, title="Kiwi Apps")
@@ -1354,8 +1650,12 @@ class Window(Adw.ApplicationWindow):
         self._row_buttons = Gtk.SizeGroup(mode=Gtk.SizeGroupMode.HORIZONTAL)
         self._unbound = Gio.ListStore(item_type=App)   # what the hidden view shows
         self._pulse = None
-        self.set_default_size(980, 800)
-        self.set_size_request(360, 420)
+        w, h, maximized = saved_geometry()
+        self.set_default_size(w, h)
+        self.set_size_request(*MIN_SIZE)
+        if maximized:
+            self.maximize()
+        self.connect("close-request", lambda win: remember_geometry(win) or False)
         self.narrow = False
 
         self.store = Gio.ListStore(item_type=App)
@@ -1389,6 +1689,10 @@ class Window(Adw.ApplicationWindow):
         self.btn_log = Gtk.ToggleButton(icon_name=ui_icon("utilities-terminal-symbolic", "utilities-terminal"),
                                         tooltip_text="Show output")
         header.pack_end(self.btn_log)
+        self.btn_prefs = Gtk.Button(icon_name=ui_icon("emblem-system-symbolic", "preferences-system"),
+                                    tooltip_text="Preferences")
+        self.btn_prefs.connect("clicked", lambda *_: PreferencesDialog(self).present(self))
+        header.pack_end(self.btn_prefs)
         self.btn_doctor = Gtk.Button(
             icon_name=ui_icon("emblem-ok-symbolic", "dialog-information-symbolic",
                               "dialog-information"),

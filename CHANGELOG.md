@@ -3,6 +3,21 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 2.6.0 — unreleased
+
+- **Kiwi Apps: Preferences, behind a gear**, as in kiwi-fox, kiwi-proxy and
+  kiwi-custodia.
+  - *Packages*: the `auto-deps` setting as a choice of three (ask first,
+    install them, only show the command). It used to be a switch at the
+    bottom of the Doctor window, which could only set "yes" or "ask".
+  - *Appearance*: syncman's icon chooser. The updater kiwi in any kiwi-icons
+    colourway and style, or an icon of your own from
+    `~/.config/kiwi-updater/icons/`. `kiwi_icon.py` is kiwi-icons' kit,
+    copied unchanged. An update of kiwi no longer puts the stock icon back
+    over the one you chose.
+  - *Window*: Kiwi Apps keeps its size and maximized state when closed;
+    Reset goes back to 980 × 800.
+
 ## 2.5.4 — 2026-11-16
 
 - **`curl … | bash` asks with sudo again.** The installer took "stdin is not

@@ -348,9 +348,17 @@ user_install() {
         sed "s|^Exec=.*|Exec=$USER_BIN/kiwi-gui|" "$SRC/data/kiwi.desktop" \
             > "$USER_APPS/eu.kiwinetwork.KiwiUpdater.desktop"
         rm -f "$USER_APPS/kiwi-gui.desktop"   # pre-1.0 name
-        # one scalable icon rather than a pile of bitmaps
+        # Preferences → App Icon draws the icon with kiwi_icon.py and falls
+        # back to the stock one; both live next to kiwi's data
+        install -Dm644 "$SRC/gui/kiwi_icon.py" "$USER_DATA/lib/kiwi_icon.py"
         install -Dm644 "$SRC/data/icons/eu.kiwinetwork.KiwiUpdater.svg" \
-            "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps/eu.kiwinetwork.KiwiUpdater.svg"
+            "$USER_DATA/lib/eu.kiwinetwork.KiwiUpdater.svg"
+        # one scalable icon rather than a pile of bitmaps — unless you chose
+        # another in Preferences, which an update must not undo
+        if ! grep -qE '^ICON_(FILE|COLOR)=.|^ICON_STYLE=(flat|night)' "$USER_CONF/gui.conf" 2>/dev/null; then
+            install -Dm644 "$SRC/data/icons/eu.kiwinetwork.KiwiUpdater.svg" \
+                "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps/eu.kiwinetwork.KiwiUpdater.svg"
+        fi
         command -v gtk-update-icon-cache >/dev/null 2>&1 && \
             gtk-update-icon-cache -qtf "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor" 2>/dev/null || true
         command -v update-desktop-database >/dev/null 2>&1 && \
@@ -434,6 +442,7 @@ user_uninstall() {
           "$USER_APPS/eu.kiwinetwork.KiwiUpdater.desktop" "$USER_APPS/kiwi-gui.desktop" \
           "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps/eu.kiwinetwork.KiwiUpdater.png" \
           "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps/eu.kiwinetwork.KiwiUpdater.svg"
+    rm -rf "${USER_DATA:?}/lib"
     if (( PURGE )); then
         say "purging $USER_CONF and $USER_DATA"
         rm -rf "$USER_CONF" "$USER_DATA"

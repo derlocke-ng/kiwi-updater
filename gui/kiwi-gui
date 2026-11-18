@@ -12,6 +12,7 @@ cloned repo, so nothing here fetches from the network.
 """
 import functools
 import json
+import math
 import os
 import re
 import shlex
@@ -349,6 +350,7 @@ CSS = b"""
                 margin: 16px 4px 6px 4px; letter-spacing: .06em; }
 .kiwi-bigtile { border-radius: 20px; min-width: 96px; min-height: 96px; }
 .kiwi-shot { border-radius: 10px; }
+.kiwi-job { border-top: 1px solid alpha(currentColor, 0.12); }
 .kiwi-card { border-radius: 14px; padding: 14px 14px 12px 14px;
              background: alpha(@window_fg_color, .05);
              border: 1px solid alpha(@window_fg_color, .07); }
@@ -818,6 +820,108 @@ def app_launcher(app, desktop_id=""):
         if any(fn.startswith(os.path.realpath(d) + os.sep) for d in LAUNCHER_DIRS):
             return info
     return None
+
+
+class KiwiProgress(Gtk.DrawingArea):
+    """A kiwi slice that fills clockwise as a job gets on.
+
+    The kiwi of the app icon. What is still to do is a pale outline; what is
+    done is the fruit. With no count to go by (fraction None) a wedge of fruit
+    goes round instead. A finished kiwi gives one small bounce."""
+
+    SKIN, FLESH, SEED, CORE = "#4B781A", "#9CD06E", "#203C00", "#EEFAE5"
+
+    def __init__(self, size=40):
+        super().__init__(content_width=size, content_height=size,
+                         valign=Gtk.Align.CENTER)
+        self.target = None      # 0..1, or None: no count, go round
+        self.shown = 0.0        # what is drawn; eases towards target
+        self._t0 = None         # frame time of the last tick
+        self._spin = 0.0
+        self._pop = 0.0         # 1 -> 0 after reaching full
+        self._tick = None
+        self.set_draw_func(self._draw)
+        # hidden in a Revealer until the first job: start moving when shown
+        self.connect("map", lambda *_: self.set_fraction(self.target))
+
+    def set_fraction(self, f):
+        """f in 0..1, or None when there is nothing to count."""
+        if f is not None:
+            f = max(0.0, min(1.0, f))
+            if f < self.shown:
+                self.shown = f           # a new job starts from its own zero
+        self.target = f
+        if self._tick is None and self.get_mapped():
+            self._t0 = None
+            self._tick = self.add_tick_callback(self._on_tick)
+        self.queue_draw()
+
+    def _on_tick(self, _w, clock):
+        now = clock.get_frame_time() / 1e6
+        dt = 0.0 if self._t0 is None else min(now - self._t0, 0.1)
+        self._t0 = now
+        moving = True
+        if self.target is None:
+            self._spin = (self._spin + dt * 0.9) % 1.0
+        else:
+            before = self.shown
+            self.shown += (self.target - self.shown) * min(1.0, dt * 6)
+            if abs(self.target - self.shown) < 0.002:
+                self.shown = self.target
+            if before < 1.0 <= self.shown:
+                self._pop = 1.0
+            self._pop = max(0.0, self._pop - dt * 2.5)
+            moving = self.shown != self.target or self._pop > 0
+        self.queue_draw()
+        if not moving:
+            self._tick = None
+            return False
+        return True
+
+    @staticmethod
+    def _rgb(cr, hexcol, alpha=1.0):
+        r, g, b = (int(hexcol[i:i + 2], 16) / 255 for i in (1, 3, 5))
+        cr.set_source_rgba(r, g, b, alpha)
+
+    def _fruit(self, cr, alpha):
+        """The icon's kiwi, in its own 128-unit square."""
+        for col, r in ((self.SKIN, 58), (self.FLESH, 51)):
+            self._rgb(cr, col, alpha)
+            cr.arc(64, 64, r, 0, 2 * math.pi)
+            cr.fill()
+        self._rgb(cr, self.SEED, alpha)
+        for k in range(6):
+            a = k * math.pi / 3
+            cr.save()
+            cr.translate(64 + 31 * math.sin(a), 64 - 31 * math.cos(a))
+            cr.rotate(a)
+            cr.scale(4, 5.6)
+            cr.arc(0, 0, 1, 0, 2 * math.pi)
+            cr.restore()
+            cr.fill()
+        self._rgb(cr, self.CORE, alpha)
+        cr.arc(64, 64, 21, 0, 2 * math.pi)
+        cr.fill()
+
+    def _draw(self, _area, cr, w, h):
+        side = min(w, h)
+        bounce = 1 + 0.12 * math.sin(math.pi * self._pop) if self._pop else 1
+        cr.translate(w / 2, h / 2)
+        cr.scale(side / 128 * bounce * 0.94, side / 128 * bounce * 0.94)
+        cr.translate(-64, -64)
+        self._fruit(cr, 0.22)                      # still to do
+        if self.target is None:
+            start, sweep = self._spin * 2 * math.pi, 0.3 * 2 * math.pi
+        else:
+            start, sweep = 0.0, self.shown * 2 * math.pi
+        if sweep <= 0:
+            return
+        if sweep < 2 * math.pi:                    # a wedge, from 12 o'clock
+            cr.move_to(64, 64)
+            cr.arc(64, 64, 70, start - math.pi / 2, start + sweep - math.pi / 2)
+            cr.close_path()
+            cr.clip()
+        self._fruit(cr, 1.0)                       # done
 
 
 class App(GObject.Object):
@@ -1921,10 +2025,35 @@ class Window(Adw.ApplicationWindow):
                                    GObject.BindingFlags.BIDIRECTIONAL)
 
         self.progress = Gtk.ProgressBar(visible=False)
+        # What an install or update is doing, above its output: the kiwi
+        # fills as the apps of the job finish. A refresh keeps the thin bar
+        # at the top — it can come round every minute, and a strip sliding
+        # in and out that often would be a nuisance.
+        self.kiwi_progress = KiwiProgress()
+        self.job_title = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
+        self.job_title.add_css_class("heading")
+        self.job_sub = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
+        self.job_sub.add_css_class("dim-label")
+        self.job_sub.add_css_class("caption")
+        jobtext = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2,
+                          valign=Gtk.Align.CENTER, hexpand=True)
+        jobtext.append(self.job_title)
+        jobtext.append(self.job_sub)
+        jobbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
+                         margin_top=8, margin_bottom=8,
+                         margin_start=14, margin_end=14)
+        jobbox.append(self.kiwi_progress)
+        jobbox.append(jobtext)
+        jobbox.add_css_class("kiwi-job")
+        self.jobrev = Gtk.Revealer(child=jobbox,
+                                   transition_type=Gtk.RevealerTransitionType.SLIDE_UP)
+        self._job_steps = {}     # app name -> [steps done, steps in all]
+        self._job_hide = None    # GLib source that folds the strip away
         self.toasts = Adw.ToastOverlay()
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         body.append(self.progress)
         body.append(self.stack)
+        body.append(self.jobrev)
         body.append(self.logrev)
         self.toasts.set_child(body)
 
@@ -2565,11 +2694,70 @@ class Window(Adw.ApplicationWindow):
             after = job["after"]
         self.acting = True
         self.set_busy(True, label)
+        self._job_start(label, self._active_names)
         self._spawn(argv, lambda rc: self._job_done(rc, after))
         return False
 
+    # ---- the kiwi that fills while a job runs ---------------------------
+    # One line of kiwi's output per finished half of an app: "<name>
+    # installed (user, 1.2.0)", "<name> updated to …", "<name> is up to
+    # date", "skipping <name> …", "<name>: the update step failed …".
+    JOB_DONE = re.compile(
+        r"(?:^|\s)(?:skipping (?P<skip>\S+)"
+        r"|(?P<name>\S+?)(?: (?:installed|updated|uninstalled|is up to date)\b"
+        r"|: the \w+ step failed))")
+
+    def _job_start(self, label, names):
+        if self._job_hide is not None:
+            GLib.source_remove(self._job_hide)
+            self._job_hide = None
+        by_name = {a["name"]: a for a in self._all()}
+        self._job_steps = {
+            n: [0, max(1, len(by_name[n].scope_list)) if n in by_name else 1]
+            for n in names}
+        self.job_title.set_label(label)
+        self.jobrev.set_reveal_child(True)
+        self._job_show()
+
+    def _job_show(self):
+        steps = self._job_steps
+        if not steps:                        # a kiwi command, nothing to count
+            self.job_sub.set_label("see the output below")
+            self.kiwi_progress.set_fraction(None)
+            return
+        done = sum(d for d, _t in steps.values())
+        total = sum(t for _d, t in steps.values())
+        apps = sum(1 for d, t in steps.values() if d >= t)
+        # never full before kiwi has exited: the last step is the exit itself
+        self.kiwi_progress.set_fraction(done / (total + 1))
+        self.job_sub.set_label(
+            "%d of %d app%s done" % (apps, len(steps), "" if len(steps) == 1 else "s"))
+
+    def _job_line(self, line):
+        m = self.JOB_DONE.search(line)
+        name = m and (m.group("skip") or m.group("name"))
+        step = self._job_steps.get(name)
+        if step and step[0] < step[1]:
+            step[0] += 1
+            self._job_show()
+
+    def _job_end(self, rc):
+        self._job_steps = {}
+        self.kiwi_progress.set_fraction(1.0)
+        self.job_sub.set_label("Done" if rc == 0 else "Failed — see the output")
+        if self.queue:                       # the next job takes the strip over
+            return
+
+        def fold():
+            self._job_hide = None
+            if not self.acting:
+                self.jobrev.set_reveal_child(False)
+            return False
+        self._job_hide = GLib.timeout_add(1800 if rc == 0 else 6000, fold)
+
     def _job_done(self, rc, after):
         self.acting = False
+        self._job_end(rc)
         after(rc)
         self._refresh_wanted = True
         return self._next_job()
@@ -2631,7 +2819,7 @@ class Window(Adw.ApplicationWindow):
 
     def set_busy(self, busy, msg):
         self.busy = busy
-        self.progress.set_visible(busy)
+        self.progress.set_visible(busy and not self.acting)   # a job has the kiwi
         if busy and self._pulse is None:
             self._pulse = GLib.timeout_add(120, self._do_pulse)
         elif not busy and self._pulse is not None:
@@ -2650,6 +2838,9 @@ class Window(Adw.ApplicationWindow):
         return True
 
     def append_log(self, text):
+        if self._job_steps:
+            for line in text.splitlines():
+                self._job_line(line)
         self.logbuf.insert(self.logbuf.get_end_iter(), text)
         mark = self.logbuf.create_mark(None, self.logbuf.get_end_iter(), False)
         self.logview.scroll_mark_onscreen(mark)

@@ -134,7 +134,10 @@ The gear button opens Preferences:
   PNG or SVG file in `~/.config/kiwi-updater/icons/` (the folder button opens
   it) and open Preferences again. Updates of kiwi keep your choice.
 - **Window**: Kiwi Apps keeps its size when you close it; Reset goes back to
-  the default size.
+  the default size. "Show output while working" is on by default; switched
+  off, a job shows only the strip with the kiwi, and kiwi's output opens by
+  itself if the job fails. The output button in the header opens it at any
+  time.
 
 These choices are in `~/.config/kiwi-updater/gui.conf` and `window.json`.
 

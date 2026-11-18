@@ -131,6 +131,11 @@ def refresh_minutes():
     return m if m in dict(REFRESH_CHOICES) else 0
 
 
+def show_output():
+    """Open the output pane when a job starts? On unless switched off."""
+    return conf_get("SHOW_OUTPUT", "1") != "0"
+
+
 def saved_geometry():
     """(width, height, maximized) from window.json, else the default."""
     try:
@@ -1827,6 +1832,14 @@ class PreferencesDialog(Adw.PreferencesDialog):
         show()
         grp.add(size)
 
+        out = Adw.SwitchRow(
+            title="Show output while working",
+            subtitle="off: only the kiwi fills; the output opens if something fails",
+            active=show_output())
+        out.connect("notify::active",
+                    lambda r, _p: conf_set("SHOW_OUTPUT", "1" if r.get_active() else "0"))
+        grp.add(out)
+
     def _toast(self, text):
         self.add_toast(Adw.Toast(title=esc(text), timeout=4))
         return False
@@ -2745,6 +2758,8 @@ class Window(Adw.ApplicationWindow):
         self._job_steps = {}
         self.kiwi_progress.set_fraction(1.0)
         self.job_sub.set_label("Done" if rc == 0 else "Failed — see the output")
+        if rc != 0:                          # also with "show output" off
+            self.btn_log.set_active(True)
         if self.queue:                       # the next job takes the strip over
             return
 
@@ -2789,7 +2804,8 @@ class Window(Adw.ApplicationWindow):
         as_root saw a tty, chose sudo, and prompted for a password in whatever
         terminal kiwi-gui was launched from while the window sat there looking
         hung. With no stdin it uses pkexec, which has a dialog."""
-        self.btn_log.set_active(True)
+        if show_output():
+            self.btn_log.set_active(True)
 
         def worker():
             GLib.idle_add(self.append_log,

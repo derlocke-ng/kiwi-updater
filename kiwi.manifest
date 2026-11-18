@@ -1,13 +1,14 @@
 # kiwi.manifest — app metadata for the kiwi updater (this file *is* the convention)
 NAME=kiwi-updater
 DESCRIPTION=Install and update open-source apps from git catalogs (CLI + GTK4 GUI)
-VERSION=2.6.0
+VERSION=2.6.1
 COMPONENTS=cli gui
 CATEGORY=System
 # from kiwi-icons (svg/classic/kiwi-updater.svg); install.sh installs the same
 # file as the desktop icon under the app id
 ICON=data/icons/eu.kiwinetwork.KiwiUpdater.svg
 TAGS=updater installer catalog apps
+SCREENSHOTS=docs/images/kiwi-apps.png docs/images/kiwi-apps-details.png docs/images/kiwi-apps-preferences.png docs/images/kiwi-apps-catalogs.png
 SCOPES=user
 HOMEPAGE=https://github.com/derlocke-ng/kiwi-updater
 LICENSE=GPL-3.0-or-later

@@ -103,6 +103,12 @@ status and category, and open an app for its details: icon, screenshots,
 README, dependencies, and the installer and update diff before they run. Pins
 can be set there too.
 
+![Kiwi Apps: the app list, filtered by category, everything up to date](images/kiwi-apps.png)
+
+![An app's details: version, license, what it installs inside and outside your home directory](images/kiwi-apps-details.png)
+
+![Further down the details: pin to a tag, read the installer and the README before you install](images/kiwi-apps-installer.png)
+
 Clicks are queued: install several apps in a row and they run one after the
 other, in as few password prompts as possible. The list first shows what is
 installed, then fills in which apps have updates.
@@ -121,6 +127,13 @@ The gear button opens Preferences:
   the default size.
 
 These choices are in `~/.config/kiwi-updater/gui.conf` and `window.json`.
+
+![Preferences: Packages, Appearance (app icon and style) and Window](images/kiwi-apps-preferences.png)
+
+The Catalogs button in the header adds and removes catalogs, like
+`kiwi catalog add` and `remove` (see [Catalogs](catalogs.md)).
+
+![The Catalogs dialog: a field for a catalog's git URL and the registered kiwi-catalog](images/kiwi-apps-catalogs.png)
 
 Kiwi Apps needs GTK 4 and libadwaita 1.5 or newer. It uses the `kiwi` command
 for everything, so whatever it shows, `kiwi` can do from a terminal.

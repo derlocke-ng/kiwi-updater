@@ -3,7 +3,7 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
-## 2.6.1 — unreleased
+## 2.6.1 — 2026-11-18
 
 - **Screenshots** of Kiwi Apps on a real desktop: the app list, an app's
   details, Preferences and Catalogs. They are in `docs/images/`, shown in the

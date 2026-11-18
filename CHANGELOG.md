@@ -3,6 +3,13 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 2.8.1 — unreleased
+
+- **Kiwi Apps: the output can stay closed.** Preferences → Window → "Show
+  output while working", on by default. Switched off, an install or update
+  shows only the strip with the kiwi; the output opens by itself when a job
+  fails, and the header's output button opens it at any time.
+
 ## 2.8.0 — 2026-11-18
 
 - **Kiwi Apps: a kiwi that fills while a job runs.** Above the terminal

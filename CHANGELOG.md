@@ -3,6 +3,14 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 2.8.0 — unreleased
+
+- **Kiwi Apps: a kiwi that fills while a job runs.** Above the terminal
+  output, a strip names the running install, update or uninstall and counts
+  "2 of 5 apps done"; the kiwi slice next to it fills clockwise as the apps
+  finish, and goes round when there is nothing to count. The output itself
+  is unchanged. Refreshing keeps the thin bar at the top.
+
 ## 2.7.0 — 2026-11-18
 
 - **Kiwi Apps checks for updates by itself**, if you want it to:

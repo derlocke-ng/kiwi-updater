@@ -114,6 +114,10 @@ Clicks are queued: install several apps in a row and they run one after the
 other, in as few password prompts as possible. The list first shows what is
 installed, then fills in which apps have updates.
 
+While an install, update or uninstall runs, a strip above kiwi's output shows
+what is running and how many of its apps are done, next to a kiwi slice that
+fills as they finish. The output below it is `kiwi`'s own, unchanged.
+
 The gear button opens Preferences:
 
 - **Updates**: "Check while open" — Kiwi Apps checks for updates by itself

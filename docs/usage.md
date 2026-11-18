@@ -101,7 +101,8 @@ password. What root may install, and when it asks, is described in
 `kiwi-gui` shows the same apps as `kiwi list`. You can search, filter by
 status and category, and open an app for its details: icon, screenshots,
 README, dependencies, and the installer and update diff before they run. Pins
-can be set there too.
+can be set there too. An installed app with a desktop window (`gui` in its
+manifest's `COMPONENTS`) has an **Open** button there that starts it.
 
 ![Kiwi Apps: the app list, filtered by category, everything up to date](images/kiwi-apps.png)
 
@@ -115,6 +116,11 @@ installed, then fills in which apps have updates.
 
 The gear button opens Preferences:
 
+- **Updates**: "Check while open" — Kiwi Apps checks for updates by itself
+  every minute, 5, 15 or 30 minutes, or every hour while its window is open,
+  the same as pressing Refresh. It only shows what is new; you still press
+  Update. The default is to check only when you press Refresh. A check never
+  starts while an install or update is running.
 - **Packages**: what kiwi does when an app needs a package this system does
   not have (the `auto-deps` setting, see [Settings](#settings)). Kiwi Apps
   has no terminal to ask in, so "Ask first" shows the install command in the

@@ -3,6 +3,20 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 2.7.0 — unreleased
+
+- **Kiwi Apps checks for updates by itself**, if you want it to:
+  Preferences → Updates → "Check while open", every minute to every hour.
+  Off by default. It is the Refresh button on a timer: it shows new
+  releases, and you still press Update. It skips a turn while something is
+  running.
+- **Open**: an installed app with a desktop window (`gui` in its manifest's
+  `COMPONENTS`) gets an Open button in its details. The desktop entry is the
+  manifest's new `DESKTOP_ID`, or for Kiwi Network apps the
+  `eu.kiwinetwork.*` entry named after the app. Only entries in
+  `~/.local/share/applications` and `/usr/local/share/applications` are
+  opened. `kiwi info --porcelain` prints `desktop_id=`.
+
 ## 2.6.1 — 2026-11-18
 
 - **Screenshots** of Kiwi Apps on a real desktop: the app list, an app's

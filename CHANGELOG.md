@@ -3,7 +3,7 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
-## 2.8.0 — unreleased
+## 2.8.0 — 2026-11-18
 
 - **Kiwi Apps: a kiwi that fills while a job runs.** Above the terminal
   output, a strip names the running install, update or uninstall and counts

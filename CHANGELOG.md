@@ -3,6 +3,13 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 2.6.1 — unreleased
+
+- **Screenshots** of Kiwi Apps on a real desktop: the app list, an app's
+  details, Preferences and Catalogs. They are in `docs/images/`, shown in the
+  README and in "Using kiwi", and in Kiwi Apps' own details page for
+  kiwi-updater (`SCREENSHOTS=` in `kiwi.manifest`).
+
 ## 2.6.0 — 2026-11-18
 
 - **Kiwi Apps: Preferences, behind a gear**, as in kiwi-fox, kiwi-proxy and

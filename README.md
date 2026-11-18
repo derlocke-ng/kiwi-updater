@@ -15,6 +15,8 @@ background — itself included. No accounts, no store, no vendor.
   are installed by a root-owned copy of kiwi, only from sources root lists,
   and updated without a password only to releases signed by a key root pinned
 
+![Kiwi Apps: fourteen Kiwi Network apps as cards, all up to date](docs/images/kiwi-apps.png)
+
 ## Install
 
 ```bash

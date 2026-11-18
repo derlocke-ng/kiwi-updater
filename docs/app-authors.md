@@ -37,6 +37,7 @@ comments on their own line, never after a value.
 | `DEPENDS` | Commands your installer needs (see below). |
 | `ICON` | Repo-relative SVG or PNG, at most 1 MiB. |
 | `SCREENSHOTS` | Repo-relative PNG, JPEG or WebP files, at most 4 MiB and 4096 px a side each. |
+| `DESKTOP_ID` | The desktop entry Kiwi Apps' **Open** button starts, without `.desktop`, e.g. `org.example.MyTool`. Only for apps with `gui` in `COMPONENTS`, and only an entry your installer put in `~/.local/share/applications` or `/usr/local/share/applications`. Kiwi Network apps can leave it out: `eu.kiwinetwork.<Name>` is found by itself. |
 | `ABOUT` | Repo-relative file shown as the long description. Default `README.md`; the first 64 KiB are shown. |
 | `INSTALLER` | The installer, relative to the repository root. Default `install.sh`. Must be a regular file inside the repository (no `..`, no symlink). |
 

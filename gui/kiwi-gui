@@ -114,6 +114,22 @@ def conf_set(key, value):
     os.replace(GUI_CONF + ".tmp", GUI_CONF)
 
 
+# How often an open Kiwi Apps checks for updates by itself, in minutes; 0 is
+# never. A check asks every app's repository (`kiwi list --check`), which takes
+# seconds and costs each host a request, so the shortest interval is a minute.
+REFRESH_CHOICES = [(0, "Only when you press Refresh"), (1, "Every minute"),
+                   (5, "Every 5 minutes"), (15, "Every 15 minutes"),
+                   (30, "Every 30 minutes"), (60, "Every hour")]
+
+
+def refresh_minutes():
+    try:
+        m = int(conf_get("REFRESH_MINUTES", "0"))
+    except ValueError:
+        return 0
+    return m if m in dict(REFRESH_CHOICES) else 0
+
+
 def saved_geometry():
     """(width, height, maximized) from window.json, else the default."""
     try:
@@ -766,6 +782,44 @@ def parse_porcelain(text):
     return rows
 
 
+# Where a launcher may come from: the places kiwi apps install desktop entries
+# to, in the user scope and the system scope. A desktop entry named in a
+# catalog's manifest and lying anywhere else is not opened.
+LAUNCHER_DIRS = (os.path.join(GLib.get_user_data_dir(), "applications"),
+                 "/usr/local/share/applications")
+DESKTOP_ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*(\.[A-Za-z_][A-Za-z0-9_-]*)+$")
+
+
+def app_launcher(app, desktop_id=""):
+    """The desktop entry that opens an installed app, or None.
+
+    Only apps whose manifest lists the `gui` component have one: a command,
+    a daemon or a plugin is not something to open. The entry is the
+    manifest's DESKTOP_ID; without one, the Kiwi Network entry whose last
+    name part is the app's name without dashes (kiwi-fox ->
+    eu.kiwinetwork.KiwiFox). Kiwi Apps never offers to open itself."""
+    if not app.is_installed or "gui" not in app["comp"].split():
+        return None
+    if desktop_id:
+        if not DESKTOP_ID_RE.match(desktop_id):
+            return None
+        cands = [Gio.DesktopAppInfo.new(desktop_id + ".desktop")]
+    else:
+        want = app["name"].replace("-", "").lower()
+        cands = [i for i in Gio.AppInfo.get_all()
+                 if isinstance(i, Gio.DesktopAppInfo)
+                 and (i.get_id() or "").startswith("eu.kiwinetwork.")
+                 and (i.get_id() or "")[len("eu.kiwinetwork."):].lower()
+                 == want + ".desktop"]
+    for info in cands:
+        if info is None or info.get_id() == APP_ID + ".desktop":
+            continue
+        fn = os.path.realpath(info.get_filename() or "")
+        if any(fn.startswith(os.path.realpath(d) + os.sep) for d in LAUNCHER_DIRS):
+            return info
+    return None
+
+
 class App(GObject.Object):
     """One app, as the CLI described it."""
     __gtype_name__ = "KiwiApp"
@@ -977,6 +1031,11 @@ class DetailDialog(Adw.Dialog):
 
         tb = Adw.ToolbarView(content=scroller)
         header = Adw.HeaderBar()
+        # shown once the app's details say what opens it (_populate)
+        self.open_btn = Gtk.Button(label="Open", visible=False)
+        self.open_btn.connect("clicked", self._on_open)
+        header.pack_start(self.open_btn)
+        self._launcher = None
         self.action_btn = Gtk.Button()
         self.action_btn.add_css_class("suggested-action")
         self.action_btn.connect("clicked", self._on_action)
@@ -1037,6 +1096,18 @@ class DetailDialog(Adw.Dialog):
     def _run(self, verb):
         self.close()
         self.win.run_action(verb, [self.app["name"]])
+
+    def _on_open(self, *_):
+        info = self._launcher
+        if info is None:
+            return
+        try:
+            info.launch([], Gdk.Display.get_default().get_app_launch_context())
+        except GLib.Error as e:
+            self.win.toast("Could not open %s: %s" % (info.get_name(), e.message))
+            return
+        self.win.toast("Opening %s…" % info.get_name())
+        self.close()
 
     # ---- how this app tracks versions ------------------------------------
     def _version_group(self, info):
@@ -1143,6 +1214,10 @@ class DetailDialog(Adw.Dialog):
 
     def _populate(self, info):
         self.box.remove(self._placeholder)
+        self._launcher = app_launcher(self.app, info.get("desktop_id", ""))
+        if self._launcher is not None:
+            self.open_btn.set_tooltip_text("Open %s" % self._launcher.get_name())
+            self.open_btn.set_visible(True)
         rd = info.get("repo_dir", "")
 
         shots = [shot_file(rd, p) for p in info.get("screenshots", "").split()]
@@ -1475,9 +1550,34 @@ class PreferencesDialog(Adw.PreferencesDialog):
                                    icon_name=ui_icon("preferences-system-symbolic",
                                                      "preferences-system"))
         self.add(page)
+        self._build_updates(page)
         self._build_packages(page)
         self._build_icon(page)
         self._build_window(page)
+
+    # ── updates ───────────────────────────────────────────────────────────
+    def _build_updates(self, page):
+        grp = Adw.PreferencesGroup(
+            title="Updates",
+            description="The background timer checks every 6 hours either way")
+        page.add(grp)
+        row = Adw.ComboRow(
+            title="Check while open",
+            subtitle="new releases and catalog changes; you choose when to update",
+            model=Gtk.StringList.new([label for _m, label in REFRESH_CHOICES]))
+        mins = [m for m, _label in REFRESH_CHOICES]
+        row.set_selected(mins.index(refresh_minutes()))
+        row.connect("notify::selected",
+                    lambda r, _p: self._refresh_changed(mins[r.get_selected()]))
+        grp.add(row)
+
+    def _refresh_changed(self, minutes):
+        conf_set("REFRESH_MINUTES", minutes)
+        self.win.set_auto_refresh(minutes)
+        self.add_toast(Adw.Toast(
+            title="Kiwi Apps checks only when you press Refresh" if not minutes
+            else "Kiwi Apps checks for updates %s while it is open"
+            % dict(REFRESH_CHOICES)[minutes].lower()))
 
     # ── packages ──────────────────────────────────────────────────────────
     def _build_packages(self, page):
@@ -1642,6 +1742,7 @@ class Window(Adw.ApplicationWindow):
         self.acting = False      # a queued job is running
         self.refreshing = False  # list --check is running
         self._refresh_wanted = False
+        self._auto_refresh = None        # GLib source of the periodic check
         self._active_names = []  # the names the running action is about
         self._btns = {}          # app name -> its action buttons (both views)
         self._bound = None       # which view is bound to the model (U2)
@@ -1849,6 +1950,7 @@ class Window(Adw.ApplicationWindow):
             settings.connect("notify::gtk-icon-theme-name", lambda *_: _icon_cache.clear())
 
         self.refresh()
+        self.set_auto_refresh(refresh_minutes())
 
     def _bind_views(self):
         """Only the visible view holds widgets (U2). Both used to be bound to
@@ -2126,6 +2228,23 @@ class Window(Adw.ApplicationWindow):
 
     def _open_doctor(self):
         DoctorDialog(self).present(self)
+
+    def set_auto_refresh(self, minutes):
+        """Check for updates every `minutes` while the window is open (0: never).
+
+        The timer starts over from now, so a change never fires at once."""
+        if self._auto_refresh is not None:
+            GLib.source_remove(self._auto_refresh)
+            self._auto_refresh = None
+        if minutes > 0:
+            self._auto_refresh = GLib.timeout_add_seconds(minutes * 60, self._auto_tick)
+
+    def _auto_tick(self):
+        # Never in the middle of something: an install, a queue, a refresh
+        # already running. The next tick comes round soon enough.
+        if not (self.busy or self.acting or self.queue or self.refreshing):
+            self.refresh(check_only=True)
+        return True
 
     def refresh(self, check_only=False):
         """Re-read the listing — once, after whatever is queued has run.

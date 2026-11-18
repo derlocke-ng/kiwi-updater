@@ -10,7 +10,7 @@
 #   system — listed in /etc/kiwi-updater/apps.list,      repos in /var/lib
 set -euo pipefail
 
-KIWI_VERSION=2.6.1
+KIWI_VERSION=2.7.0
 
 # systemd system services start without $HOME (set -u would abort at the
 # path definitions below) — root's user-scope paths are never used anyway
@@ -2510,6 +2510,7 @@ cmd_info() { # [--porcelain] [--installer] name
         printf 'origin=%s\n'      "$(entry_origin "$url")"
         printf 'icon=%s\n'        "$(manifest_get "$dir" ICON "")"
         printf 'screenshots=%s\n' "$(manifest_get "$dir" SCREENSHOTS "")"
+        printf 'desktop_id=%s\n'  "$(manifest_get "$dir" DESKTOP_ID "")"
         printf 'about=%s\n'       "$(manifest_get "$dir" ABOUT README.md)"
         printf 'repo_dir=%s\n'    "$dir"
         printf 'url=%s\n'         "$url"

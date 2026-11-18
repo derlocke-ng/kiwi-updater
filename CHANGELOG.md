@@ -3,7 +3,7 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
-## 2.7.0 — unreleased
+## 2.7.0 — 2026-11-18
 
 - **Kiwi Apps checks for updates by itself**, if you want it to:
   Preferences → Updates → "Check while open", every minute to every hour.

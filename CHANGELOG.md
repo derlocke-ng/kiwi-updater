@@ -3,7 +3,7 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
-## 2.8.1 — unreleased
+## 2.8.1 — 2026-11-18
 
 - **Kiwi Apps: the output can stay closed.** Preferences → Window → "Show
   output while working", on by default. Switched off, an install or update

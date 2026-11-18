@@ -3,7 +3,7 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
-## 2.6.0 — unreleased
+## 2.6.0 — 2026-11-18
 
 - **Kiwi Apps: Preferences, behind a gear**, as in kiwi-fox, kiwi-proxy and
   kiwi-custodia.

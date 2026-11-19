@@ -3,6 +3,27 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
+## 2.9.0 — unreleased
+
+- **Kiwi Apps is built on the kit** from
+  [kiwi-template](https://github.com/derlocke-ng/kiwi-template), like
+  syncman 0.6: the same header bar, menu, About, Preferences and job strip
+  in every Kiwi app.
+  - The header is ordered as in the other apps: Catalogs at the left; at
+    the right the menu (☰), Preferences, Refresh, the output button and
+    Update All. Refresh moved from the left to the right.
+  - New menu (☰): "Check This Install" (it was a button at the left), Help
+    and About. Kiwi Apps had no About before.
+  - Choosing an app icon no longer shows a message for every change.
+  - The window opens at 1040 × 840 the first time, as the other apps do
+    (it was 980 × 800). A size you set is kept.
+- Kiwi Apps' choices moved from `~/.config/kiwi-updater/gui.conf` to
+  `settings.json` in the same folder. They are moved by the update; your
+  icon, the check interval and the output switch are kept.
+- Kiwi Apps is the Python package `kiwi_apps` in
+  `~/.local/share/kiwi-updater/lib/`; `kiwi-gui` starts it.
+- `kiwi` itself is unchanged apart from the version.
+
 ## 2.8.1 — 2026-11-18
 
 - **Kiwi Apps: the output can stay closed.** Preferences → Window → "Show

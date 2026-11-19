@@ -1,8 +1,22 @@
 # Development
 
 kiwi-updater is bash (`bin/kiwi`, `bin/kiwi-release`, `install.sh`,
-`get-kiwi.sh`, the root helper in `data/`) and one Python/GTK 4 program
-(`gui/kiwi-gui`).
+`get-kiwi.sh`, the root helper in `data/`) and one Python/GTK 4 program,
+Kiwi Apps.
+
+Kiwi Apps is the package `src/kiwi_apps`; `gui/kiwi-gui` only finds and
+starts it, from a checkout as well as from an install. It follows the layout
+of [kiwi-template](https://github.com/derlocke-ng/kiwi-template):
+
+| Folder | What |
+|---|---|
+| `src/kiwi_apps/ui/main.py` | the window, its dialogs, and Kiwi Apps' own groups in Preferences |
+| `src/kiwi_apps/migrate.py` | moves the settings of versions before 2.9.0 (`gui.conf`) to `settings.json` |
+| `src/kiwi_apps/kit/` | the kit: header bar, menu, About, Preferences, icon chooser, window size, job strip. The same folder in every Kiwi app. |
+
+Do not edit `src/kiwi_apps/kit`. It is changed in kiwi-template and copied
+from there with `tools/kit-update.sh`; `tools/kit-check.sh` fails when the
+copy differs from the kit it came from.
 
 ## Tests
 
@@ -31,9 +45,20 @@ Also run before a pull request:
 
 ```bash
 shellcheck -S warning bin/kiwi bin/kiwi-release install.sh get-kiwi.sh \
-  data/kiwi-system-update data/bash-completion/kiwi templates/install.sh tests/*.sh
-python3 -m py_compile gui/kiwi-gui
+  data/kiwi-system-update data/bash-completion/kiwi templates/install.sh tests/*.sh tools/*.sh
+bash tools/kit-check.sh
+python3 -m py_compile gui/kiwi-gui && python3 -m compileall -q src
+bash tests/gui-settings.sh
 bash tests/check-version.sh
+```
+
+`tests/gui-settings.sh` runs `kiwi-gui --apply-icon` in a temporary folder:
+a `gui.conf` from before 2.9.0 moves to `settings.json` and a chosen icon is
+drawn again. It needs Python 3 and no display, and is safe outside a
+container.
+
+```bash
+gui/kiwi-gui        # Kiwi Apps from the checkout
 ```
 
 ## CI

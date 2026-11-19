@@ -19,6 +19,9 @@ say_bad() { printf 'check-version: %s\n' "$*" >&2; rc=1; }
 [[ -n $bin ]] || say_bad "no KIWI_VERSION in bin/kiwi"
 [[ -n $man ]] || say_bad "no VERSION in kiwi.manifest"
 [[ $bin == "$man" ]] || say_bad "bin/kiwi says $bin, kiwi.manifest says $man"
+# Kiwi Apps shows its own copy in About
+gui="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/kiwi_apps/__init__.py | head -1)"
+[[ $gui == "$bin" ]] || say_bad "src/kiwi_apps/__init__.py says ${gui:-nothing}, bin/kiwi says $bin"
 
 # Only when HEAD itself is tagged: on a normal commit the next tag does not
 # exist yet, and demanding one would fail every ordinary push.
@@ -33,7 +36,7 @@ fi
 # kiwi's own paths noticed — it runs everything through `bash` or reinstalls
 # with `install -m755` — which is exactly why it needs checking here.
 for f in bin/kiwi bin/kiwi-release install.sh get-kiwi.sh gui/kiwi-gui templates/install.sh \
-         tests/check-version.sh tests/repro.sh; do
+         tests/check-version.sh tests/repro.sh tools/kit-check.sh tools/kit-update.sh; do
     mode="$(git ls-files -s -- "$f" | awk '{print $1}')"
     [[ $mode == 100755 ]] || say_bad "$f is tracked as ${mode:-<untracked>}, not 100755 — chmod 755 it and re-add"
 done

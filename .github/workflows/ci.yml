@@ -10,9 +10,16 @@ jobs:
         run: |
           shellcheck -S warning bin/kiwi bin/kiwi-release install.sh get-kiwi.sh \
             data/kiwi-system-update data/bash-completion/kiwi \
-            templates/install.sh tests/*.sh
-      - name: the GUI has to at least parse
-        run: python3 -m py_compile gui/kiwi-gui
+            templates/install.sh tests/*.sh tools/*.sh
+      - name: the kit is the unmodified copy from kiwi-template
+        run: bash tools/kit-check.sh
+      - name: Kiwi Apps parses, and imports with GTK 4 and libadwaita
+        run: |
+          python3 -m py_compile gui/kiwi-gui && python3 -m compileall -q src
+          sudo apt-get update -q && sudo apt-get install -y -q python3-gi gir1.2-adw-1 gir1.2-gdkpixbuf-2.0
+          PYTHONPATH=src python3 -c "import kiwi_apps.ui.main"
+      - name: Kiwi Apps' settings move out of gui.conf
+        run: bash tests/gui-settings.sh
       - name: release gate — version agrees, scripts executable in git
         run: bash tests/check-version.sh
 

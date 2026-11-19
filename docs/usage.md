@@ -139,12 +139,18 @@ The gear button opens Preferences:
   itself if the job fails. The output button in the header opens it at any
   time.
 
-These choices are in `~/.config/kiwi-updater/gui.conf` and `window.json`.
+These choices are in `~/.config/kiwi-updater/settings.json` and
+`window.json`. (`settings`, without `.json`, is kiwi's own file; see
+[Settings](#settings).) Versions before 2.9.0 kept them in `gui.conf`, which
+2.9.0 moves over.
 
 ![Preferences: Packages, Appearance (app icon and style) and Window](images/kiwi-apps-preferences.png)
 
-The Catalogs button in the header adds and removes catalogs, like
-`kiwi catalog add` and `remove` (see [Catalogs](catalogs.md)).
+The Catalogs button at the left of the header adds and removes catalogs,
+like `kiwi catalog add` and `remove` (see [Catalogs](catalogs.md)).
+
+The menu (☰) has "Check This Install", which runs `kiwi doctor` and shows
+what it found, then Help and About.
 
 ![The Catalogs dialog: a field for a catalog's git URL and the registered kiwi-catalog](images/kiwi-apps-catalogs.png)
 

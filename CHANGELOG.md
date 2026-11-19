@@ -3,7 +3,7 @@
 Earlier entries are the release commit subjects, which is where this project's
 history actually lives.
 
-## 2.9.0 — unreleased
+## 2.9.0 — 2026-11-19
 
 - **Kiwi Apps is built on the kit** from
   [kiwi-template](https://github.com/derlocke-ng/kiwi-template), like
